@@ -335,6 +335,7 @@ function dbText(value, muted = false) {
 }
 
 let mixerState = null;
+const mixerEditing = new Set();
 
 function renderMixer(data) {
   mixerState = data;
@@ -342,8 +343,10 @@ function renderMixer(data) {
     const item = data[channel] || {};
     const slider = $(`#mixer-${channel}`);
     const db = Math.max(-60, Math.min(0, Number.isFinite(item.db) ? item.db : -60));
-    slider.value = db;
-    $(`#mixer-${channel}-db`).textContent = dbText(db, item.muted);
+    if (!mixerEditing.has(channel)) {
+      slider.value = db;
+      $(`#mixer-${channel}-db`).textContent = dbText(db, item.muted);
+    }
     const strip = document.querySelector(`.mixer-strip[data-channel="${channel}"]`);
     strip.classList.toggle("muted", Boolean(item.muted));
     const button = strip.querySelector(".mixer-mute");
@@ -361,16 +364,29 @@ async function loadMixer() {
 
 ["music", "alert", "master"].forEach((channel) => {
   const slider = $(`#mixer-${channel}`);
+  slider.addEventListener("pointerdown", () => mixerEditing.add(channel));
   slider.addEventListener("input", () => {
+    mixerEditing.add(channel);
     $(`#mixer-${channel}-db`).textContent = dbText(Number(slider.value));
   });
   slider.addEventListener("change", async () => {
+    const requestedDb = Number(slider.value);
     try {
-      renderMixer(await api("/api/audio/mixer", {
+      const updated = await api("/api/audio/mixer", {
         method: "POST",
-        body: JSON.stringify({ target: channel, db: Number(slider.value), muted: false }),
-      }));
-    } catch (error) { toast(error.message, true); await loadMixer(); }
+        body: JSON.stringify({ target: channel, db: requestedDb, muted: false }),
+      });
+      mixerEditing.delete(channel);
+      renderMixer(updated);
+    } catch (error) {
+      mixerEditing.delete(channel);
+      toast(error.message, true);
+      await loadMixer();
+    }
+  });
+  slider.addEventListener("pointercancel", () => mixerEditing.delete(channel));
+  slider.addEventListener("blur", () => {
+    if (!slider.matches(":active")) mixerEditing.delete(channel);
   });
 });
 

@@ -482,47 +482,89 @@ impl WebController {
         let percent_re = Regex::new(r"Playback[^\n]*\[(\d+)%\]")?;
         let db_re = Regex::new(r"\[(-?\d+(?:\.\d+)?)dB\]")?;
         let limits_re = Regex::new(r"Limits:\s+Playback\s+(-?\d+)\s+-\s+(-?\d+)")?;
+        let db_scale_re = Regex::new(
+            r"dBscale-min=(-?\d+(?:\.\d+)?)dB,step=(-?\d+(?:\.\d+)?)dB",
+        )?;
+        let db_minmax_re = Regex::new(
+            r"dBminmax-min=(-?\d+(?:\.\d+)?)dB,max=(-?\d+(?:\.\d+)?)dB",
+        )?;
         let mut result = Vec::new();
 
         for capture in card_re.captures_iter(&cards_text) {
             let card = capture.get(1).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
-            let card_name = capture.get(2).map(|m| m.as_str()).unwrap_or("");
+            let card_name = capture.get(2).map(|m| m.as_str().trim()).unwrap_or("");
             let card_text = card.to_string();
-            let controls = self
-                .run("amixer", &["-c", &card_text, "scontrols"], false, 8)
-                .await?;
-            if controls.code != 0 {
-                continue;
-            }
+            let controls = self.run("amixer", &["-c", &card_text, "scontrols"], false, 8).await?;
+            let contents = self.run("amixer", &["-c", &card_text, "contents"], false, 8).await?;
+            if controls.code != 0 { continue; }
+
             for control_capture in control_re.captures_iter(&controls.stdout) {
                 let control = control_capture.get(1).map(|m| m.as_str()).unwrap_or("");
-                let details = self
-                    .run("amixer", &["-c", &card_text, "sget", control], false, 8)
-                    .await?;
-                if details.code != 0 || !details.stdout.contains("Playback") {
-                    continue;
-                }
-                let values = percent_re
-                    .captures_iter(&details.stdout)
+                let details = self.run("amixer", &["-c", &card_text, "sget", control], false, 8).await?;
+                if details.code != 0 || !details.stdout.contains("Playback") { continue; }
+
+                let values = percent_re.captures_iter(&details.stdout)
                     .filter_map(|c| c.get(1))
                     .filter_map(|m| m.as_str().parse::<f64>().ok())
                     .collect::<Vec<_>>();
-                if values.is_empty() {
-                    continue;
-                }
-                let db_values = db_re
-                    .captures_iter(&details.stdout)
+                if values.is_empty() { continue; }
+                let percent = values.iter().sum::<f64>() / values.len() as f64;
+                let actual_db_values = db_re.captures_iter(&details.stdout)
                     .filter_map(|c| c.get(1))
                     .filter_map(|m| m.as_str().parse::<f64>().ok())
                     .collect::<Vec<_>>();
+                let actual_db = (!actual_db_values.is_empty()).then(|| {
+                    actual_db_values.iter().sum::<f64>() / actual_db_values.len() as f64
+                });
+
+                let volume_marker = format!("name='{control} Playback Volume'");
+                let content_block = contents.stdout.split("\nnumid=")
+                    .find(|block| block.contains(&volume_marker))
+                    .unwrap_or("");
+                let (db_min, db_max) = if let Some(c) = db_minmax_re.captures(content_block) {
+                    (
+                        c.get(1).and_then(|m| m.as_str().parse::<f64>().ok()),
+                        c.get(2).and_then(|m| m.as_str().parse::<f64>().ok()),
+                    )
+                } else if let Some(c) = db_scale_re.captures(content_block) {
+                    let min = c.get(1).and_then(|m| m.as_str().parse::<f64>().ok());
+                    let step = c.get(2).and_then(|m| m.as_str().parse::<f64>().ok());
+                    let limits = limits_re.captures(&details.stdout);
+                    let raw_min = limits.as_ref().and_then(|v| v.get(1)).and_then(|m| m.as_str().parse::<f64>().ok());
+                    let raw_max = limits.as_ref().and_then(|v| v.get(2)).and_then(|m| m.as_str().parse::<f64>().ok());
+                    let max = match (min, step, raw_min, raw_max) {
+                        (Some(min), Some(step), Some(raw_min), Some(raw_max)) => Some(min + (raw_max - raw_min) * step),
+                        _ => None,
+                    };
+                    (min, max)
+                } else {
+                    (None, None)
+                };
+                // UI Master is normalized attenuation relative to safe unity.
+                // Controls crossing 0 dB are capped at physical 0 dB; positive-only
+                // USB controls use their own maximum as normalized 0 dB.
+                let db_reference = match (db_min, db_max) {
+                    (Some(min), Some(max)) if min <= 0.0 && max >= 0.0 => Some(0.0),
+                    (_, Some(max)) => Some(max),
+                    _ => None,
+                };
+                let normalized_db = match (actual_db, db_reference) {
+                    (Some(actual), Some(reference)) => (actual - reference).clamp(-60.0, 0.0),
+                    _ if percent > 0.0 => (20.0 * (percent / 100.0).log10()).clamp(-60.0, 0.0),
+                    _ => -60.0,
+                };
                 let limits = limits_re.captures(&details.stdout);
                 result.push(json!({
                     "card": card,
                     "card_name": card_name,
                     "control": control,
-                    "volume": (values.iter().sum::<f64>() / values.len() as f64).round(),
+                    "volume": percent.round(),
                     "muted": details.stdout.contains("[off]"),
-                    "db": if db_values.is_empty() { Value::Null } else { json!(((db_values.iter().sum::<f64>() / db_values.len() as f64) * 100.0).round() / 100.0) },
+                    "db": (normalized_db * 100.0).round() / 100.0,
+                    "hardware_db": actual_db,
+                    "db_min": db_min,
+                    "db_max": db_max,
+                    "db_reference": db_reference,
                     "raw_min": limits.as_ref().and_then(|c| c.get(1)).and_then(|m| m.as_str().parse::<i64>().ok()),
                     "raw_max": limits.as_ref().and_then(|c| c.get(2)).and_then(|m| m.as_str().parse::<i64>().ok()),
                 }));
@@ -569,9 +611,15 @@ impl WebController {
             let control = mixer.get("control").and_then(Value::as_str).ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
             if muted == Some(true) || db <= -60.0 {
                 self.run("amixer", &["-c", &card, "sset", control, "mute"], true, 8).await?;
-            } else {
-                let value = format!("{db:.1}dB");
+            } else if let Some(reference) = mixer.get("db_reference").and_then(Value::as_f64) {
+                let minimum = mixer.get("db_min").and_then(Value::as_f64).unwrap_or(reference - 60.0);
+                let hardware_db = (reference + db).max(minimum);
+                let value = format!("{hardware_db:.2}dB");
                 self.run("amixer", &["-c", &card, "sset", control, "--", &value, "unmute"], true, 8).await?;
+            } else {
+                let percent = (10.0_f64.powf(db / 20.0) * 100.0).clamp(1.0, 100.0);
+                let value = format!("{percent:.0}%");
+                self.run("amixer", &["-c", &card, "sset", control, &value, "unmute"], true, 8).await?;
             }
         } else {
             let sink = match target {
