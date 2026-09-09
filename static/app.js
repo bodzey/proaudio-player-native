@@ -407,6 +407,30 @@ $("#audio-settings").addEventListener("submit", async (event) => {
   }
 });
 
+$("#stream-player").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  const result = $("#stream-result");
+  if (button) button.disabled = true;
+  result.textContent = "Підключення…";
+  result.className = "settings-result";
+  try {
+    await api("/api/streams/play", {
+      method: "POST",
+      body: JSON.stringify({ url: $("#stream-url").value.trim() }),
+    });
+    result.textContent = "Потік запущено";
+    result.className = "settings-result success";
+    toast("Мережевий потік запущено");
+    setTimeout(refreshStatus, 250);
+  } catch (error) {
+    result.textContent = error.message;
+    result.className = "settings-result error";
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
 $("#alerts-settings").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.submitter;
