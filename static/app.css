@@ -141,3 +141,48 @@ footer { display: flex; justify-content: space-between; padding: 23px 2px 35px; 
 .mixer-master { border-color:rgba(98,227,154,.35); }
 .mixer-meter { display:none; }
 @media(max-width:600px){.mixer{gap:8px;padding:14px 8px}.mixer-strip{min-width:0;width:33.333%;padding:14px 4px}.mixer-strip small{font-size:.65rem}.mixer-fader{width:150px!important;margin:61px -61px}}
+
+
+/* Application shell and navigation */
+header { position: sticky; top: 0; z-index: 30; padding: 18px 0 14px; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(16px); }
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.install-button { padding: 9px 13px; border: 1px solid var(--accent); border-radius: 999px; background: transparent; color: var(--accent); font-weight: 750; }
+.app-nav { position: sticky; top: 91px; z-index: 29; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 6px; max-width: 540px; margin: 0 auto 20px; padding: 5px; border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(16px); }
+.nav-item { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; padding: 8px 12px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font-weight: 750; }
+.nav-item:hover { color: var(--text); background: var(--panel-2); }
+.nav-item.active { background: var(--accent); color: #07120c; }
+.nav-icon { font-size: .82rem; font-weight: 900; }
+.hidden-page { display: none !important; }
+.page-panel.page-enter { animation: page-in .18s ease-out; }
+@keyframes page-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+
+.now-playing { min-height: 330px; }
+.now-playing #track-title { overflow-wrap: anywhere; }
+.transport button { min-width: 48px; min-height: 48px; }
+.volume-card input[type="range"] { min-height: 34px; }
+button, input, select { touch-action: manipulation; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 52%, transparent); outline-offset: 2px; }
+
+@media (min-width: 901px) {
+  .page-panel[data-page="mixer"], .page-panel[data-page="alerts"] { grid-column: 1 / -1; }
+}
+
+@media (max-width: 700px) {
+  .shell { padding-bottom: 86px; }
+  header { top: 0; padding-top: max(12px, env(safe-area-inset-top)); }
+  header h1 { font-size: 1.55rem; }
+  .header-actions { gap: 6px; }
+  .install-button { padding: 8px 10px; font-size: .76rem; }
+  .app-nav { position: fixed; z-index: 50; top: auto; right: 10px; bottom: max(10px, env(safe-area-inset-bottom)); left: 10px; max-width: none; margin: 0; box-shadow: 0 14px 42px rgba(0,0,0,.45); }
+  .nav-item { flex-direction: column; gap: 2px; min-height: 54px; padding: 6px; font-size: .72rem; }
+  .nav-icon { font-size: 1rem; }
+  .grid { display: block; }
+  .page-panel { margin-bottom: 12px; }
+  .card { border-radius: 16px; padding: 18px; }
+  .now-playing { min-height: 300px; }
+  .settings-form { grid-template-columns: 1fr; }
+  .field-wide, .checkbox-field { grid-column: 1; }
+  .settings-actions { flex-wrap: wrap; }
+  .settings-result { width: 100%; margin-bottom: 4px; }
+  footer { flex-direction: column; align-items: flex-start; gap: 4px; }
+}

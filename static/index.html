@@ -3,8 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101319">
+  <meta name="theme-color" content="#0b0e13">
+  <meta name="description" content="Керування мережевим аудіоплеєром ProAudio Player">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ProAudio">
   <title>ProAudio Player</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icon.svg">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -14,8 +22,23 @@
         <p class="eyebrow">NETWORK AUDIO SYSTEM</p>
         <h1>ProAudio Player</h1>
       </div>
-      <div id="connection" class="badge neutral"><span></span>Підключення…</div>
+      <div class="header-actions">
+        <button id="pwa-install" class="install-button hidden" type="button">Встановити</button>
+        <div id="connection" class="badge neutral"><span></span>Підключення…</div>
+      </div>
     </header>
+
+    <nav class="app-nav" aria-label="Основні розділи">
+      <button class="nav-item active" type="button" data-page-target="player" aria-current="page">
+        <span class="nav-icon">▶</span><span>Плеєр</span>
+      </button>
+      <button class="nav-item" type="button" data-page-target="mixer">
+        <span class="nav-icon">≡</span><span>Мікшер</span>
+      </button>
+      <button class="nav-item" type="button" data-page-target="alerts">
+        <span class="nav-icon">!</span><span>Оповіщення</span>
+      </button>
+    </nav>
 
     <main>
       <section id="priority" class="priority hidden" aria-live="assertive">
@@ -27,7 +50,7 @@
       </section>
 
       <div class="grid">
-        <section class="card now-playing">
+        <section class="card now-playing page-panel" data-page="player">
           <div class="section-heading">
             <div>
               <p class="eyebrow">ЗАРАЗ ГРАЄ</p>
@@ -49,7 +72,7 @@
           <p class="transport-note">Кнопки керують локальним MPD-плеєром.</p>
         </section>
 
-        <section class="card volume-card">
+        <section class="card volume-card page-panel" data-page="player">
           <div class="section-heading">
             <div>
               <p class="eyebrow">МУЗИЧНА ШИНА</p>
@@ -62,7 +85,7 @@
           <p class="hint">Рівень джерел музики перед підмішуванням оповіщень.</p>
         </section>
 
-        <section class="card library-card">
+        <section class="card library-card page-panel" data-page="player">
           <div class="section-heading">
             <div>
               <p class="eyebrow">ЛОКАЛЬНА МУЗИКА</p>
@@ -74,7 +97,7 @@
           <div id="library" class="item-list"><p class="empty">Завантаження…</p></div>
         </section>
 
-        <section class="card playlists-card">
+        <section class="card playlists-card page-panel" data-page="player">
           <div class="section-heading">
             <div>
               <p class="eyebrow">MPD</p>
@@ -84,7 +107,7 @@
           <div id="playlists" class="item-list"><p class="empty">Завантаження…</p></div>
         </section>
 
-        <section class="card stream-card settings-card">
+        <section class="card stream-card settings-card page-panel" data-page="player">
           <div class="section-heading">
             <div>
               <p class="eyebrow">МЕРЕЖЕВИЙ ПОТІК</p>
@@ -105,7 +128,7 @@
           </form>
         </section>
 
-        <section class="card queue-card">
+        <section class="card queue-card page-panel" data-page="player">
           <div class="section-heading">
             <div>
               <p class="eyebrow">ЛОКАЛЬНИЙ ПЛЕЄР</p>
@@ -116,7 +139,7 @@
           <div id="queue" class="queue-list"><p class="empty">Завантаження…</p></div>
         </section>
 
-        <section class="card settings-card">
+        <section class="card settings-card page-panel hidden-page" data-page="mixer">
           <div class="section-heading">
             <div>
               <p class="eyebrow">DEV AUDIO CONTROL</p>
@@ -207,7 +230,7 @@
           </form>
         </section>
 
-        <section class="card settings-card">
+        <section class="card settings-card page-panel hidden-page" data-page="alerts">
           <div class="section-heading">
             <div>
               <p class="eyebrow">ОПОВІЩЕННЯ</p>
@@ -268,7 +291,7 @@
 
     <footer>
       <span id="last-update">—</span>
-      <span>ProAudio Player Web</span>
+      <span>ProAudio Player · <span id="realtime-state">Підключення до live-каналу…</span></span>
     </footer>
   </div>
   <div id="toast" class="toast" role="status"></div>

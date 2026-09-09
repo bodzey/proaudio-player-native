@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
@@ -7,6 +8,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -14,7 +16,10 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
+use tokio::time::sleep;
 use tracing::{debug, info};
+use futures_util::stream;
 use url::Url;
 
 use crate::alerts::SharedRuntimeState;
@@ -30,6 +35,9 @@ use crate::source_arbiter::SharedSourceState;
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_CSS: &str = include_str!("../static/app.css");
 const APP_JS: &str = include_str!("../static/app.js");
+const MANIFEST_JSON: &str = include_str!("../static/manifest.webmanifest");
+const SERVICE_WORKER_JS: &str = include_str!("../static/sw.js");
+const APP_ICON_SVG: &str = include_str!("../static/icon.svg");
 
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
@@ -133,15 +141,18 @@ pub struct WebController {
     pub audio: AudioEngine,
     pub state: SharedRuntimeState,
     pub source_state: SharedSourceState,
+    events: broadcast::Sender<String>,
 }
 
 impl WebController {
     pub fn new(config: Arc<AppConfig>, state: SharedRuntimeState, source_state: SharedSourceState) -> Self {
+        let (events, _) = broadcast::channel(8);
         Self {
             audio: AudioEngine::new(config.clone()),
             config,
             state,
             source_state,
+            events,
         }
     }
 
@@ -1037,6 +1048,35 @@ fn apply_provider_body(base: ProviderConfig, body: &ProviderBody) -> Result<Prov
 async fn index() -> Html<&'static str> { Html(INDEX_HTML) }
 async fn css() -> Response { content_response("text/css; charset=utf-8", APP_CSS) }
 async fn js() -> Response { content_response("application/javascript; charset=utf-8", APP_JS) }
+async fn manifest() -> Response { content_response("application/manifest+json; charset=utf-8", MANIFEST_JSON) }
+async fn service_worker() -> Response {
+    let mut response = content_response("application/javascript; charset=utf-8", SERVICE_WORKER_JS);
+    response.headers_mut().insert(
+        header::HeaderName::from_static("service-worker-allowed"),
+        HeaderValue::from_static("/"),
+    );
+    response
+}
+async fn icon() -> Response { content_response("image/svg+xml; charset=utf-8", APP_ICON_SVG) }
+
+async fn events(
+    State(controller): State<WebController>,
+) -> Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>>> {
+    let receiver = controller.events.subscribe();
+    let updates = stream::unfold(receiver, |mut receiver| async move {
+        loop {
+            match receiver.recv().await {
+                Ok(payload) => {
+                    return Some((Ok(Event::default().event("status").data(payload)), receiver));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(updates)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+}
 
 async fn status(State(controller): State<WebController>) -> ApiResult {
     controller.status().await.map(Json).map_err(map_internal)
@@ -1307,7 +1347,12 @@ pub fn router(controller: WebController) -> Router {
         .route("/", get(index))
         .route("/static/app.css", get(css))
         .route("/static/app.js", get(js))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/sw.js", get(service_worker))
+        .route("/static/icon.svg", get(icon))
+        .route("/favicon.ico", get(icon))
         .route("/api/status", get(status))
+        .route("/api/events", get(events))
         .route("/api/volume", post(set_volume))
         .route("/api/mute", post(set_mute))
         .route("/api/audio/level", post(set_audio_level))
@@ -1338,6 +1383,21 @@ pub async fn serve(controller: WebController) -> Result<()> {
     let address = format!("{host}:{port}");
     let listener = TcpListener::bind(&address).await?;
     info!(%address, "Native Web UI started");
+
+    // One shared status producer serves every browser. This avoids each client
+    // spawning its own pactl/mpc/busctl polling workload.
+    let event_controller = controller.clone();
+    tokio::spawn(async move {
+        loop {
+            if event_controller.events.receiver_count() > 0 {
+                if let Ok(status) = event_controller.status().await {
+                    let _ = event_controller.events.send(status.to_string());
+                }
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    });
+
     let ssdp_controller = controller.clone();
     tokio::spawn(async move {
         if let Err(err) = fourstream::run_ssdp(ssdp_controller, port).await {

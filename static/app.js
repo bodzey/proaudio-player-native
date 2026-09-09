@@ -5,6 +5,9 @@ let library = [];
 let queue = [];
 let volumeTimer = null;
 let toastTimer = null;
+let fallbackStatusTimer = null;
+let deferredInstallPrompt = null;
+
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -556,12 +559,104 @@ $("#clear-queue").addEventListener("click", async () => {
   } catch (error) { toast(error.message, true); }
 });
 
+function showPage(page, persist = true) {
+  document.querySelectorAll("[data-page]").forEach((panel) => {
+    const active = panel.dataset.page === page;
+    panel.classList.toggle("hidden-page", !active);
+    panel.classList.toggle("page-enter", active);
+  });
+  document.querySelectorAll("[data-page-target]").forEach((button) => {
+    const active = button.dataset.pageTarget === page;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  if (persist) localStorage.setItem("proaudio-page", page);
+}
+
+document.querySelectorAll("[data-page-target]").forEach((button) => {
+  button.addEventListener("click", () => showPage(button.dataset.pageTarget));
+});
+showPage(localStorage.getItem("proaudio-page") || "player", false);
+
+function startStatusFallback() {
+  if (!fallbackStatusTimer) {
+    fallbackStatusTimer = setInterval(refreshStatus, 5000);
+  }
+}
+
+function stopStatusFallback() {
+  if (fallbackStatusTimer) {
+    clearInterval(fallbackStatusTimer);
+    fallbackStatusTimer = null;
+  }
+}
+
+function connectRealtime() {
+  if (!("EventSource" in window)) {
+    $("#realtime-state").textContent = "резервне оновлення";
+    startStatusFallback();
+    return;
+  }
+  const events = new EventSource("/api/events");
+  events.addEventListener("status", (event) => {
+    try {
+      renderStatus(JSON.parse(event.data));
+      $("#realtime-state").textContent = "live";
+      stopStatusFallback();
+    } catch (_) {
+      startStatusFallback();
+    }
+  });
+  events.onopen = () => {
+    $("#realtime-state").textContent = "live";
+    stopStatusFallback();
+  };
+  events.onerror = () => {
+    $("#realtime-state").textContent = "перепідключення…";
+    startStatusFallback();
+  };
+}
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  $("#pwa-install").classList.remove("hidden");
+});
+
+$("#pwa-install").addEventListener("click", async () => {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    $("#pwa-install").classList.add("hidden");
+    return;
+  }
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  toast(ios
+    ? "На iPhone: Поділитися → На початковий екран"
+    : "Для автоматичного встановлення відкрийте плеєр через довірений HTTPS");
+});
+
+window.addEventListener("appinstalled", () => {
+  $("#pwa-install").classList.add("hidden");
+  toast("ProAudio Player встановлено");
+});
+
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+if (/iphone|ipad|ipod/i.test(navigator.userAgent)
+    && !window.matchMedia("(display-mode: standalone)").matches) {
+  $("#pwa-install").classList.remove("hidden");
+}
+
 refreshStatus();
+connectRealtime();
 loadLibrary();
 loadQueue();
 loadAlertSettings();
 loadAudioSettings();
 loadAudioOutputs();
 loadMixer();
-setInterval(refreshStatus, 3000);
 setInterval(loadAudioOutputs, 15000);
