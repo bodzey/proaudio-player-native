@@ -868,7 +868,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
- "futures-util",
+ "futures-core",
  "hex",
  "regex",
  "reqwest",

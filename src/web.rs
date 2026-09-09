@@ -1,6 +1,8 @@
 use std::convert::Infallible;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,10 +18,9 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
 use tracing::{debug, info};
-use futures_util::stream;
 use url::Url;
 
 use crate::alerts::SharedRuntimeState;
@@ -47,6 +48,18 @@ const AUDIO_BUS_STATE_FILE: &str = "/run/proaudio-player/proaudio-player-bus-mod
 
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult = std::result::Result<Json<Value>, ApiError>;
+
+struct EventStream {
+    receiver: mpsc::Receiver<std::result::Result<Event, Infallible>>,
+}
+
+impl futures_core::Stream for EventStream {
+    type Item = std::result::Result<Event, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        self.receiver.poll_recv(context)
+    }
+}
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> ApiError {
     (status, Json(json!({ "error": message.into() })))
@@ -1059,22 +1072,23 @@ async fn service_worker() -> Response {
 }
 async fn icon() -> Response { content_response("image/svg+xml; charset=utf-8", APP_ICON_SVG) }
 
-async fn events(
-    State(controller): State<WebController>,
-) -> Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>>> {
-    let receiver = controller.events.subscribe();
-    let updates = stream::unfold(receiver, |mut receiver| async move {
+async fn events(State(controller): State<WebController>) -> Sse<EventStream> {
+    let mut receiver = controller.events.subscribe();
+    let (sender, stream) = mpsc::channel(4);
+    tokio::spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(payload) => {
-                    return Some((Ok(Event::default().event("status").data(payload)), receiver));
+                    if sender.send(Ok(Event::default().event("status").data(payload))).await.is_err() {
+                        break;
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return None,
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
-    Sse::new(updates)
+    Sse::new(EventStream { receiver: stream })
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
 }
 
