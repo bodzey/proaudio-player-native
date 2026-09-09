@@ -156,19 +156,16 @@ impl SourceArbiter {
         {
             return self.winner.clone();
         }
-        if !self.initialized && !grouped.is_empty() {
-            return grouped
-                .iter()
-                .max_by_key(|(_, items)| {
-                    items
-                        .iter()
-                        .filter_map(|v| v.get("index").and_then(Value::as_i64))
-                        .max()
-                        .unwrap_or(-1)
-                })
-                .map(|(k, _)| k.clone());
-        }
-        None
+        grouped
+            .iter()
+            .max_by_key(|(_, items)| {
+                items
+                    .iter()
+                    .filter_map(|v| v.get("index").and_then(Value::as_i64))
+                    .max()
+                    .unwrap_or(-1)
+            })
+            .map(|(key, _)| key.clone())
     }
 
     async fn stop_source(&self, key: &str) -> Result<()> {
