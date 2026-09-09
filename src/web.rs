@@ -35,6 +35,7 @@ const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const PLAYER_ACTIONS: &[&str] = &["play", "pause", "stop", "next", "prev"];
 const AUDIO_OUTPUT_FILE: &str = "/var/lib/proaudio-player-alert/audio-output.env";
+const AUDIO_BUS_STATE_FILE: &str = "/run/proaudio-player/proaudio-player-bus-modules";
 
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult = std::result::Result<Json<Value>, ApiError>;
@@ -376,6 +377,24 @@ impl WebController {
         if candidates.is_empty() {
             bail!("Фізичний аудіовихід не знайдено");
         }
+
+        // The bus state is authoritative: it identifies the sink that actually
+        // receives both loopbacks. Do not guess from USB priority after hotplug.
+        if let Ok(state) = fs::read_to_string(AUDIO_BUS_STATE_FILE) {
+            if let Some(active) = state.lines()
+                .find_map(|line| line.strip_prefix("PHYSICAL="))
+                .map(str::trim)
+            {
+                if let Some(position) = candidates.iter().position(|name| name == active) {
+                    return Ok(candidates.remove(position));
+                }
+            }
+        }
+        if let Some(configured) = Self::configured_output() {
+            if let Some(position) = candidates.iter().position(|name| name == &configured) {
+                return Ok(candidates.remove(position));
+            }
+        }
         if let Some(position) = candidates.iter().position(|name| name.starts_with("alsa_output.usb-")) {
             return Ok(candidates.remove(position));
         }
@@ -501,9 +520,14 @@ impl WebController {
         ["Master", "Headphone", "PCM", "Speaker"].iter()
             .find_map(|preferred| candidates.iter().find(|item| item.get("control").and_then(Value::as_str) == Some(*preferred)).copied())
             .or_else(|| candidates.first().copied())
-            .or_else(|| mixers.first())
             .cloned()
-            .ok_or_else(|| anyhow!("Апаратний ALSA-регулятор не знайдено"))
+            .ok_or_else(|| {
+                if let Some(card) = selected_card {
+                    anyhow!("Вибраний ALSA-пристрій card {card} не має апаратного регулятора гучності")
+                } else {
+                    anyhow!("Апаратний ALSA-регулятор не знайдено")
+                }
+            })
     }
 
     pub async fn mixer_state(&self) -> Result<Value> {

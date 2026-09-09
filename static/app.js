@@ -363,6 +363,39 @@ document.querySelectorAll("[data-mixer-mute]").forEach((button) => {
   });
 });
 
+async function loadAudioOutputs() {
+  const select = $("#audio-output");
+  const status = $("#audio-output-status");
+  try {
+    const items = (await api("/api/audio/outputs")).items || [];
+    select.innerHTML = "";
+    if (!items.length) {
+      select.append(new Option("Фізичні аудіовиходи не знайдено", ""));
+      select.disabled = true;
+      status.textContent = "PipeWire не надав доступних фізичних виходів.";
+      return;
+    }
+    items.forEach((item) => {
+      const label = `${item.name}${item.state ? ` · ${item.state}` : ""}`;
+      const option = new Option(label, item.id, false, Boolean(item.selected));
+      select.append(option);
+    });
+    if (!items.some((item) => item.selected)) {
+      select.selectedIndex = 0;
+    }
+    select.disabled = Boolean(state?.priority?.blocking ?? state?.priority?.active);
+    const selected = items.find((item) => item.selected) || items[select.selectedIndex];
+    status.textContent = selected
+      ? `Активний вихід: ${selected.name}`
+      : "Оберіть один фізичний аудіовихід.";
+  } catch (error) {
+    select.innerHTML = "";
+    select.append(new Option("Помилка пошуку аудіовиходів", ""));
+    select.disabled = true;
+    status.textContent = error.message;
+  }
+}
+
 $("#audio-output").addEventListener("change", async (event) => {
   const id = event.target.value;
   if (!id) return;
