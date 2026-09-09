@@ -1,6 +1,6 @@
 use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
@@ -50,8 +50,6 @@ pub struct StateStore { path: PathBuf }
 
 impl StateStore {
     pub fn new(path: impl Into<PathBuf>) -> Self { Self { path: path.into() } }
-    pub fn path(&self) -> &Path { &self.path }
-
     pub fn load(&self) -> RuntimeState {
         let Ok(text) = fs::read_to_string(&self.path) else { return RuntimeState::default(); };
         let Ok(state) = serde_json::from_str::<RuntimeState>(&text) else { return RuntimeState::default(); };
