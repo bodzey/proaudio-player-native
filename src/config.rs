@@ -33,6 +33,9 @@ fn default_duck_fade() -> f64 { 1.0 }
 fn default_restore_fade() -> f64 { 3.0 }
 fn default_volume() -> f64 { 100.0 }
 fn default_alert_repeat_minutes() -> u64 { 0 }
+fn default_sample_rate_mode() -> SampleRateMode { SampleRateMode::Fixed }
+fn default_sample_rate() -> u32 { 48_000 }
+fn default_allowed_sample_rates() -> Vec<u32> { vec![44_100, 48_000] }
 fn default_false() -> bool { false }
 fn default_timezone() -> String { "Europe/Kyiv".into() }
 fn default_silence_time() -> String { "08:59:50".into() }
@@ -104,6 +107,14 @@ impl ProviderConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleRateMode {
+    Fixed,
+    Adaptive,
+    Native,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
@@ -123,6 +134,12 @@ pub struct AudioConfig {
     pub default_restore_volume_percent: f64,
     #[serde(default = "default_alert_repeat_minutes")]
     pub alert_repeat_interval_minutes: u64,
+    #[serde(default = "default_sample_rate_mode")]
+    pub sample_rate_mode: SampleRateMode,
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
+    #[serde(default = "default_allowed_sample_rates")]
+    pub allowed_sample_rates: Vec<u32>,
     #[serde(default = "default_false")]
     pub duck_only_during_announcement: bool,
     #[serde(default = "default_start_file")]
@@ -143,6 +160,8 @@ impl Default for AudioConfig {
             restore_fade_seconds: default_restore_fade(), alert_volume_percent: default_volume(),
             default_restore_volume_percent: default_volume(),
             alert_repeat_interval_minutes: default_alert_repeat_minutes(),
+            sample_rate_mode: default_sample_rate_mode(), sample_rate: default_sample_rate(),
+            allowed_sample_rates: default_allowed_sample_rates(),
             duck_only_during_announcement: default_false(), start_file: default_start_file(),
             end_file: default_end_file(), player_binary: default_player_binary(),
             settings_file: default_audio_settings(),
@@ -360,10 +379,48 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
     if a.alert_repeat_interval_minutes > 1_440 {
         bail!("alert_repeat_interval_minutes має бути 0..1440");
     }
+    if a.allowed_sample_rates.is_empty() { bail!("audio.allowed_sample_rates не може бути порожнім"); }
+    if a.allowed_sample_rates.iter().any(|rate| !(8_000..=384_000).contains(rate)) {
+        bail!("audio.allowed_sample_rates містить непідтримувану частоту");
+    }
+    if !a.allowed_sample_rates.contains(&a.sample_rate) {
+        bail!("audio.sample_rate має входити до audio.allowed_sample_rates");
+    }
+    if a.sample_rate_mode != SampleRateMode::Fixed {
+        bail!("audio.sample_rate_mode adaptive/native ще не активовано; використовуйте fixed");
+    }
     if a.duck_fade_seconds < 0.0 || a.restore_fade_seconds < 0.0 || m.music_fade_seconds < 0.0 {
         bail!("час fade не може бути від'ємним");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_audio_rate_policy_preserves_current_runtime() {
+        let audio = AudioConfig::default();
+        assert_eq!(audio.sample_rate_mode, SampleRateMode::Fixed);
+        assert_eq!(audio.sample_rate, 48_000);
+        assert_eq!(audio.allowed_sample_rates, vec![44_100, 48_000]);
+        validate_audio(&audio, &MinuteSilenceConfig::default()).unwrap();
+    }
+
+    #[test]
+    fn configured_rate_must_be_allowed() {
+        let mut audio = AudioConfig::default();
+        audio.sample_rate = 96_000;
+        assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
+    }
+
+    #[test]
+    fn future_rate_modes_fail_closed_until_they_are_implemented() {
+        let mut audio = AudioConfig::default();
+        audio.sample_rate_mode = SampleRateMode::Adaptive;
+        assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
+    }
 }
 
 pub fn validate_config(c: &AppConfig) -> Result<()> {

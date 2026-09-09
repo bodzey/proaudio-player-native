@@ -4,6 +4,7 @@ set -euo pipefail
 MUSIC_SINK="${MUSIC_SINK:-proaudio_player_music}"
 ALERT_SINK="${ALERT_SINK:-proaudio_player_alert}"
 PHYSICAL_SINK="${PHYSICAL_SINK:-AUTO}"
+SAMPLE_RATE="${SAMPLE_RATE:-48000}"
 LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 SINK_WAIT_SECONDS="${SINK_WAIT_SECONDS:-30}"
@@ -98,11 +99,15 @@ load_loopback() {
 start_buses() {
     unload_saved_modules
     local physical music_bus alert_bus music_loop alert_loop
+    if ! [[ "$SAMPLE_RATE" =~ ^[0-9]+$ ]] || ((10#$SAMPLE_RATE < 8000 || 10#$SAMPLE_RATE > 384000)); then
+        echo "SAMPLE_RATE має бути цілим числом від 8000 до 384000" >&2
+        return 1
+    fi
     physical="$(wait_for_physical_sink)"
     prepare_physical_sink "$physical"
 
-    music_bus="$(pactl load-module module-null-sink         sink_name="$MUSIC_SINK"         sink_properties="device.description=proaudio_player_music_Bus"         rate=48000 channels=2)"
-    alert_bus="$(pactl load-module module-null-sink         sink_name="$ALERT_SINK"         sink_properties="device.description=proaudio_player_alert_Bus"         rate=48000 channels=2)"
+    music_bus="$(pactl load-module module-null-sink         sink_name="$MUSIC_SINK"         sink_properties="device.description=proaudio_player_music_Bus"         rate="$SAMPLE_RATE" channels=2)"
+    alert_bus="$(pactl load-module module-null-sink         sink_name="$ALERT_SINK"         sink_properties="device.description=proaudio_player_alert_Bus"         rate="$SAMPLE_RATE" channels=2)"
     music_loop="$(load_loopback "$MUSIC_SINK" "$physical")"
     alert_loop="$(load_loopback "$ALERT_SINK" "$physical")"
     write_state "$physical" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"

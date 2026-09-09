@@ -18,7 +18,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::time::sleep;
 use tracing::{debug, info};
 use url::Url;
@@ -155,6 +155,7 @@ pub struct WebController {
     pub state: SharedRuntimeState,
     pub source_state: SharedSourceState,
     events: broadcast::Sender<String>,
+    audio_control_lock: Arc<Mutex<()>>,
 }
 
 impl WebController {
@@ -166,6 +167,7 @@ impl WebController {
             state,
             source_state,
             events,
+            audio_control_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -432,6 +434,34 @@ impl WebController {
         })
     }
 
+    fn write_configured_output(output: Option<&str>) -> Result<()> {
+        let path = Path::new(AUDIO_OUTPUT_FILE);
+        if let Some(output) = output {
+            if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+            let temporary = path.with_extension("env.tmp");
+            fs::write(&temporary, format!("PHYSICAL_SINK={output}\n"))?;
+            fs::rename(&temporary, path)?;
+        } else if path.exists() {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    fn routed_output() -> Option<String> {
+        fs::read_to_string(AUDIO_BUS_STATE_FILE).ok().and_then(|text| {
+            text.lines().find_map(|line| line.strip_prefix("PHYSICAL="))
+                .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
+        })
+    }
+
+    async fn wait_for_routed_output(&self, expected: &str) -> bool {
+        for _ in 0..100 {
+            if Self::routed_output().as_deref() == Some(expected) { return true; }
+            sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
     pub async fn audio_outputs(&self) -> Result<Vec<Value>> {
         let output = self.run("pactl", &["-f", "json", "list", "sinks"], true, 8).await?;
         let sinks: Value = serde_json::from_str(&output.stdout).context("Некоректна відповідь PipeWire")?;
@@ -463,16 +493,24 @@ impl WebController {
     }
 
     pub async fn select_audio_output(&self, requested: &str) -> Result<Value> {
+        let _guard = self.audio_control_lock.lock().await;
         let requested = requested.trim();
         let outputs = self.audio_outputs().await?;
         let selected = outputs.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(requested))
             .ok_or_else(|| anyhow!("Вибраний аудіовихід зараз недоступний"))?;
-        let path = Path::new(AUDIO_OUTPUT_FILE);
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
-        let temporary = path.with_extension("env.tmp");
-        fs::write(&temporary, format!("PHYSICAL_SINK={requested}\n"))?;
-        fs::rename(&temporary, path)?;
-        Ok(json!({ "selected": selected, "applying": true }))
+        if Self::routed_output().as_deref() == Some(requested) {
+            Self::write_configured_output(Some(requested))?;
+            return Ok(json!({ "selected": selected, "applying": false, "applied": true }));
+        }
+
+        let previous = Self::configured_output().or_else(Self::routed_output);
+        Self::write_configured_output(Some(requested))?;
+        if self.wait_for_routed_output(requested).await {
+            return Ok(json!({ "selected": selected, "applying": false, "applied": true }));
+        }
+
+        Self::write_configured_output(previous.as_deref())?;
+        bail!("Не вдалося підтвердити перемикання аудіовиходу; попередній вибір відновлено")
     }
 
     pub async fn hardware_mixers(&self) -> Result<Vec<Value>> {
@@ -599,27 +637,49 @@ impl WebController {
     pub async fn mixer_state(&self) -> Result<Value> {
         let music = self.sink_state(&self.config.audio.music_sink).await?;
         let alert = self.sink_state(&self.config.audio.alert_sink).await?;
-        let master = self.primary_hardware_mixer().await?;
+        let master = match self.primary_hardware_mixer().await {
+            Ok(master) => master,
+            Err(_) => {
+                let sink = self.physical_sink().await?;
+                let mut master = self.sink_state(&sink).await?;
+                if let Some(object) = master.as_object_mut() {
+                    object.insert("card_name".into(), Value::String("Програмний Master".into()));
+                    object.insert("control".into(), Value::String(sink));
+                    object.insert("backend".into(), Value::String("pipewire".into()));
+                }
+                master
+            }
+        };
         Ok(json!({ "music": music, "alert": alert, "master": master }))
     }
 
     pub async fn set_mixer_db(&self, target: &str, db: f64, muted: Option<bool>) -> Result<Value> {
+        let _guard = self.audio_control_lock.lock().await;
         if !(-60.0..=0.0).contains(&db) { bail!("Рівень має бути в межах -60..0 dB"); }
         if target == "master" {
-            let mixer = self.primary_hardware_mixer().await?;
-            let card = mixer.get("card").and_then(Value::as_u64).ok_or_else(|| anyhow!("Некоректна ALSA-карта"))?.to_string();
-            let control = mixer.get("control").and_then(Value::as_str).ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
-            if muted == Some(true) || db <= -60.0 {
-                self.run("amixer", &["-c", &card, "sset", control, "mute"], true, 8).await?;
-            } else if let Some(reference) = mixer.get("db_reference").and_then(Value::as_f64) {
-                let minimum = mixer.get("db_min").and_then(Value::as_f64).unwrap_or(reference - 60.0);
-                let hardware_db = (reference + db).max(minimum);
-                let value = format!("{hardware_db:.2}dB");
-                self.run("amixer", &["-c", &card, "sset", control, "--", &value, "unmute"], true, 8).await?;
+            if let Ok(mixer) = self.primary_hardware_mixer().await {
+                let card = mixer.get("card").and_then(Value::as_u64).ok_or_else(|| anyhow!("Некоректна ALSA-карта"))?.to_string();
+                let control = mixer.get("control").and_then(Value::as_str).ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
+                if muted == Some(true) || db <= -60.0 {
+                    self.run("amixer", &["-c", &card, "sset", control, "mute"], true, 8).await?;
+                } else if let Some(reference) = mixer.get("db_reference").and_then(Value::as_f64) {
+                    let minimum = mixer.get("db_min").and_then(Value::as_f64).unwrap_or(reference - 60.0);
+                    let hardware_db = (reference + db).max(minimum);
+                    let value = format!("{hardware_db:.2}dB");
+                    self.run("amixer", &["-c", &card, "sset", control, "--", &value, "unmute"], true, 8).await?;
+                } else {
+                    let percent = (10.0_f64.powf(db / 20.0) * 100.0).clamp(1.0, 100.0);
+                    let value = format!("{percent:.0}%");
+                    self.run("amixer", &["-c", &card, "sset", control, &value, "unmute"], true, 8).await?;
+                }
             } else {
-                let percent = (10.0_f64.powf(db / 20.0) * 100.0).clamp(1.0, 100.0);
-                let value = format!("{percent:.0}%");
-                self.run("amixer", &["-c", &card, "sset", control, &value, "unmute"], true, 8).await?;
+                let sink = self.physical_sink().await?;
+                let is_muted = muted == Some(true) || db <= -60.0;
+                if !is_muted {
+                    let value = format!("{db:.1}dB");
+                    self.run("pactl", &["set-sink-volume", &sink, &value], true, 8).await?;
+                }
+                self.run("pactl", &["set-sink-mute", &sink, if is_muted { "1" } else { "0" }], true, 8).await?;
             }
         } else {
             let sink = match target {
@@ -648,6 +708,9 @@ impl WebController {
             "minute_silence_volume_percent": minute.volume_percent,
             "alert_repeat_interval_minutes": audio.alert_repeat_interval_minutes,
             "duck_only_during_announcement": audio.duck_only_during_announcement,
+            "sample_rate_mode": audio.sample_rate_mode,
+            "sample_rate": audio.sample_rate,
+            "allowed_sample_rates": audio.allowed_sample_rates,
         }))
     }
 
