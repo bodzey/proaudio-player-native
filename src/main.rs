@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use alerts::{AlertController, SharedRuntimeState};
@@ -90,7 +90,16 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     tasks.spawn(async move { alert_controller.run_forever().await });
     tasks.spawn(async move { arbiter.run_forever().await });
     if config.web.enabled {
-        tasks.spawn(async move { web::serve(web_controller).await });
+        tasks.spawn(async move {
+            loop {
+                if let Err(err) = web::serve(web_controller.clone()).await {
+                    error!(error = %err, "Web API stopped; retrying");
+                }
+                sleep(Duration::from_secs(2)).await;
+            }
+            #[allow(unreachable_code)]
+            Ok(())
+        });
     }
 
     info!("ProAudio Player native control plane started");
