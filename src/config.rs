@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -280,7 +281,18 @@ pub fn save_provider_settings(config: &ProviderConfig) -> Result<()> {
 pub fn save_provider_token(config: &ProviderConfig, token: &str) -> Result<()> {
     let token = token.trim();
     if token.is_empty() { bail!("API-токен не може бути порожнім"); }
-    atomic_write(&config.token_file, format!("{token}\n").as_bytes(), 0o600)
+    if let Some(parent) = config.token_file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&config.token_file)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(format!("{token}\n").as_bytes())?;
+    file.sync_all()?;
+    Ok(())
 }
 
 pub fn save_audio_settings(audio: &AudioConfig, minute: &MinuteSilenceConfig) -> Result<()> {
