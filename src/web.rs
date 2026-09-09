@@ -1,3 +1,4 @@
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::sync::Arc;
@@ -32,6 +33,7 @@ const APP_JS: &str = include_str!("../static/app.js");
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const PLAYER_ACTIONS: &[&str] = &["play", "pause", "stop", "next", "prev"];
+const AUDIO_OUTPUT_FILE: &str = "/var/lib/proaudio-player-alert/audio-output.env";
 
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult = std::result::Result<Json<Value>, ApiError>;
@@ -356,6 +358,53 @@ impl WebController {
             return Ok(candidates.remove(position));
         }
         Ok(candidates.remove(0))
+    }
+
+    fn configured_output() -> Option<String> {
+        fs::read_to_string(AUDIO_OUTPUT_FILE).ok().and_then(|text| {
+            text.lines().find_map(|line| line.strip_prefix("PHYSICAL_SINK="))
+                .map(str::trim).filter(|value| !value.is_empty() && *value != "AUTO").map(str::to_owned)
+        })
+    }
+
+    pub async fn audio_outputs(&self) -> Result<Vec<Value>> {
+        let output = self.run("pactl", &["-f", "json", "list", "sinks"], true, 8).await?;
+        let sinks: Value = serde_json::from_str(&output.stdout).context("Некоректна відповідь PipeWire")?;
+        let selected = Self::configured_output();
+        let current = self.physical_sink().await.ok();
+        Ok(sinks.as_array().into_iter().flatten().filter_map(|sink| {
+            let name = sink.get("name")?.as_str()?;
+            if name == "auto_null" || name == self.config.audio.music_sink
+                || name == self.config.audio.alert_sink || name.starts_with("proaudio_player_") {
+                return None;
+            }
+            let properties = sink.get("properties").and_then(Value::as_object);
+            let description = properties.and_then(|p| p.get("device.description"))
+                .and_then(Value::as_str).filter(|v| !v.is_empty()).unwrap_or(name);
+            let device_class = properties.and_then(|p| p.get("device.class"))
+                .and_then(Value::as_str).unwrap_or("");
+            Some(json!({
+                "id": name,
+                "name": description,
+                "state": sink.get("state").and_then(Value::as_str).unwrap_or("UNKNOWN").to_ascii_lowercase(),
+                "device_class": device_class,
+                "selected": selected.as_deref().or(current.as_deref()) == Some(name),
+                "available": true
+            }))
+        }).collect())
+    }
+
+    pub async fn select_audio_output(&self, requested: &str) -> Result<Value> {
+        let requested = requested.trim();
+        let outputs = self.audio_outputs().await?;
+        let selected = outputs.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(requested))
+            .ok_or_else(|| anyhow!("Вибраний аудіовихід зараз недоступний"))?;
+        let path = Path::new(AUDIO_OUTPUT_FILE);
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        let temporary = path.with_extension("env.tmp");
+        fs::write(&temporary, format!("PHYSICAL_SINK={requested}\n"))?;
+        fs::rename(&temporary, path)?;
+        Ok(json!({ "selected": selected, "applying": true }))
     }
 
     pub async fn hardware_mixers(&self) -> Result<Vec<Value>> {
@@ -833,6 +882,8 @@ struct MuteBody { muted: bool }
 struct AudioLevelBody { target: String, percent: f64 }
 #[derive(Deserialize)]
 struct HardwareBody { card: u32, control: String, percent: u32 }
+#[derive(Deserialize)]
+struct AudioOutputBody { id: String }
 #[derive(Deserialize, Default)]
 struct AudioSettingsBody {
     duck_db: Option<f64>,
@@ -928,6 +979,15 @@ async fn set_audio_level(State(controller): State<WebController>, Json(body): Js
     };
     controller.audio.set_sink_percent(&sink, body.percent).await.map_err(map_internal)?;
     controller.sink_state(&sink).await.map(Json).map_err(map_internal)
+}
+
+async fn audio_outputs(State(controller): State<WebController>) -> ApiResult {
+    controller.audio_outputs().await.map(|items| Json(json!({ "items": items }))).map_err(map_internal)
+}
+
+async fn select_audio_output(State(controller): State<WebController>, Json(body): Json<AudioOutputBody>) -> ApiResult {
+    controller.ensure_controls_available().await.map_err(map_internal)?;
+    controller.select_audio_output(&body.id).await.map(Json).map_err(map_internal)
 }
 
 async fn hardware(State(controller): State<WebController>) -> ApiResult {
@@ -1149,6 +1209,7 @@ pub fn router(controller: WebController) -> Router {
         .route("/api/volume", post(set_volume))
         .route("/api/mute", post(set_mute))
         .route("/api/audio/level", post(set_audio_level))
+        .route("/api/audio/outputs", get(audio_outputs).post(select_audio_output))
         .route("/api/audio/hardware", get(hardware).post(set_hardware))
         .route("/api/settings/audio", get(get_audio_settings).put(put_audio_settings))
         .route("/api/player", post(player))

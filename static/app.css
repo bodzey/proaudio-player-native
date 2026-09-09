@@ -117,3 +117,7 @@ footer { display: flex; justify-content: space-between; padding: 23px 2px 35px; 
 .volume-card { background: linear-gradient(145deg, rgba(29,39,43,.98), rgba(17,21,28,.98)); }
 .stream-card { border-color: rgba(98,227,154,.22); }
 .settings-card { scroll-margin-top: 16px; }
+
+.output-picker { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; align-items:end; margin-top:20px; padding:18px; border:1px solid var(--line); border-radius:14px; background:#10141b; }
+.output-picker button { min-height:42px; padding:0 16px; border-radius:10px; color:var(--text); }
+@media (max-width:760px) { .output-picker { grid-template-columns:1fr; } }

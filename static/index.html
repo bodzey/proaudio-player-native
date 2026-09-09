@@ -120,8 +120,16 @@
           <div class="section-heading">
             <div>
               <p class="eyebrow">DEV AUDIO CONTROL</p>
-              <h2>Рівні та пріоритетисистеми</h2>
+              <h2>Аудіовихід, рівні та пріоритети</h2>
             </div>
+          </div>
+          <div class="output-picker">
+            <label class="field">
+              <span>Пристрій виведення звуку</span>
+              <select id="audio-output"><option value="">Пошук аудіовиходів…</option></select>
+              <small id="audio-output-status">Список оновлюється без перезавантаження сторінки.</small>
+            </label>
+            <button id="refresh-audio-outputs" type="button" class="secondary-button">Оновити список</button>
           </div>
           <div class="level-grid">
             <label class="level-control">

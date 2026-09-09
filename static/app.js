@@ -321,6 +321,37 @@ function formatHardwareLevel(item) {
   return `${item.volume}%${db}`;
 }
 
+async function loadAudioOutputs() {
+  const select = $("#audio-output");
+  const status = $("#audio-output-status");
+  try {
+    const items = (await api("/api/audio/outputs")).items || [];
+    const previous = select.value;
+    select.innerHTML = "";
+    if (!items.length) {
+      select.innerHTML = '<option value="">Фізичних аудіовиходів не знайдено</option>';
+      select.disabled = true;
+      status.textContent = "Підключіть USB DAC або активуйте вбудований аудіовихід.";
+      return;
+    }
+    items.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = `${item.name} · ${item.state}`;
+      option.selected = item.selected;
+      select.append(option);
+    });
+    if (!items.some((item) => item.selected) && items.some((item) => item.id === previous)) select.value = previous;
+    select.disabled = Boolean(state?.priority?.active);
+    const active = items.find((item) => item.id === select.value);
+    status.textContent = active ? `Активний вихід: ${active.name}` : "Оберіть фізичний аудіовихід.";
+  } catch (error) {
+    select.innerHTML = '<option value="">Помилка отримання аудіовиходів</option>';
+    select.disabled = true;
+    status.textContent = error.message;
+  }
+}
+
 async function loadHardwareMixers() {
   const container = $("#hardware-mixers");
   try {
@@ -379,6 +410,27 @@ function bindLevel(id, valueId, target) {
     } catch (error) { toast(error.message, true); }
   });
 }
+
+$("#audio-output").addEventListener("change", async (event) => {
+  const id = event.target.value;
+  if (!id) return;
+  event.target.disabled = true;
+  $("#audio-output-status").textContent = "Перемикання аудіовиходу…";
+  try {
+    await api("/api/audio/outputs", { method: "POST", body: JSON.stringify({ id }) });
+    toast("Аудіовихід збережено. Перебудова аудіошин…");
+    setTimeout(async () => {
+      await Promise.all([loadAudioOutputs(), loadHardwareMixers(), refreshStatus()]);
+    }, 1800);
+  } catch (error) {
+    toast(error.message, true);
+    await loadAudioOutputs();
+  }
+});
+
+$("#refresh-audio-outputs").addEventListener("click", async () => {
+  await Promise.all([loadAudioOutputs(), loadHardwareMixers()]);
+});
 
 bindLevel("#master-level", "#master-level-value", "master");
 bindLevel("#alert-bus-level", "#alert-bus-level-value", "alert");
@@ -524,5 +576,7 @@ loadLibrary();
 loadQueue();
 loadAlertSettings();
 loadAudioSettings();
+loadAudioOutputs();
 loadHardwareMixers();
 setInterval(refreshStatus, 3000);
+setInterval(loadAudioOutputs, 15000);
