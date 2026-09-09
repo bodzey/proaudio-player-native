@@ -230,10 +230,10 @@ impl SourceArbiter {
             }
         }
 
-        // Protocol receivers may keep their remote session after MPRIS/transport Stop.
+        // AirPlay and DLNA receivers may keep an uncorked session after Stop.
         // Terminating their unprivileged receiver process disconnects the sender;
         // systemd immediately starts a clean receiver instance.
-        if matches!(key, "spotify" | "airplay" | "dlna") {
+        if matches!(key, "airplay" | "dlna") {
             for stream in streams {
                 let pid = stream.get("properties").and_then(Value::as_object)
                     .and_then(|p| p.get("application.process.id")).and_then(Value::as_str);
