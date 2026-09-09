@@ -181,39 +181,41 @@ impl SourceArbiter {
         }
 
         let prefix = match key {
-            "spotify" => "org.mpris.MediaPlayer2.spotifyd",
-            "airplay" => "org.mpris.MediaPlayer2.ShairportSync",
-            _ => return Ok(()),
+            "spotify" => Some("org.mpris.MediaPlayer2.spotifyd"),
+            "airplay" => Some("org.mpris.MediaPlayer2.ShairportSync"),
+            _ => None,
         };
-        let list = command::run(
-            "busctl",
-            &["--system", "--no-pager", "--no-legend", "list"],
-            false,
-            8,
-        )
-        .await?;
-        let service = list
-            .stdout
-            .lines()
-            .filter_map(|line| line.split_whitespace().next())
-            .find(|name| name.starts_with(prefix));
-        if let Some(service) = service {
-            let out = command::run(
+        if let Some(prefix) = prefix {
+            let list = command::run(
                 "busctl",
-                &[
-                    "--system",
-                    "call",
-                    service,
-                    "/org/mpris/MediaPlayer2",
-                    "org.mpris.MediaPlayer2.Player",
-                    "Stop",
-                ],
+                &["--system", "--no-pager", "--no-legend", "list"],
                 false,
                 8,
             )
             .await?;
-            if out.code != 0 {
-                debug!(source = key, "Не вдалося зупинити MPRIS: {}", out.stderr);
+            let service = list
+                .stdout
+                .lines()
+                .filter_map(|line| line.split_whitespace().next())
+                .find(|name| name.starts_with(prefix));
+            if let Some(service) = service {
+                let out = command::run(
+                    "busctl",
+                    &[
+                        "--system",
+                        "call",
+                        service,
+                        "/org/mpris/MediaPlayer2",
+                        "org.mpris.MediaPlayer2.Player",
+                        "Stop",
+                    ],
+                    false,
+                    8,
+                )
+                .await?;
+                if out.code != 0 {
+                    debug!(source = key, "Не вдалося зупинити MPRIS: {}", out.stderr);
+                }
             }
         }
 
