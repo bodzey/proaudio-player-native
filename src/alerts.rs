@@ -191,18 +191,31 @@ impl AlertController {
             let state = self.state.lock().await;
             (state.clear_announced, state.audio_snapshot.clone(), state.last_minute_silence_date.clone())
         };
-        if !clear_announced {
+        let announcement_result = if !clear_announced {
             let cfg = self.audio.config()?;
-            self.audio.play(&cfg.end_file, None).await?;
-            self.state.lock().await.clear_announced = true;
-            self.persist().await?;
-        }
-        self.audio.restore(snapshot.as_ref()).await?;
+            let result = self.audio.play(&cfg.end_file, None).await;
+            if result.is_ok() {
+                self.state.lock().await.clear_announced = true;
+                self.persist().await?;
+            }
+            result
+        } else {
+            Ok(())
+        };
+        let restore_result = self.audio.restore(snapshot.as_ref()).await;
         {
             let mut state = self.state.lock().await;
-            *state = RuntimeState { mode: "normal".into(), last_success_at: Some(Utc::now().to_rfc3339()), last_change_at: Some(Utc::now().to_rfc3339()), last_minute_silence_date: last_silence, ..RuntimeState::default() };
+            *state = RuntimeState {
+                mode: "normal".into(),
+                last_success_at: Some(Utc::now().to_rfc3339()),
+                last_change_at: Some(Utc::now().to_rfc3339()),
+                last_minute_silence_date: last_silence,
+                ..RuntimeState::default()
+            };
         }
-        self.persist().await
+        self.persist().await?;
+        announcement_result?;
+        restore_result
     }
 
     async fn process(&mut self, status: AlertStatus) -> Result<()> {
