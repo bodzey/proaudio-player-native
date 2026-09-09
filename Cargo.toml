@@ -1,0 +1,27 @@
+[package]
+name = "proaudio-player-native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Native ProAudio network audio player control plane"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.8", features = ["json", "http1"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono-tz = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
