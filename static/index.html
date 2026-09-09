@@ -84,6 +84,27 @@
           <div id="playlists" class="item-list"><p class="empty">Завантаження…</p></div>
         </section>
 
+        <section class="card stream-card settings-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">МЕРЕЖЕВИЙ ПОТІК</p>
+              <h2>Інтернет-радіо, M3U/M3U8 або HLS</h2>
+            </div>
+          </div>
+          <form id="stream-player" class="settings-form">
+            <label class="field field-wide">
+              <span>HTTP/HTTPS-адреса станції, плейлиста або потоку</span>
+              <input id="stream-url" type="url" required spellcheck="false"
+                     placeholder="https://example.org/radio.m3u8">
+              <small>Підтримка конкретного формату залежить від MPD/FFmpeg у прошивці.</small>
+            </label>
+            <div class="settings-actions field-wide">
+              <span id="stream-result" class="settings-result" role="status"></span>
+              <button type="submit" class="save-button">Відтворити потік</button>
+            </div>
+          </form>
+        </section>
+
         <section class="card queue-card">
           <div class="section-heading">
             <div>
