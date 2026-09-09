@@ -77,3 +77,7 @@ http://192.168.88.122/v1/iot/active_air_raid_alerts/{uid}.json
 ## Migration direction
 
 The repository first targets functional parity. After hardware validation, command adapters (`pactl`, `amixer`, `mpc`, `busctl`) can be replaced incrementally by direct PipeWire, ALSA, MPD protocol and D-Bus integrations without changing the state machine or Web/4STREAM API contracts.
+
+## Factory announcement media
+
+Factory alert and minute-silence MP3 files are owned by this repository under `assets/announcements/` and are installed read-only under `/usr/share/proaudio-player/announcements/`. Runtime state remains under `/var/lib`; firmware no longer depends on the legacy Python player repository.
