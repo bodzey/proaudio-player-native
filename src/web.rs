@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -824,6 +825,8 @@ struct PathBody { path: String }
 #[derive(Deserialize)]
 struct PlaylistBody { name: String }
 #[derive(Deserialize)]
+struct StreamBody { url: String }
+#[derive(Deserialize)]
 struct QueueBody { position: u32 }
 #[derive(Deserialize, Default)]
 struct ProviderBody {
@@ -969,6 +972,61 @@ async fn play_file(State(controller): State<WebController>, Json(body): Json<Pat
     Ok(Json(json!({ "playing": path })))
 }
 
+fn validate_stream_url(value: &str) -> Result<String> {
+    let value = value.trim();
+    let parsed = Url::parse(value).context("Некоректна адреса потоку")?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        bail!("Підтримуються лише HTTP/HTTPS-потоки без облікових даних у URL");
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    if matches!(host.to_ascii_lowercase().as_str(), "localhost" | "localhost.localdomain")
+        || host.to_ascii_lowercase().ends_with(".local")
+    {
+        bail!("Локальні адреси потоків заборонені");
+    }
+    if let Ok(address) = host.parse::<IpAddr>() {
+        let unsafe_address = match address {
+            IpAddr::V4(value) => {
+                value.is_private()
+                    || value.is_loopback()
+                    || value.is_link_local()
+                    || value.is_multicast()
+                    || value == Ipv4Addr::UNSPECIFIED
+                    || value.octets()[0] == 0
+            }
+            IpAddr::V6(value) => {
+                value.is_loopback()
+                    || value.is_unspecified()
+                    || value.is_multicast()
+                    || value.is_unique_local()
+                    || value.is_unicast_link_local()
+                    || value == Ipv6Addr::UNSPECIFIED
+            }
+        };
+        if unsafe_address {
+            bail!("Локальні та службові IP-адреси потоків заборонені");
+        }
+    }
+    Ok(parsed.to_string())
+}
+
+async fn play_stream(
+    State(controller): State<WebController>,
+    Json(body): Json<StreamBody>,
+) -> ApiResult {
+    controller.ensure_controls_available().await.map_err(map_internal)?;
+    let url = validate_stream_url(&body.url)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    controller.run("mpc", &["clear"], true, 8).await.map_err(map_internal)?;
+    controller.run("mpc", &["add", &url], true, 15).await.map_err(map_internal)?;
+    controller.run("mpc", &["play"], true, 8).await.map_err(map_internal)?;
+    Ok(Json(json!({ "playing": url, "source": "network_stream" })))
+}
+
 async fn playlists(State(controller): State<WebController>) -> ApiResult {
     controller.playlists().await.map(|items| Json(json!({ "items": items }))).map_err(map_internal)
 }
@@ -1074,6 +1132,7 @@ pub fn router(controller: WebController) -> Router {
         .route("/api/library", get(library))
         .route("/api/library/update", post(refresh_library))
         .route("/api/library/play", post(play_file))
+        .route("/api/streams/play", post(play_stream))
         .route("/api/playlists", get(playlists))
         .route("/api/playlists/load", post(load_playlist))
         .route("/api/queue", get(queue))
