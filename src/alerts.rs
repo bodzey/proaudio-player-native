@@ -101,7 +101,8 @@ impl AlertController {
         if !self.minute_due(&current_state)? { return Ok(false); }
 
         let snapshot = self.audio.snapshot().await?;
-        let (_, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
+        let (audio_cfg, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
+        let talkover = audio_cfg.duck_only_during_announcement;
         let tz: chrono_tz::Tz = minute.timezone.parse()?;
         let date = Utc::now().with_timezone(&tz).date_naive().to_string();
         {
@@ -125,7 +126,10 @@ impl AlertController {
                     (state.mode.clone(), state.audio_snapshot.clone())
                 };
                 if mode == "alert" {
-                    if let Some(alert) = alert_snapshot.as_ref() { audio.ensure_alert(alert).await?; }
+                    if let Some(alert) = alert_snapshot.as_ref() {
+                        if talkover { audio.restore(Some(alert)).await?; }
+                        else { audio.ensure_alert(alert).await?; }
+                    }
                 } else {
                     audio.restore(Some(&snapshot)).await?;
                 }
@@ -140,6 +144,7 @@ impl AlertController {
                 };
                 let recovery = if mode == "alert" {
                     match alert_snapshot.as_ref() {
+                        Some(alert) if talkover => audio.restore(Some(alert)).await,
                         Some(alert) => audio.ensure_alert(alert).await,
                         None => Ok(()),
                     }
