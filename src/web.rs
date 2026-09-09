@@ -325,6 +325,7 @@ impl WebController {
             .run("pactl", &["get-sink-mute", sink], true, 8)
             .await?;
         let re = Regex::new(r"(\d+(?:\.\d+)?)%")?;
+        let db_re = Regex::new(r"(-?\d+(?:\.\d+)?)\s*dB")?;
         let first = volume.stdout.lines().next().unwrap_or_default();
         let values = re
             .captures_iter(first)
@@ -336,9 +337,17 @@ impl WebController {
         } else {
             values.iter().sum::<f64>() / values.len() as f64
         };
+        let db_values = db_re.captures_iter(first).filter_map(|c| c.get(1))
+            .filter_map(|m| m.as_str().parse::<f64>().ok()).collect::<Vec<_>>();
+        let db = if db_values.is_empty() {
+            if average <= 0.0 { -60.0 } else { 20.0 * (average / 100.0).log10() }
+        } else {
+            db_values.iter().sum::<f64>() / db_values.len() as f64
+        };
         Ok(json!({
             "name": sink,
             "volume": (average * 10.0).round() / 10.0,
+            "db": (db * 100.0).round() / 100.0,
             "muted": mute.stdout.to_ascii_lowercase().ends_with("yes"),
         }))
     }
@@ -501,6 +510,39 @@ impl WebController {
             self.run("amixer", &["-c", &card, "sset", control, if muted { "mute" } else { "unmute" }], true, 8).await?;
         }
         self.primary_hardware_mixer().await
+    }
+
+    pub async fn mixer_state(&self) -> Result<Value> {
+        let music = self.sink_state(&self.config.audio.music_sink).await?;
+        let alert = self.sink_state(&self.config.audio.alert_sink).await?;
+        let master = self.primary_hardware_mixer().await?;
+        Ok(json!({ "music": music, "alert": alert, "master": master }))
+    }
+
+    pub async fn set_mixer_db(&self, target: &str, db: f64, muted: Option<bool>) -> Result<Value> {
+        if !(-60.0..=0.0).contains(&db) { bail!("Рівень має бути в межах -60..0 dB"); }
+        if target == "master" {
+            let mixer = self.primary_hardware_mixer().await?;
+            let card = mixer.get("card").and_then(Value::as_u64).ok_or_else(|| anyhow!("Некоректна ALSA-карта"))?.to_string();
+            let control = mixer.get("control").and_then(Value::as_str).ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
+            if muted == Some(true) || db <= -60.0 {
+                self.run("amixer", &["-c", &card, "sset", control, "mute"], true, 8).await?;
+            } else {
+                let value = format!("{db:.1}dB");
+                self.run("amixer", &["-c", &card, "sset", control, "--", &value, "unmute"], true, 8).await?;
+            }
+        } else {
+            let sink = match target {
+                "music" => self.config.audio.music_sink.as_str(),
+                "alert" => self.config.audio.alert_sink.as_str(),
+                _ => bail!("Невідомий канал мікшера"),
+            };
+            let is_muted = muted == Some(true) || db <= -60.0;
+            let percent = if is_muted { 0.0 } else { 100.0 * 10_f64.powf(db / 20.0) };
+            self.audio.set_sink_percent(sink, percent).await?;
+            self.run("pactl", &["set-sink-mute", sink, if is_muted { "1" } else { "0" }], true, 8).await?;
+        }
+        self.mixer_state().await
     }
 
     pub fn audio_settings(&self) -> Result<Value> {
@@ -762,8 +804,8 @@ impl WebController {
         let snapshot = self.audio.snapshot().await?;
         let music_volume = snapshot.volumes_percent.iter().sum::<f64>() / snapshot.volumes_percent.len().max(1) as f64;
         let hardware = self.primary_hardware_mixer().await.ok();
-        let volume = hardware.as_ref().and_then(|v| v.get("volume")).and_then(Value::as_f64).unwrap_or(music_volume);
-        let muted = hardware.as_ref().and_then(|v| v.get("muted")).and_then(Value::as_bool).unwrap_or(snapshot.muted);
+        let volume = music_volume;
+        let muted = snapshot.muted;
         let physical = match self.physical_sink().await {
             Ok(sink) => self.sink_state(&sink).await.ok(),
             Err(_) => None,
@@ -903,6 +945,8 @@ struct MuteBody { muted: bool }
 #[derive(Deserialize)]
 struct AudioLevelBody { target: String, percent: f64 }
 #[derive(Deserialize)]
+struct MixerBody { target: String, db: f64, muted: Option<bool> }
+#[derive(Deserialize)]
 struct HardwareBody { card: u32, control: String, percent: u32 }
 #[derive(Deserialize)]
 struct AudioOutputBody { id: String }
@@ -979,13 +1023,14 @@ async fn set_volume(State(controller): State<WebController>, Json(body): Json<Vo
     if !(0.0..=100.0).contains(&body.percent) {
         return Err(api_error(StatusCode::BAD_REQUEST, "Гучність має бути 0..100"));
     }
-    controller.set_primary_hardware(Some(body.percent.round() as u32), None).await.map_err(map_internal)?;
+    controller.audio.set_music_volume(body.percent).await.map_err(map_internal)?;
+    controller.audio.set_music_mute(body.percent <= 0.0).await.map_err(map_internal)?;
     Ok(Json(json!({ "volume": body.percent, "muted": body.percent == 0.0 })))
 }
 
 async fn set_mute(State(controller): State<WebController>, Json(body): Json<MuteBody>) -> ApiResult {
     controller.ensure_controls_available().await.map_err(map_internal)?;
-    controller.set_primary_hardware(None, Some(body.muted)).await.map_err(map_internal)?;
+    controller.audio.set_music_mute(body.muted).await.map_err(map_internal)?;
     Ok(Json(json!({ "muted": body.muted })))
 }
 
@@ -1001,6 +1046,15 @@ async fn set_audio_level(State(controller): State<WebController>, Json(body): Js
     };
     controller.audio.set_sink_percent(&sink, body.percent).await.map_err(map_internal)?;
     controller.sink_state(&sink).await.map(Json).map_err(map_internal)
+}
+
+async fn get_mixer(State(controller): State<WebController>) -> ApiResult {
+    controller.mixer_state().await.map(Json).map_err(map_internal)
+}
+
+async fn set_mixer(State(controller): State<WebController>, Json(body): Json<MixerBody>) -> ApiResult {
+    controller.ensure_controls_available().await.map_err(map_internal)?;
+    controller.set_mixer_db(&body.target, body.db, body.muted).await.map(Json).map_err(map_internal)
 }
 
 async fn audio_outputs(State(controller): State<WebController>) -> ApiResult {
@@ -1231,6 +1285,7 @@ pub fn router(controller: WebController) -> Router {
         .route("/api/volume", post(set_volume))
         .route("/api/mute", post(set_mute))
         .route("/api/audio/level", post(set_audio_level))
+        .route("/api/audio/mixer", get(get_mixer).post(set_mixer))
         .route("/api/audio/outputs", get(audio_outputs).post(select_audio_output))
         .route("/api/audio/hardware", get(hardware).post(set_hardware))
         .route("/api/settings/audio", get(get_audio_settings).put(put_audio_settings))

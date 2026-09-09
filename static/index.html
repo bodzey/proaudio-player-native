@@ -131,20 +131,31 @@
             </label>
             <button id="refresh-audio-outputs" type="button" class="secondary-button">Оновити список</button>
           </div>
-          <div class="level-grid">
-            <label class="level-control">
-              <span>Програмний рівень фізичного виходу <b id="master-level-value">—</b></span>
-              <input id="master-level" type="range" min="0" max="100" step="1">
-              <small>Програмний рівень PipeWire після зведення шин.</small>
-            </label>
-            <label class="level-control">
-              <span>Службова шина <b id="alert-bus-level-value">—</b></span>
-              <input id="alert-bus-level" type="range" min="0" max="100" step="1">
-              <small>Поточний рівень шини оповіщень.</small>
-            </label>
-          </div>
-          <div id="hardware-mixers" class="hardware-mixers">
-            <p class="empty">Пошук апаратних ALSA-регуляторів…</p>
+          <div class="mixer" id="audio-mixer">
+            <div class="mixer-strip" data-channel="music">
+              <div class="mixer-name">MUSIC</div>
+              <div class="mixer-meter"><span></span></div>
+              <input class="mixer-fader" id="mixer-music" type="range" min="-60" max="0" step="0.5" value="0" orient="vertical">
+              <output id="mixer-music-db">0.0 dB</output>
+              <button type="button" class="mixer-mute" data-mixer-mute="music">MUTE</button>
+              <small>Музична шина</small>
+            </div>
+            <div class="mixer-strip mixer-priority" data-channel="alert">
+              <div class="mixer-name">ALERT</div>
+              <div class="mixer-meter"><span></span></div>
+              <input class="mixer-fader" id="mixer-alert" type="range" min="-60" max="0" step="0.5" value="0" orient="vertical">
+              <output id="mixer-alert-db">0.0 dB</output>
+              <button type="button" class="mixer-mute" data-mixer-mute="alert">MUTE</button>
+              <small>Шина оповіщень</small>
+            </div>
+            <div class="mixer-strip mixer-master" data-channel="master">
+              <div class="mixer-name">MASTER</div>
+              <div class="mixer-meter"><span></span></div>
+              <input class="mixer-fader" id="mixer-master" type="range" min="-60" max="0" step="0.5" value="0" orient="vertical">
+              <output id="mixer-master-db">0.0 dB</output>
+              <button type="button" class="mixer-mute" data-mixer-mute="master">MUTE</button>
+              <small id="mixer-master-name">Вибраний аудіовихід</small>
+            </div>
           </div>
           <form id="audio-settings" class="settings-form">
             <label class="field">
