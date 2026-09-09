@@ -72,7 +72,7 @@ start_buses() {
     local physical
     physical="$(wait_for_physical_sink)"
     if ! [[ "$OUTPUT_VOLUME_PERCENT" =~ ^[0-9]+$ ]] \
-        || ((10#$OUTPUT_VOLUME_PERCENT > 150)); then
+        || ((10#$OUTPUT_VOLUME_PERCENT > 100)); then
         echo "OUTPUT_VOLUME_PERCENT має бути цілим числом від 0 до 150" >&2
         exit 1
     fi

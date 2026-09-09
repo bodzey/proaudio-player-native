@@ -110,7 +110,7 @@ function renderStatus(data) {
     $("#priority-text").textContent = "Пріоритетне оповіщення активне. Музичні елементи заблоковано.";
   }
 
-  const volume = Math.max(0, Math.min(150, Math.round(data.volume || 0)));
+  const volume = Math.max(0, Math.min(100, Math.round(data.volume || 0)));
   $("#volume").value = volume;
   $("#volume-value").textContent = volume;
   $("#mute").textContent = data.muted ? "🔇" : "🔊";

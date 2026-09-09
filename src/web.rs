@@ -168,7 +168,7 @@ impl WebController {
         let current = self
             .run(
                 "mpc",
-                &["--format", "%file%\t%title%\t%artist%\t%album%", "current"],
+                &["--format", "%file%\t%title%\t%artist%\t%album%\t%name%", "current"],
                 false,
                 8,
             )
@@ -183,7 +183,7 @@ impl WebController {
         }
 
         let mut fields = current.stdout.split('\t').map(str::to_owned).collect::<Vec<_>>();
-        fields.resize(4, String::new());
+        fields.resize(5, String::new());
         let state_re = Regex::new(r"\[(playing|paused)\]")?;
         let volume_re = Regex::new(r"volume:\s*(\d+)%")?;
         let queue_re = Regex::new(r"#(\d+)/(\d+)")?;
@@ -200,17 +200,12 @@ impl WebController {
         let queue = queue_re.captures(&status.stdout);
         let progress = progress_re.captures(&status.stdout);
         let file = fields.first().cloned().unwrap_or_default();
-        let title = fields
-            .get(1)
-            .filter(|v| !v.is_empty())
-            .cloned()
-            .or_else(|| {
-                Path::new(&file)
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_default();
+        let is_stream = file.starts_with("http://") || file.starts_with("https://");
+        let station = fields.get(4).cloned().unwrap_or_default();
+        let title = fields.get(1).filter(|v| !v.is_empty()).cloned()
+            .or_else(|| (!station.is_empty()).then(|| station.clone()))
+            .or_else(|| Path::new(&file).file_name().and_then(|v| v.to_str()).map(str::to_owned))
+            .unwrap_or_else(|| if is_stream { "Мережевий потік".into() } else { String::new() });
 
         Ok(json!({
             "available": true,
@@ -219,6 +214,9 @@ impl WebController {
             "title": title,
             "artist": fields.get(2).cloned().unwrap_or_default(),
             "album": fields.get(3).cloned().unwrap_or_default(),
+            "station": station,
+            "is_stream": is_stream,
+            "stream_url": if is_stream { Some(file.clone()) } else { None },
             "volume": volume,
             "queue_position": queue.as_ref().and_then(|c| c.get(1)).and_then(|m| m.as_str().parse::<u32>().ok()),
             "queue_length": queue.as_ref().and_then(|c| c.get(2)).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0),
@@ -416,6 +414,28 @@ impl WebController {
         Ok(result)
     }
 
+    pub async fn primary_hardware_mixer(&self) -> Result<Value> {
+        let mixers = self.hardware_mixers().await?;
+        mixers.iter()
+            .find(|item| item.get("card_name").and_then(Value::as_str).is_some_and(|name| name.to_ascii_lowercase().contains("headphone")))
+            .or_else(|| ["Master", "Headphone", "PCM", "Speaker"].iter().find_map(|preferred| mixers.iter().find(|item| item.get("control").and_then(Value::as_str) == Some(*preferred))))
+            .or_else(|| mixers.first()).cloned()
+            .ok_or_else(|| anyhow!("Апаратний ALSA-регулятор не знайдено"))
+    }
+
+    pub async fn set_primary_hardware(&self, percent: Option<u32>, muted: Option<bool>) -> Result<Value> {
+        let mixer = self.primary_hardware_mixer().await?;
+        let card = mixer.get("card").and_then(Value::as_u64).ok_or_else(|| anyhow!("Некоректна ALSA-карта"))?.to_string();
+        let control = mixer.get("control").and_then(Value::as_str).ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
+        if let Some(percent) = percent {
+            let value = format!("{}%", percent.min(100));
+            self.run("amixer", &["-c", &card, "sset", control, &value, "unmute"], true, 8).await?;
+        } else if let Some(muted) = muted {
+            self.run("amixer", &["-c", &card, "sset", control, if muted { "mute" } else { "unmute" }], true, 8).await?;
+        }
+        self.primary_hardware_mixer().await
+    }
+
     pub fn audio_settings(&self) -> Result<Value> {
         let (audio, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
         Ok(json!({
@@ -569,11 +589,12 @@ impl WebController {
         let elapsed = mpd.get("elapsed").and_then(Value::as_str);
         let duration = mpd.get("duration").and_then(Value::as_str);
         json!({
-            "source": "Локальна бібліотека",
+            "source": if mpd.get("is_stream").and_then(Value::as_bool) == Some(true) { "Інтернет-радіо" } else { "Локальна бібліотека" },
             "backend": "mpd",
             "state": state,
             "title": mpd.get("title").and_then(Value::as_str).unwrap_or(""),
-            "artist": mpd.get("artist").and_then(Value::as_str).unwrap_or(""),
+            "artist": mpd.get("artist").and_then(Value::as_str).filter(|v| !v.is_empty())
+                .or_else(|| mpd.get("station").and_then(Value::as_str)).unwrap_or(""),
             "album": mpd.get("album").and_then(Value::as_str).unwrap_or(""),
             "art_url": Value::Null,
             "position_seconds": clock_to_seconds(elapsed),
@@ -668,7 +689,10 @@ impl WebController {
 
     pub async fn status(&self) -> Result<Value> {
         let snapshot = self.audio.snapshot().await?;
-        let volume = snapshot.volumes_percent.iter().sum::<f64>() / snapshot.volumes_percent.len().max(1) as f64;
+        let music_volume = snapshot.volumes_percent.iter().sum::<f64>() / snapshot.volumes_percent.len().max(1) as f64;
+        let hardware = self.primary_hardware_mixer().await.ok();
+        let volume = hardware.as_ref().and_then(|v| v.get("volume")).and_then(Value::as_f64).unwrap_or(music_volume);
+        let muted = hardware.as_ref().and_then(|v| v.get("muted")).and_then(Value::as_bool).unwrap_or(snapshot.muted);
         let physical = match self.physical_sink().await {
             Ok(sink) => self.sink_state(&sink).await.ok(),
             Err(_) => None,
@@ -683,13 +707,14 @@ impl WebController {
         Ok(json!({
             "name": "ProAudio Player",
             "volume": (volume * 10.0).round() / 10.0,
-            "muted": snapshot.muted,
+            "muted": muted,
             "priority": self.priority_state().await,
             "mpd": mpd,
             "sources": sources,
             "audio_levels": {
-                "music_bus": (volume * 10.0).round() / 10.0,
+                "music_bus": (music_volume * 10.0).round() / 10.0,
                 "physical": physical,
+                "hardware": hardware,
                 "alert_bus": alert_bus,
             },
             "player": player,
@@ -878,23 +903,22 @@ async fn status(State(controller): State<WebController>) -> ApiResult {
 
 async fn set_volume(State(controller): State<WebController>, Json(body): Json<VolumeBody>) -> ApiResult {
     controller.ensure_controls_available().await.map_err(map_internal)?;
-    if !(0.0..=150.0).contains(&body.percent) {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Гучність має бути 0..150"));
+    if !(0.0..=100.0).contains(&body.percent) {
+        return Err(api_error(StatusCode::BAD_REQUEST, "Гучність має бути 0..100"));
     }
-    controller.audio.set_music_volume(body.percent).await.map_err(map_internal)?;
-    controller.audio.set_music_mute(body.percent <= 0.0).await.map_err(map_internal)?;
+    controller.set_primary_hardware(Some(body.percent.round() as u32), None).await.map_err(map_internal)?;
     Ok(Json(json!({ "volume": body.percent, "muted": body.percent == 0.0 })))
 }
 
 async fn set_mute(State(controller): State<WebController>, Json(body): Json<MuteBody>) -> ApiResult {
     controller.ensure_controls_available().await.map_err(map_internal)?;
-    controller.audio.set_music_mute(body.muted).await.map_err(map_internal)?;
+    controller.set_primary_hardware(None, Some(body.muted)).await.map_err(map_internal)?;
     Ok(Json(json!({ "muted": body.muted })))
 }
 
 async fn set_audio_level(State(controller): State<WebController>, Json(body): Json<AudioLevelBody>) -> ApiResult {
-    if !(0.0..=150.0).contains(&body.percent) {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Гучність має бути 0..150"));
+    if !(0.0..=100.0).contains(&body.percent) {
+        return Err(api_error(StatusCode::BAD_REQUEST, "Гучність має бути 0..100"));
     }
     let sink = match body.target.as_str() {
         "master" => controller.physical_sink().await.map_err(map_internal)?,

@@ -31,7 +31,7 @@ impl AudioEngine {
     }
 
     async fn set_volume(&self, sink: &str, volumes: &[f64]) -> Result<()> {
-        let safe = volumes.iter().map(|v| v.clamp(0.0, 150.0)).collect::<Vec<_>>();
+        let safe = volumes.iter().map(|v| v.clamp(0.0, 100.0)).collect::<Vec<_>>();
         let owned = safe.iter().map(|v| format!("{v:.3}%")).collect::<Vec<_>>();
         let mut args = vec!["set-sink-volume", sink];
         args.extend(owned.iter().map(String::as_str));
@@ -43,7 +43,7 @@ impl AudioEngine {
         Ok(())
     }
     pub async fn set_music_volume(&self, percent: f64) -> Result<()> {
-        if !(0.0..=150.0).contains(&percent) { bail!("гучність має бути 0..150"); }
+        if !(0.0..=100.0).contains(&percent) { bail!("гучність має бути 0..100"); }
         let snap = self.snapshot().await?;
         let channels = snap.volumes_percent.len().max(1);
         let cfg = self.config()?;
@@ -54,7 +54,7 @@ impl AudioEngine {
         self.set_mute(&cfg.music_sink, muted).await
     }
     pub async fn set_sink_percent(&self, sink: &str, percent: f64) -> Result<()> {
-        if !(0.0..=150.0).contains(&percent) { bail!("гучність має бути 0..150"); }
+        if !(0.0..=100.0).contains(&percent) { bail!("гучність має бути 0..100"); }
         self.set_volume(sink, &[percent, percent]).await?;
         self.set_mute(sink, percent <= 0.0).await
     }

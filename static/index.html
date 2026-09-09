@@ -58,7 +58,7 @@
             <button id="mute" class="icon-button" title="Вимкнути звук">🔊</button>
           </div>
           <div class="volume-value"><span id="volume-value">0</span><small>%</small></div>
-          <input id="volume" type="range" min="0" max="150" step="1" value="0" aria-label="Гучність">
+          <input id="volume" type="range" min="0" max="100" step="1" value="0" aria-label="Гучність">
           <p class="hint">Рівень джерел музики перед підмішуванням оповіщень.</p>
         </section>
 
@@ -120,18 +120,18 @@
           <div class="section-heading">
             <div>
               <p class="eyebrow">DEV AUDIO CONTROL</p>
-              <h2>Рівні аудіосистеми</h2>
+              <h2>Рівні та пріоритетисистеми</h2>
             </div>
           </div>
           <div class="level-grid">
             <label class="level-control">
-              <span>Master фізичного виходу <b id="master-level-value">—</b></span>
-              <input id="master-level" type="range" min="0" max="150" step="1">
+              <span>Програмний рівень фізичного виходу <b id="master-level-value">—</b></span>
+              <input id="master-level" type="range" min="0" max="100" step="1">
               <small>Програмний рівень PipeWire після зведення шин.</small>
             </label>
             <label class="level-control">
               <span>Службова шина <b id="alert-bus-level-value">—</b></span>
-              <input id="alert-bus-level" type="range" min="0" max="150" step="1">
+              <input id="alert-bus-level" type="range" min="0" max="100" step="1">
               <small>Поточний рівень шини оповіщень.</small>
             </label>
           </div>
@@ -145,15 +145,15 @@
             </label>
             <label class="field">
               <span>Гучність повідомлень тривоги, %</span>
-              <input id="audio-alert-volume" type="number" min="0" max="150" step="1" required>
+              <input id="audio-alert-volume" type="number" min="0" max="100" step="1" required>
             </label>
             <label class="field">
               <span>Гучність хвилини мовчання, %</span>
-              <input id="audio-minute-volume" type="number" min="0" max="150" step="1" required>
+              <input id="audio-minute-volume" type="number" min="0" max="100" step="1" required>
             </label>
             <label class="field">
               <span>Рівень відновлення без знімка, %</span>
-              <input id="audio-restore-volume" type="number" min="0" max="150" step="1" required>
+              <input id="audio-restore-volume" type="number" min="0" max="100" step="1" required>
             </label>
             <label class="field">
               <span>Час стишення, с</span>

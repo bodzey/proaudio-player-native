@@ -342,7 +342,7 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
         ("default_restore_volume_percent", a.default_restore_volume_percent),
         ("minute_silence.volume_percent", m.volume_percent),
     ] {
-        if !(0.0..=150.0).contains(&value) { bail!("{name} має бути в межах 0..150"); }
+        if !(0.0..=100.0).contains(&value) { bail!("{name} має бути в межах 0..100"); }
     }
     if a.duck_fade_seconds < 0.0 || a.restore_fade_seconds < 0.0 || m.music_fade_seconds < 0.0 {
         bail!("час fade не може бути від'ємним");
