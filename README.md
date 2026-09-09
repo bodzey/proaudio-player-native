@@ -30,8 +30,8 @@ No Python runtime is required by this project. The first parity implementation i
 cargo build --release
 ```
 
-The minimum supported Rust toolchain is 1.85 because the locked dependency
-graph uses stable Cargo Edition 2024 manifests.
+The minimum supported Rust toolchain is 1.88 because the locked dependency
+graph includes ICU 2.3 in addition to stable Cargo Edition 2024 manifests.
 
 The resulting binary is:
 
