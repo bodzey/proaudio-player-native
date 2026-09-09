@@ -25,6 +25,7 @@ use crate::config::{
     save_provider_token, validate_audio, validate_provider, AppConfig, ProviderConfig,
 };
 use crate::fourstream;
+use crate::source_arbiter::SharedSourceState;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_CSS: &str = include_str!("../static/app.css");
@@ -130,14 +131,16 @@ pub struct WebController {
     pub config: Arc<AppConfig>,
     pub audio: AudioEngine,
     pub state: SharedRuntimeState,
+    pub source_state: SharedSourceState,
 }
 
 impl WebController {
-    pub fn new(config: Arc<AppConfig>, state: SharedRuntimeState) -> Self {
+    pub fn new(config: Arc<AppConfig>, state: SharedRuntimeState, source_state: SharedSourceState) -> Self {
         Self {
             audio: AudioEngine::new(config.clone()),
             config,
             state,
+            source_state,
         }
     }
 
@@ -245,6 +248,7 @@ impl WebController {
                 .and_then(|sink| sink.get("index"))
                 .and_then(Value::as_i64)
         });
+        let winner = self.source_state.read().await.clone();
         let mut result = Vec::new();
         for item in inputs.as_array().cloned().unwrap_or_default() {
             if music_index.is_some()
@@ -288,21 +292,23 @@ impl WebController {
                 }
             };
             let identity = format!("{application} {binary}").to_ascii_lowercase();
-            let source_type = if identity.contains("spotify") {
-                "Spotify Connect"
+            let (source_key, source_type) = if identity.contains("spotify") {
+                ("spotify".to_owned(), "Spotify Connect")
             } else if identity.contains("shairport") || identity.contains("airplay") {
-                "AirPlay"
+                ("airplay".to_owned(), "AirPlay")
             } else if identity.contains("gmediarender")
                 || identity.contains("gstreamer")
                 || identity.contains("dlna")
             {
-                "DLNA / UPnP"
+                ("dlna".to_owned(), "DLNA / UPnP")
             } else if identity.contains("mpd") {
-                "Локальна бібліотека"
+                ("mpd".to_owned(), "Локальна бібліотека")
             } else {
-                &application
+                (format!("other:{binary}"), application.as_str())
             };
             result.push(json!({
+                "key": source_key,
+                "active": winner.as_deref() == Some(source_key.as_str()),
                 "type": source_type,
                 "application": application,
                 "media": media,
@@ -711,8 +717,12 @@ impl WebController {
     }
 
     pub async fn resolve_active_player(&self, sources: &[Value], mpd: &Value) -> Result<Value> {
-        let external = sources.iter().find(|source| {
-            source.get("type").and_then(Value::as_str) != Some("Локальна бібліотека")
+        let winner = self.source_state.read().await.clone();
+        if winner.as_deref() == Some("mpd") {
+            return Ok(self.local_player(mpd));
+        }
+        let external = winner.as_deref().and_then(|key| {
+            sources.iter().find(|source| source.get("key").and_then(Value::as_str) == Some(key))
         });
         if let Some(external) = external {
             let source_type = external.get("type").and_then(Value::as_str).unwrap_or("");

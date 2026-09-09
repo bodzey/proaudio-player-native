@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tracing::{error, info};
@@ -85,8 +85,9 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
         store,
         state.clone(),
     );
-    let arbiter = SourceArbiter::new(config.clone());
-    let web_controller = WebController::new(config.clone(), state);
+    let source_state = Arc::new(RwLock::new(None));
+    let arbiter = SourceArbiter::new(config.clone(), source_state.clone());
+    let web_controller = WebController::new(config.clone(), state, source_state);
 
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
     tasks.spawn(async move { alert_controller.run_forever().await });

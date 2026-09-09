@@ -6,25 +6,30 @@ use anyhow::{bail, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
 use crate::command;
 use crate::config::AppConfig;
 
+pub type SharedSourceState = Arc<RwLock<Option<String>>>;
+
 #[derive(Clone)]
 pub struct SourceArbiter {
     config: Arc<AppConfig>,
     active_streams: HashSet<i64>,
     winner: Option<String>,
+    shared_winner: SharedSourceState,
 }
 
 impl SourceArbiter {
-    pub fn new(config: Arc<AppConfig>) -> Self {
+    pub fn new(config: Arc<AppConfig>, shared_winner: SharedSourceState) -> Self {
         Self {
             config,
             active_streams: HashSet::new(),
             winner: None,
+            shared_winner,
         }
     }
 
@@ -166,7 +171,7 @@ impl SourceArbiter {
             .map(|(key, _)| key.clone())
     }
 
-    async fn stop_source(&self, key: &str) -> Result<()> {
+    async fn stop_source(&self, key: &str, streams: &[Value]) -> Result<()> {
         if key == "mpd" {
             let out = command::run("mpc", &["stop"], false, 8).await?;
             if out.code != 0 {
@@ -211,6 +216,22 @@ impl SourceArbiter {
                 debug!(source = key, "Не вдалося зупинити MPRIS: {}", out.stderr);
             }
         }
+
+        // AirPlay and DLNA receivers may keep an uncorked session after Stop.
+        // Terminating their unprivileged receiver process disconnects the sender;
+        // systemd immediately starts a clean receiver instance.
+        if matches!(key, "airplay" | "dlna") {
+            for stream in streams {
+                let pid = stream.get("properties").and_then(Value::as_object)
+                    .and_then(|p| p.get("application.process.id")).and_then(Value::as_str);
+                if let Some(pid) = pid.filter(|value| value.chars().all(|c| c.is_ascii_digit())) {
+                    let out = command::run("kill", &["-TERM", pid], false, 3).await?;
+                    if out.code != 0 {
+                        debug!(source = key, pid, "Не вдалося завершити receiver: {}", out.stderr);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -231,6 +252,7 @@ impl SourceArbiter {
         self.winner = self.choose_winner(&grouped);
         let changed = self.winner != previous;
         if changed {
+            *self.shared_winner.write().await = self.winner.clone();
             info!(winner = ?self.winner, "Активне джерело змінено");
         }
 
@@ -267,7 +289,7 @@ impl SourceArbiter {
         if changed && self.winner.is_some() {
             for key in grouped.keys() {
                 if Some(key) != self.winner.as_ref() {
-                    let _ = self.stop_source(key).await;
+                    let _ = self.stop_source(key, &grouped[key]).await;
                 }
             }
         }
