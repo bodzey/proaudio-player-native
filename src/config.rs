@@ -395,6 +395,17 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_config(c: &AppConfig) -> Result<()> {
+    validate_provider(&c.provider)?;
+    validate_audio(&c.audio, &c.minute_silence)?;
+    chrono::NaiveTime::parse_from_str(&c.minute_silence.start_time, "%H:%M:%S")
+        .map_err(|_| anyhow!("minute_silence.start_time має формат HH:MM:SS"))?;
+    c.minute_silence.timezone.parse::<chrono_tz::Tz>()
+        .map_err(|_| anyhow!("невідомий часовий пояс minute_silence.timezone"))?;
+    if c.web.max_library_items == 0 || c.web.max_library_items > 50_000 { bail!("web.max_library_items має бути 1..50000"); }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,26 +421,16 @@ mod tests {
 
     #[test]
     fn configured_rate_must_be_allowed() {
-        let mut audio = AudioConfig::default();
-        audio.sample_rate = 96_000;
+        let audio = AudioConfig { sample_rate: 96_000, ..AudioConfig::default() };
         assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
     }
 
     #[test]
     fn future_rate_modes_fail_closed_until_they_are_implemented() {
-        let mut audio = AudioConfig::default();
-        audio.sample_rate_mode = SampleRateMode::Adaptive;
+        let audio = AudioConfig {
+            sample_rate_mode: SampleRateMode::Adaptive,
+            ..AudioConfig::default()
+        };
         assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
     }
-}
-
-pub fn validate_config(c: &AppConfig) -> Result<()> {
-    validate_provider(&c.provider)?;
-    validate_audio(&c.audio, &c.minute_silence)?;
-    chrono::NaiveTime::parse_from_str(&c.minute_silence.start_time, "%H:%M:%S")
-        .map_err(|_| anyhow!("minute_silence.start_time має формат HH:MM:SS"))?;
-    c.minute_silence.timezone.parse::<chrono_tz::Tz>()
-        .map_err(|_| anyhow!("невідомий часовий пояс minute_silence.timezone"))?;
-    if c.web.max_library_items == 0 || c.web.max_library_items > 50_000 { bail!("web.max_library_items має бути 1..50000"); }
-    Ok(())
 }
