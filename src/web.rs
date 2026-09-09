@@ -499,19 +499,6 @@ impl WebController {
             .ok_or_else(|| anyhow!("Апаратний ALSA-регулятор не знайдено"))
     }
 
-    pub async fn set_primary_hardware(&self, percent: Option<u32>, muted: Option<bool>) -> Result<Value> {
-        let mixer = self.primary_hardware_mixer().await?;
-        let card = mixer.get("card").and_then(Value::as_u64).ok_or_else(|| anyhow!("Некоректна ALSA-карта"))?.to_string();
-        let control = mixer.get("control").and_then(Value::as_str).ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
-        if let Some(percent) = percent {
-            let value = format!("{}%", percent.min(100));
-            self.run("amixer", &["-c", &card, "sset", control, &value, "unmute"], true, 8).await?;
-        } else if let Some(muted) = muted {
-            self.run("amixer", &["-c", &card, "sset", control, if muted { "mute" } else { "unmute" }], true, 8).await?;
-        }
-        self.primary_hardware_mixer().await
-    }
-
     pub async fn mixer_state(&self) -> Result<Value> {
         let music = self.sink_state(&self.config.audio.music_sink).await?;
         let alert = self.sink_state(&self.config.audio.alert_sink).await?;
