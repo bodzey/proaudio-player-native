@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/proaudio-player}"
+export PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}"
+CONFIG="/etc/proaudio-player-alert/config.yaml"
+NATIVE_SERVICE="proaudio-player-native.service"
+
+source_services=(
+    proaudio-player-mpd.service
+    proaudio-player-shairport.service
+    proaudio-player-dlna.service
+    proaudio-player-spotifyd.service
+)
+
+existing_sources=()
+for service in "${source_services[@]}"; do
+    [[ -f "/usr/lib/systemd/system/$service" ]] && existing_sources+=("$service")
+done
+
+case "${1:-}" in
+    start)
+        systemctl start proaudio-player-buses.service "${existing_sources[@]}" "$NATIVE_SERVICE"
+        ;;
+    stop)
+        systemctl stop "$NATIVE_SERVICE" "${existing_sources[@]}" proaudio-player-buses.service
+        ;;
+    restart)
+        systemctl restart proaudio-player-buses.service "${existing_sources[@]}" "$NATIVE_SERVICE"
+        ;;
+    services)
+        systemctl --no-pager status proaudio-player-buses.service "${existing_sources[@]}" "$NATIVE_SERVICE"
+        ;;
+    status)
+        /usr/bin/proaudio-player-native --config "$CONFIG" status
+        ;;
+    test-start|test-end|test-silence)
+        /usr/bin/proaudio-player-native --config "$CONFIG" "$1"
+        ;;
+    test-cycle)
+        /usr/bin/proaudio-player-native --config "$CONFIG" test-cycle --hold "${2:-5}"
+        ;;
+    sinks)
+        pactl list short sinks
+        ;;
+    logs)
+        journalctl -u "$NATIVE_SERVICE" -n "${2:-100}" --no-pager
+        ;;
+    *)
+        echo "Використання: proaudio-player-audioctl {start|stop|restart|services|status|test-start|test-end|test-silence|test-cycle [секунди]|sinks|logs [рядки]}" >&2
+        exit 2
+        ;;
+esac
