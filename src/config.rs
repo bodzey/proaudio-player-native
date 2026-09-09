@@ -32,6 +32,8 @@ fn default_duck_db() -> f64 { -18.0 }
 fn default_duck_fade() -> f64 { 1.0 }
 fn default_restore_fade() -> f64 { 3.0 }
 fn default_volume() -> f64 { 100.0 }
+fn default_alert_repeat_minutes() -> u64 { 0 }
+fn default_false() -> bool { false }
 fn default_timezone() -> String { "Europe/Kyiv".into() }
 fn default_silence_time() -> String { "08:59:50".into() }
 fn default_catchup() -> u64 { 120 }
@@ -119,6 +121,10 @@ pub struct AudioConfig {
     pub alert_volume_percent: f64,
     #[serde(default = "default_volume")]
     pub default_restore_volume_percent: f64,
+    #[serde(default = "default_alert_repeat_minutes")]
+    pub alert_repeat_interval_minutes: u64,
+    #[serde(default = "default_false")]
+    pub duck_only_during_announcement: bool,
     #[serde(default = "default_start_file")]
     pub start_file: PathBuf,
     #[serde(default = "default_end_file")]
@@ -135,7 +141,9 @@ impl Default for AudioConfig {
             music_sink: default_music_sink(), alert_sink: default_alert_sink(),
             duck_db: default_duck_db(), duck_fade_seconds: default_duck_fade(),
             restore_fade_seconds: default_restore_fade(), alert_volume_percent: default_volume(),
-            default_restore_volume_percent: default_volume(), start_file: default_start_file(),
+            default_restore_volume_percent: default_volume(),
+            alert_repeat_interval_minutes: default_alert_repeat_minutes(),
+            duck_only_during_announcement: default_false(), start_file: default_start_file(),
             end_file: default_end_file(), player_binary: default_player_binary(),
             settings_file: default_audio_settings(),
         }
@@ -218,7 +226,8 @@ struct AudioSettingsFile { audio: Option<AudioSettingsPatch> }
 pub struct AudioSettingsPatch {
     pub duck_db: Option<f64>, pub duck_fade_seconds: Option<f64>, pub restore_fade_seconds: Option<f64>,
     pub alert_volume_percent: Option<f64>, pub default_restore_volume_percent: Option<f64>,
-    pub minute_silence_volume_percent: Option<f64>,
+    pub minute_silence_volume_percent: Option<f64>, pub alert_repeat_interval_minutes: Option<u64>,
+    pub duck_only_during_announcement: Option<bool>,
 }
 
 pub fn load_config(path: impl AsRef<Path>) -> Result<AppConfig> {
@@ -262,6 +271,8 @@ pub fn effective_audio(base: &AudioConfig, minute: &MinuteSilenceConfig) -> Resu
         if let Some(v) = a.alert_volume_percent { audio.alert_volume_percent = v; }
         if let Some(v) = a.default_restore_volume_percent { audio.default_restore_volume_percent = v; }
         if let Some(v) = a.minute_silence_volume_percent { silence.volume_percent = v; }
+        if let Some(v) = a.alert_repeat_interval_minutes { audio.alert_repeat_interval_minutes = v; }
+        if let Some(v) = a.duck_only_during_announcement { audio.duck_only_during_announcement = v; }
     }
     validate_audio(&audio, &silence)?;
     Ok((audio, silence))
@@ -302,7 +313,9 @@ pub fn save_audio_settings(audio: &AudioConfig, minute: &MinuteSilenceConfig) ->
         "restore_fade_seconds": audio.restore_fade_seconds,
         "alert_volume_percent": audio.alert_volume_percent,
         "default_restore_volume_percent": audio.default_restore_volume_percent,
-        "minute_silence_volume_percent": minute.volume_percent
+        "minute_silence_volume_percent": minute.volume_percent,
+        "alert_repeat_interval_minutes": audio.alert_repeat_interval_minutes,
+        "duck_only_during_announcement": audio.duck_only_during_announcement
     }}))?;
     atomic_write(&audio.settings_file, payload.as_bytes(), 0o600)
 }
@@ -343,6 +356,9 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
         ("minute_silence.volume_percent", m.volume_percent),
     ] {
         if !(0.0..=100.0).contains(&value) { bail!("{name} має бути в межах 0..100"); }
+    }
+    if a.alert_repeat_interval_minutes > 1_440 {
+        bail!("alert_repeat_interval_minutes має бути 0..1440");
     }
     if a.duck_fade_seconds < 0.0 || a.restore_fade_seconds < 0.0 || m.music_fade_seconds < 0.0 {
         bail!("час fade не може бути від'ємним");

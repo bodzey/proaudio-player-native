@@ -17,6 +17,8 @@ audio:
   restore_fade_seconds: 3
   alert_volume_percent: 100
   default_restore_volume_percent: 100
+  alert_repeat_interval_minutes: 0
+  duck_only_during_announcement: false
   start_file: "/usr/share/proaudio-player/announcements/alarm_start.mp3"
   end_file: "/usr/share/proaudio-player/announcements/alarm_end.mp3"
   player_binary: "/usr/bin/mpv"

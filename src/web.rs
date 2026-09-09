@@ -146,9 +146,14 @@ impl WebController {
 
     pub async fn priority_state(&self) -> Value {
         let state = self.state.lock().await;
+        let talkover = effective_audio(&self.config.audio, &self.config.minute_silence)
+            .map(|(audio, _)| audio.duck_only_during_announcement)
+            .unwrap_or(false);
         json!({
             "mode": state.mode,
             "active": state.mode == "alert" || state.minute_silence_active,
+            "blocking": state.minute_silence_active || (state.mode == "alert" && !talkover),
+            "duck_only_during_announcement": talkover,
             "minute_silence_active": state.minute_silence_active,
             "matched_uids": state.matched_uids,
             "last_success_at": state.last_success_at,
@@ -159,7 +164,9 @@ impl WebController {
 
     pub async fn ensure_controls_available(&self) -> Result<()> {
         let state = self.state.lock().await;
-        if state.mode == "alert" || state.minute_silence_active {
+        let talkover = effective_audio(&self.config.audio, &self.config.minute_silence)?
+            .0.duck_only_during_announcement;
+        if state.minute_silence_active || (state.mode == "alert" && !talkover) {
             bail!("Керування музикою заблоковано пріоритетним оповіщенням");
         }
         Ok(())
@@ -541,6 +548,8 @@ impl WebController {
             "alert_volume_percent": audio.alert_volume_percent,
             "default_restore_volume_percent": audio.default_restore_volume_percent,
             "minute_silence_volume_percent": minute.volume_percent,
+            "alert_repeat_interval_minutes": audio.alert_repeat_interval_minutes,
+            "duck_only_during_announcement": audio.duck_only_during_announcement,
         }))
     }
 
@@ -945,6 +954,8 @@ struct AudioSettingsBody {
     default_restore_volume_percent: Option<f64>,
     duck_fade_seconds: Option<f64>,
     restore_fade_seconds: Option<f64>,
+    alert_repeat_interval_minutes: Option<u64>,
+    duck_only_during_announcement: Option<bool>,
 }
 #[derive(Deserialize)]
 struct PlayerBody { action: String }
@@ -1087,6 +1098,8 @@ async fn put_audio_settings(State(controller): State<WebController>, Json(body):
     if let Some(v) = body.default_restore_volume_percent { audio.default_restore_volume_percent = v; }
     if let Some(v) = body.duck_fade_seconds { audio.duck_fade_seconds = v; }
     if let Some(v) = body.restore_fade_seconds { audio.restore_fade_seconds = v; }
+    if let Some(v) = body.alert_repeat_interval_minutes { audio.alert_repeat_interval_minutes = v; }
+    if let Some(v) = body.duck_only_during_announcement { audio.duck_only_during_announcement = v; }
     validate_audio(&audio, &minute).map_err(map_internal)?;
     save_audio_settings(&audio, &minute).map_err(map_internal)?;
     controller.audio_settings().map(Json).map_err(map_internal)

@@ -182,6 +182,24 @@
               <span>Час відновлення, с</span>
               <input id="audio-restore-fade" type="number" min="0" max="30" step="0.1" required>
             </label>
+            <label class="field">
+              <span>Повторення активної тривоги</span>
+              <select id="audio-alert-repeat">
+                <option value="0">Не повторювати</option>
+                <option value="5">Кожні 5 хвилин</option>
+                <option value="10">Кожні 10 хвилин</option>
+                <option value="15">Кожні 15 хвилин</option>
+                <option value="30">Кожні 30 хвилин</option>
+                <option value="60">Щогодини</option>
+              </select>
+            </label>
+            <label class="checkbox-field">
+              <input id="audio-duck-talkover" type="checkbox">
+              <span>
+                <b>Приглушувати лише під час сповіщення про тривогу та відбій</b>
+                <small>Після аудіофайлу музика повертається до попереднього рівня, навіть якщо тривога триває.</small>
+              </span>
+            </label>
             <div class="settings-actions field-wide">
               <span id="audio-settings-result" class="settings-result" role="status"></span>
               <button type="submit" class="save-button">Зберегти аудіоналаштування</button>

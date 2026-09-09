@@ -132,8 +132,9 @@ function renderStatus(data) {
   $("#elapsed").textContent = player.elapsed || "0:00";
   $("#duration").textContent = player.duration || "0:00";
 
-  setLocked(Boolean(priority.active));
-  renderTransport(player, Boolean(priority.active));
+  const priorityBlocking = Boolean(priority.blocking ?? priority.active);
+  setLocked(priorityBlocking);
+  renderTransport(player, priorityBlocking);
   updateQueueState();
   $("#last-update").textContent = `Оновлено ${new Date().toLocaleTimeString("uk-UA")}`;
 }
@@ -294,6 +295,8 @@ function renderAudioSettings(data) {
   $("#audio-restore-volume").value = data.default_restore_volume_percent;
   $("#audio-duck-fade").value = data.duck_fade_seconds;
   $("#audio-restore-fade").value = data.restore_fade_seconds;
+  $("#audio-alert-repeat").value = String(data.alert_repeat_interval_minutes ?? 0);
+  $("#audio-duck-talkover").checked = Boolean(data.duck_only_during_announcement);
 }
 
 async function loadAudioSettings() {
@@ -395,6 +398,8 @@ $("#audio-settings").addEventListener("submit", async (event) => {
         default_restore_volume_percent: Number($("#audio-restore-volume").value),
         duck_fade_seconds: Number($("#audio-duck-fade").value),
         restore_fade_seconds: Number($("#audio-restore-fade").value),
+        alert_repeat_interval_minutes: Number($("#audio-alert-repeat").value),
+        duck_only_during_announcement: $("#audio-duck-talkover").checked,
       }),
     });
     renderAudioSettings(data);
