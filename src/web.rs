@@ -383,11 +383,14 @@ impl WebController {
                 .and_then(Value::as_str).filter(|v| !v.is_empty()).unwrap_or(name);
             let device_class = properties.and_then(|p| p.get("device.class"))
                 .and_then(Value::as_str).unwrap_or("");
+            let alsa_card = properties.and_then(|p| p.get("alsa.card"))
+                .and_then(Value::as_str).and_then(|value| value.parse::<u32>().ok());
             Some(json!({
                 "id": name,
                 "name": description,
                 "state": sink.get("state").and_then(Value::as_str).unwrap_or("UNKNOWN").to_ascii_lowercase(),
                 "device_class": device_class,
+                "alsa_card": alsa_card,
                 "selected": selected.as_deref().or(current.as_deref()) == Some(name),
                 "available": true
             }))
@@ -465,10 +468,19 @@ impl WebController {
 
     pub async fn primary_hardware_mixer(&self) -> Result<Value> {
         let mixers = self.hardware_mixers().await?;
-        mixers.iter()
-            .find(|item| item.get("card_name").and_then(Value::as_str).is_some_and(|name| name.to_ascii_lowercase().contains("headphone")))
-            .or_else(|| ["Master", "Headphone", "PCM", "Speaker"].iter().find_map(|preferred| mixers.iter().find(|item| item.get("control").and_then(Value::as_str) == Some(*preferred))))
-            .or_else(|| mixers.first()).cloned()
+        let selected_card = self.audio_outputs().await.ok().and_then(|outputs| {
+            outputs.into_iter()
+                .find(|item| item.get("selected").and_then(Value::as_bool) == Some(true))
+                .and_then(|item| item.get("alsa_card").and_then(Value::as_u64))
+        });
+        let candidates = mixers.iter().filter(|item| {
+            selected_card.is_none() || item.get("card").and_then(Value::as_u64) == selected_card
+        }).collect::<Vec<_>>();
+        ["Master", "Headphone", "PCM", "Speaker"].iter()
+            .find_map(|preferred| candidates.iter().find(|item| item.get("control").and_then(Value::as_str) == Some(*preferred)).copied())
+            .or_else(|| candidates.first().copied())
+            .or_else(|| mixers.first())
+            .cloned()
             .ok_or_else(|| anyhow!("Апаратний ALSA-регулятор не знайдено"))
     }
 
