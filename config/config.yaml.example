@@ -17,8 +17,8 @@ audio:
   restore_fade_seconds: 3
   alert_volume_percent: 100
   default_restore_volume_percent: 100
-  start_file: "/var/lib/proaudio-player-alert/media/alarm_start.mp3"
-  end_file: "/var/lib/proaudio-player-alert/media/alarm_end.mp3"
+  start_file: "/usr/share/proaudio-player/announcements/alarm_start.mp3"
+  end_file: "/usr/share/proaudio-player/announcements/alarm_end.mp3"
   player_binary: "/usr/bin/mpv"
   settings_file: "/var/lib/proaudio-player-alert/audio-settings.yaml"
 
@@ -29,7 +29,7 @@ minute_silence:
   catch_up_seconds: 120
   music_fade_seconds: 1
   volume_percent: 100
-  file: "/var/lib/proaudio-player-alert/media/minute_silence.mp3"
+  file: "/usr/share/proaudio-player/announcements/minute_silence.mp3"
 
 web:
   enabled: true
