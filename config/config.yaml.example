@@ -1,0 +1,43 @@
+provider:
+  endpoint: "http://192.168.88.122/v1/iot/active_air_raid_alerts/{uid}.json"
+  token_file: "/etc/proaudio-player-alert/alerts-token"
+  settings_file: "/var/lib/proaudio-player-alert/provider-settings.yaml"
+  location_uid: 1133
+  location_type: "hromada"
+  poll_interval_seconds: 8
+  request_timeout_seconds: 7
+  rate_limit_backoff_seconds: 60
+  clear_confirmations: 2
+
+audio:
+  music_sink: "proaudio_player_music"
+  alert_sink: "proaudio_player_alert"
+  duck_db: -12
+  duck_fade_seconds: 1
+  restore_fade_seconds: 3
+  alert_volume_percent: 100
+  default_restore_volume_percent: 100
+  alert_repeat_interval_minutes: 0
+  duck_only_during_announcement: false
+  start_file: "/usr/share/proaudio-player/announcements/alarm_start.mp3"
+  end_file: "/usr/share/proaudio-player/announcements/alarm_end.mp3"
+  player_binary: "/usr/bin/mpv"
+  settings_file: "/var/lib/proaudio-player-alert/audio-settings.yaml"
+
+minute_silence:
+  enabled: true
+  timezone: "Europe/Kyiv"
+  start_time: "08:59:50"
+  catch_up_seconds: 120
+  music_fade_seconds: 1
+  volume_percent: 100
+  file: "/usr/share/proaudio-player/announcements/minute_silence.mp3"
+
+web:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+  max_library_items: 5000
+
+state_file: "/var/lib/proaudio-player-alert/state.json"
+log_level: "INFO"

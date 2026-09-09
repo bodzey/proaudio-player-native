@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0e13">
+  <meta name="description" content="Керування мережевим аудіоплеєром ProAudio Player">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ProAudio">
+  <title>ProAudio Player</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icon.svg">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">NETWORK AUDIO SYSTEM</p>
+        <h1>ProAudio Player</h1>
+      </div>
+      <div class="header-actions">
+        <button id="pwa-install" class="install-button hidden" type="button">Встановити</button>
+        <div id="connection" class="badge neutral"><span></span>Підключення…</div>
+      </div>
+    </header>
+
+    <nav class="app-nav" aria-label="Основні розділи">
+      <button class="nav-item active" type="button" data-page-target="player" aria-current="page">
+        <span class="nav-icon">▶</span><span>Плеєр</span>
+      </button>
+      <button class="nav-item" type="button" data-page-target="mixer">
+        <span class="nav-icon">≡</span><span>Мікшер</span>
+      </button>
+      <button class="nav-item" type="button" data-page-target="alerts">
+        <span class="nav-icon">!</span><span>Оповіщення</span>
+      </button>
+    </nav>
+
+    <main>
+      <section id="priority" class="priority hidden" aria-live="assertive">
+        <div class="priority-icon">!</div>
+        <div>
+          <strong id="priority-title">Пріоритетне оповіщення</strong>
+          <p id="priority-text">Керування музикою тимчасово заблоковано.</p>
+        </div>
+      </section>
+
+      <div class="grid">
+        <section class="card now-playing page-panel" data-page="player">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ЗАРАЗ ГРАЄ</p>
+              <h2 id="track-title">Очікування аудіо</h2>
+            </div>
+            <div id="source-chip" class="source-chip">Немає потоку</div>
+          </div>
+          <p id="track-meta" class="track-meta">Оберіть ProAudio Player у Spotify, AirPlay, DLNA або запустіть локальний трек.</p>
+          <div id="track-progress" class="track-progress hidden">
+            <div class="progress-bar"><span id="progress-fill"></span></div>
+            <div class="progress-time"><span id="elapsed">0:00</span><span id="duration">0:00</span></div>
+          </div>
+          <div class="transport" aria-label="Керування локальним плеєром">
+            <button data-action="prev" title="Попередній">⏮</button>
+            <button id="play" data-action="play" class="primary" title="Відтворити">▶</button>
+            <button data-action="next" title="Наступний">⏭</button>
+            <button data-action="stop" title="Зупинити">■</button>
+          </div>
+          <p class="transport-note">Кнопки керують локальним MPD-плеєром.</p>
+        </section>
+
+        <section class="card volume-card page-panel" data-page="player">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">МУЗИЧНА ШИНА</p>
+              <h2>Гучність музики</h2>
+            </div>
+            <button id="mute" class="icon-button" title="Вимкнути звук">🔊</button>
+          </div>
+          <div class="volume-value"><span id="volume-value">0</span><small>%</small></div>
+          <input id="volume" type="range" min="0" max="100" step="1" value="0" aria-label="Гучність">
+          <p class="hint">Рівень джерел музики перед підмішуванням оповіщень.</p>
+        </section>
+
+        <section class="card library-card page-panel" data-page="player">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ЛОКАЛЬНА МУЗИКА</p>
+              <h2>Бібліотека</h2>
+            </div>
+            <button id="refresh-library" class="text-button">Оновити</button>
+          </div>
+          <input id="search" class="search" type="search" placeholder="Знайти трек…" autocomplete="off">
+          <div id="library" class="item-list"><p class="empty">Завантаження…</p></div>
+        </section>
+
+        <section class="card playlists-card page-panel" data-page="player">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">MPD</p>
+              <h2>Плейлісти</h2>
+            </div>
+          </div>
+          <div id="playlists" class="item-list"><p class="empty">Завантаження…</p></div>
+        </section>
+
+        <section class="card stream-card settings-card page-panel" data-page="player">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">МЕРЕЖЕВИЙ ПОТІК</p>
+              <h2>Інтернет-радіо, M3U/M3U8 або HLS</h2>
+            </div>
+          </div>
+          <form id="stream-player" class="settings-form">
+            <label class="field field-wide">
+              <span>HTTP/HTTPS-адреса станції, плейлиста або потоку</span>
+              <input id="stream-url" type="url" required spellcheck="false"
+                     placeholder="https://example.org/radio.m3u8">
+              <small>Підтримка конкретного формату залежить від MPD/FFmpeg у прошивці.</small>
+            </label>
+            <div class="settings-actions field-wide">
+              <span id="stream-result" class="settings-result" role="status"></span>
+              <button type="submit" class="save-button">Відтворити потік</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card queue-card page-panel" data-page="player">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ЛОКАЛЬНИЙ ПЛЕЄР</p>
+              <h2>Черга <span id="queue-count" class="count">0</span></h2>
+            </div>
+            <button id="clear-queue" class="text-button">Очистити</button>
+          </div>
+          <div id="queue" class="queue-list"><p class="empty">Завантаження…</p></div>
+        </section>
+
+        <section class="card settings-card page-panel hidden-page" data-page="mixer">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">DEV AUDIO CONTROL</p>
+              <h2>Аудіовихід, рівні та пріоритети</h2>
+            </div>
+          </div>
+          <div class="output-picker">
+            <label class="field">
+              <span>Пристрій виведення звуку</span>
+              <select id="audio-output"><option value="">Пошук аудіовиходів…</option></select>
+              <small id="audio-output-status">Список оновлюється без перезавантаження сторінки.</small>
+            </label>
+            <button id="refresh-audio-outputs" type="button" class="secondary-button">Оновити список</button>
+          </div>
+          <div class="mixer" id="audio-mixer">
+            <div class="mixer-strip" data-channel="music">
+              <div class="mixer-name">MUSIC</div>
+              <div class="mixer-meter"><span></span></div>
+              <input class="mixer-fader" id="mixer-music" type="range" min="-60" max="0" step="0.5" value="0" orient="vertical">
+              <output id="mixer-music-db">0.0 dB</output>
+              <button type="button" class="mixer-mute" data-mixer-mute="music">MUTE</button>
+              <small>Музична шина</small>
+            </div>
+            <div class="mixer-strip mixer-priority" data-channel="alert">
+              <div class="mixer-name">ALERT</div>
+              <div class="mixer-meter"><span></span></div>
+              <input class="mixer-fader" id="mixer-alert" type="range" min="-60" max="0" step="0.5" value="0" orient="vertical">
+              <output id="mixer-alert-db">0.0 dB</output>
+              <button type="button" class="mixer-mute" data-mixer-mute="alert">MUTE</button>
+              <small>Шина оповіщень</small>
+            </div>
+            <div class="mixer-strip mixer-master" data-channel="master">
+              <div class="mixer-name">MASTER</div>
+              <div class="mixer-meter"><span></span></div>
+              <input class="mixer-fader" id="mixer-master" type="range" min="-60" max="0" step="0.5" value="0" orient="vertical">
+              <output id="mixer-master-db">0.0 dB</output>
+              <button type="button" class="mixer-mute" data-mixer-mute="master">MUTE</button>
+              <small id="mixer-master-name">Вибраний аудіовихід</small>
+            </div>
+          </div>
+          <form id="audio-settings" class="settings-form">
+            <label class="field">
+              <span>Стишення музики під час тривоги, dB</span>
+              <input id="audio-duck-db" type="number" min="-60" max="0" step="1" required>
+            </label>
+            <label class="field">
+              <span>Гучність повідомлень тривоги, %</span>
+              <input id="audio-alert-volume" type="number" min="0" max="100" step="1" required>
+            </label>
+            <label class="field">
+              <span>Гучність хвилини мовчання, %</span>
+              <input id="audio-minute-volume" type="number" min="0" max="100" step="1" required>
+            </label>
+            <label class="field">
+              <span>Рівень відновлення без знімка, %</span>
+              <input id="audio-restore-volume" type="number" min="0" max="100" step="1" required>
+            </label>
+            <label class="field">
+              <span>Час стишення, с</span>
+              <input id="audio-duck-fade" type="number" min="0" max="30" step="0.1" required>
+            </label>
+            <label class="field">
+              <span>Час відновлення, с</span>
+              <input id="audio-restore-fade" type="number" min="0" max="30" step="0.1" required>
+            </label>
+            <label class="field">
+              <span>Повторення активної тривоги</span>
+              <select id="audio-alert-repeat">
+                <option value="0">Не повторювати</option>
+                <option value="5">Кожні 5 хвилин</option>
+                <option value="10">Кожні 10 хвилин</option>
+                <option value="15">Кожні 15 хвилин</option>
+                <option value="30">Кожні 30 хвилин</option>
+                <option value="60">Щогодини</option>
+              </select>
+            </label>
+            <label class="checkbox-field">
+              <input id="audio-duck-talkover" type="checkbox">
+              <span>
+                <b>Приглушувати лише під час сповіщення про тривогу та відбій</b>
+                <small>Після аудіофайлу музика повертається до попереднього рівня, навіть якщо тривога триває.</small>
+              </span>
+            </label>
+            <div class="settings-actions field-wide">
+              <span id="audio-settings-result" class="settings-result" role="status"></span>
+              <button type="submit" class="save-button">Зберегти аудіоналаштування</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card settings-card page-panel hidden-page" data-page="alerts">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ОПОВІЩЕННЯ</p>
+              <h2>API повітряних тривог</h2>
+            </div>
+            <div id="alerts-token-state" class="source-chip">Перевірка…</div>
+          </div>
+          <form id="alerts-settings" class="settings-form">
+            <label class="field field-wide">
+              <span>Шаблон адреси API</span>
+              <input id="alerts-endpoint" name="endpoint" type="url" required spellcheck="false">
+              <small>Адреса повинна містити <code>{uid}</code>.</small>
+            </label>
+            <label class="field">
+              <span>UID локації</span>
+              <input id="alerts-location-uid" name="location_uid" type="number" min="1" required>
+            </label>
+            <label class="field">
+              <span>Тип локації</span>
+              <select id="alerts-location-type" name="location_type">
+                <option value="hromada">Територіальна громада</option>
+                <option value="city">Місто</option>
+                <option value="raion">Район</option>
+                <option value="oblast">Область</option>
+                <option value="standalone">Окрема територія</option>
+              </select>
+            </label>
+            <label class="field field-wide">
+              <span>Новий API-токен</span>
+              <input id="alerts-token" name="token" type="password" autocomplete="new-password" placeholder="Залиште порожнім, щоб не змінювати">
+              <small>Збережений токен ніколи не передається назад у браузер.</small>
+            </label>
+            <label class="field">
+              <span>Інтервал опитування, с</span>
+              <input id="alerts-poll" name="poll_interval_seconds" type="number" min="8" step="1" required>
+            </label>
+            <label class="field">
+              <span>Очікування відповіді, с</span>
+              <input id="alerts-timeout" name="request_timeout_seconds" type="number" min="1" step="1" required>
+            </label>
+            <label class="field">
+              <span>Пауза після HTTP 429, с</span>
+              <input id="alerts-backoff" name="rate_limit_backoff_seconds" type="number" min="60" step="1" required>
+            </label>
+            <label class="field">
+              <span>Підтверджень відбою</span>
+              <input id="alerts-clear-confirmations" name="clear_confirmations" type="number" min="1" step="1" required>
+            </label>
+            <div class="settings-actions field-wide">
+              <span id="alerts-settings-result" class="settings-result" role="status"></span>
+              <button id="test-alerts-settings" type="button" class="secondary-button">Перевірити API</button>
+              <button type="submit" class="save-button">Зберегти</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </main>
+
+    <footer>
+      <span id="last-update">—</span>
+      <span>ProAudio Player · <span id="realtime-state">Підключення до live-каналу…</span></span>
+    </footer>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
