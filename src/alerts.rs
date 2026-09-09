@@ -45,11 +45,14 @@ impl AlertController {
             }
             values
         };
-        if !was_active { return Ok(()); }
-        self.persist().await?;
+        if was_active {
+            self.persist().await?;
+        }
         if mode == "alert" {
-            if let Some(snapshot) = alert_snapshot.as_ref() { self.audio.ensure_alert(snapshot).await?; }
-        } else {
+            if let Some(snapshot) = alert_snapshot.as_ref() {
+                self.audio.ensure_alert(snapshot).await?;
+            }
+        } else if was_active {
             self.audio.restore(minute_snapshot.as_ref()).await?;
         }
         Ok(())
@@ -124,6 +127,21 @@ impl AlertController {
             if let Err(err) = result {
                 error!("Помилка хвилини мовчання: {err:#}");
                 state.lock().await.last_error = Some(format!("Хвилина мовчання: {err}"));
+                let (mode, alert_snapshot) = {
+                    let current = state.lock().await;
+                    (current.mode.clone(), current.audio_snapshot.clone())
+                };
+                let recovery = if mode == "alert" {
+                    match alert_snapshot.as_ref() {
+                        Some(alert) => audio.ensure_alert(alert).await,
+                        None => Ok(()),
+                    }
+                } else {
+                    audio.restore(Some(&snapshot)).await
+                };
+                if let Err(recovery_error) = recovery {
+                    error!("Не вдалося відновити аудіо після помилки хвилини мовчання: {recovery_error:#}");
+                }
             } else { warn!("Завершення щоденної хвилини мовчання"); }
             let snapshot_to_save = {
                 let mut s = state.lock().await;
