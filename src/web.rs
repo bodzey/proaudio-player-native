@@ -1072,7 +1072,7 @@ async fn service_worker() -> Response {
 }
 async fn icon() -> Response { content_response("image/svg+xml; charset=utf-8", APP_ICON_SVG) }
 
-async fn events(State(controller): State<WebController>) -> Sse<EventStream> {
+async fn events(State(controller): State<WebController>) -> impl IntoResponse {
     let mut receiver = controller.events.subscribe();
     let (sender, stream) = mpsc::channel(4);
     tokio::spawn(async move {
