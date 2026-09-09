@@ -91,6 +91,17 @@ impl SourceArbiter {
         }
     }
 
+    fn volume_is_unity(stream: &Value) -> bool {
+        let Some(channels) = stream.get("volume").and_then(Value::as_object) else {
+            return false;
+        };
+        !channels.is_empty()
+            && channels.values().all(|channel| {
+                channel.get("value").and_then(Value::as_u64) == Some(65_536)
+                    || channel.get("value_percent").and_then(Value::as_str) == Some("100%")
+            })
+    }
+
     async fn music_sink_index(&self) -> Result<Option<i64>> {
         let out = command::run("pactl", &["-f", "json", "list", "sinks"], false, 8).await?;
         if out.code != 0 {
@@ -259,31 +270,45 @@ impl SourceArbiter {
         }
 
         for (key, items) in &grouped {
-            if Some(key) == self.winner.as_ref() && !changed {
-                continue;
-            }
-            let should_mute = Some(key) != self.winner.as_ref();
+            let is_winner = Some(key) == self.winner.as_ref();
+            let should_mute = !is_winner;
             for item in items {
-                if Self::flag(item, "mute") == should_mute {
-                    continue;
-                }
                 let Some(index) = item.get("index").and_then(Value::as_i64) else {
                     continue;
                 };
                 let index_text = index.to_string();
-                let out = command::run(
-                    "pactl",
-                    &[
-                        "set-sink-input-mute",
-                        &index_text,
-                        if should_mute { "1" } else { "0" },
-                    ],
-                    false,
-                    8,
-                )
-                .await?;
-                if out.code != 0 {
-                    warn!(stream = index, source = key, "Не вдалося змінити mute: {}", out.stderr);
+
+                if Self::flag(item, "mute") != should_mute {
+                    let out = command::run(
+                        "pactl",
+                        &[
+                            "set-sink-input-mute",
+                            &index_text,
+                            if should_mute { "1" } else { "0" },
+                        ],
+                        false,
+                        8,
+                    )
+                    .await?;
+                    if out.code != 0 {
+                        warn!(stream = index, source = key, "Не вдалося змінити mute: {}", out.stderr);
+                    }
+                }
+
+                // Source receivers are transport inputs, not gain stages. Keep the
+                // winning input at unity and perform user volume/ducking only on
+                // the music bus. This also repairs persisted Spotify softvol=0.
+                if is_winner && !Self::volume_is_unity(item) {
+                    let out = command::run(
+                        "pactl",
+                        &["set-sink-input-volume", &index_text, "100%"],
+                        false,
+                        8,
+                    )
+                    .await?;
+                    if out.code != 0 {
+                        warn!(stream = index, source = key, "Не вдалося встановити unity gain: {}", out.stderr);
+                    }
                 }
             }
         }
