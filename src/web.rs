@@ -556,8 +556,10 @@ impl WebController {
                 _ => bail!("Невідомий канал мікшера"),
             };
             let is_muted = muted == Some(true) || db <= -60.0;
-            let percent = if is_muted { 0.0 } else { 100.0 * 10_f64.powf(db / 20.0) };
-            self.audio.set_sink_percent(sink, percent).await?;
+            if !is_muted {
+                let value = format!("{db:.1}dB");
+                self.run("pactl", &["set-sink-volume", sink, &value], true, 8).await?;
+            }
             self.run("pactl", &["set-sink-mute", sink, if is_muted { "1" } else { "0" }], true, 8).await?;
         }
         self.mixer_state().await
