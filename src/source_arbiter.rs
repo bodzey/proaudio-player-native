@@ -17,7 +17,6 @@ pub struct SourceArbiter {
     config: Arc<AppConfig>,
     active_streams: HashSet<i64>,
     winner: Option<String>,
-    initialized: bool,
 }
 
 impl SourceArbiter {
@@ -26,7 +25,6 @@ impl SourceArbiter {
             config,
             active_streams: HashSet::new(),
             winner: None,
-            initialized: false,
         }
     }
 
@@ -279,7 +277,6 @@ impl SourceArbiter {
             .flatten()
             .filter_map(|v| v.get("index").and_then(Value::as_i64))
             .collect();
-        self.initialized = true;
         Ok(())
     }
 
