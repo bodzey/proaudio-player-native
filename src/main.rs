@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod alerts;
 mod audio;
 mod command;
