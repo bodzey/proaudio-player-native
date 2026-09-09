@@ -1,0 +1,17 @@
+[Unit]
+Description=ProAudio Player Native
+After=network-online.target pipewire.service pipewire-pulse.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=proaudio-player
+Group=proaudio-player
+Environment=PULSE_SERVER=unix:/run/pulse/native
+ExecStart=/usr/bin/proaudio-player-native --config /etc/proaudio-player-alert/config.yaml run
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
