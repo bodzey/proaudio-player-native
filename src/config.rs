@@ -28,7 +28,7 @@ fn default_poll() -> f64 { 8.0 }
 fn default_timeout() -> f64 { 7.0 }
 fn default_backoff() -> f64 { 60.0 }
 fn default_clear_confirmations() -> u32 { 2 }
-fn default_duck_db() -> f64 { -18.0 }
+fn default_duck_db() -> f64 { -12.0 }
 fn default_duck_fade() -> f64 { 1.0 }
 fn default_restore_fade() -> f64 { 3.0 }
 fn default_volume() -> f64 { 100.0 }
