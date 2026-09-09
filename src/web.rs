@@ -1131,7 +1131,11 @@ async fn get_mixer(State(controller): State<WebController>) -> ApiResult {
 }
 
 async fn set_mixer(State(controller): State<WebController>, Json(body): Json<MixerBody>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
+    // Master is the final physical output safety control and must remain
+    // available even while alerts or the minute of silence own the music bus.
+    if body.target != "master" {
+        controller.ensure_controls_available().await.map_err(map_internal)?;
+    }
     controller.set_mixer_db(&body.target, body.db, body.muted).await.map(Json).map_err(map_internal)
 }
 

@@ -45,6 +45,26 @@ function setLocked(locked) {
   });
 }
 
+function setMixerLocked(locked) {
+  ["music", "alert"].forEach((channel) => {
+    const strip = document.querySelector(`.mixer-strip[data-channel="${channel}"]`);
+    if (!strip) return;
+    const slider = strip.querySelector(`#mixer-${channel}`);
+    const mute = strip.querySelector(".mixer-mute");
+    if (slider) slider.disabled = locked;
+    if (mute) mute.disabled = locked;
+  });
+
+  // Master intentionally remains controllable during every priority state.
+  const master = document.querySelector('.mixer-strip[data-channel="master"]');
+  if (master) {
+    const slider = master.querySelector("#mixer-master");
+    const mute = master.querySelector(".mixer-mute");
+    if (slider) slider.disabled = false;
+    if (mute) mute.disabled = false;
+  }
+}
+
 function transportNote(player) {
   if (player.backend === "spotify-mpris") return "Керування активним Spotify Connect через MPRIS.";
   if (player.backend === "airplay-mpris") return "Керування AirPlay залежить від підтримки remote control на пристрої-джерелі.";
@@ -137,6 +157,7 @@ function renderStatus(data) {
 
   const priorityBlocking = Boolean(priority.blocking ?? priority.active);
   setLocked(priorityBlocking);
+  setMixerLocked(priorityBlocking);
   renderTransport(player, priorityBlocking);
   updateQueueState();
   $("#last-update").textContent = `Оновлено ${new Date().toLocaleTimeString("uk-UA")}`;
