@@ -1,9 +1,12 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioSnapshot {
@@ -57,10 +60,25 @@ impl StateStore {
 
     pub fn save(&self, state: &RuntimeState) -> Result<()> {
         if let Some(parent) = self.path.parent() { fs::create_dir_all(parent)?; }
-        let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(state)?)?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-        fs::rename(tmp, &self.path)?;
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = self.path.with_extension(format!("json.{}.{}.tmp", std::process::id(), sequence));
+        let payload = serde_json::to_vec_pretty(state)?;
+        let result = (|| -> Result<()> {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            file.write_all(&payload)?;
+            file.sync_all()?;
+            fs::rename(&tmp, &self.path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result?;
         Ok(())
     }
 }
