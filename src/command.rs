@@ -13,7 +13,7 @@ pub struct CommandOutput {
 }
 
 pub async fn run(program: &str, args: &[&str], check: bool, timeout_secs: u64) -> Result<CommandOutput> {
-    let mut child = Command::new(program)
+    let child = Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

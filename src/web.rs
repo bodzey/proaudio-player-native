@@ -1,18 +1,17 @@
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 use url::Url;

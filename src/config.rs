@@ -325,7 +325,7 @@ pub fn validate_provider(p: &ProviderConfig) -> Result<()> {
     if !matches!(p.location_type.as_str(), "hromada" | "raion" | "oblast" | "standalone" | "city") {
         bail!("невідомий provider.location_type");
     }
-    if !p.endpoint.contains("{uid}") { bail!("provider.endpoint має містити шаблон {uid}"); }
+    if !p.endpoint.contains("{uid}") { bail!("provider.endpoint має містити шаблон {{uid}}"); }
     let parsed = Url::parse(&p.status_endpoint()).context("provider.endpoint має бути коректною HTTP(S)-адресою")?;
     if !matches!(parsed.scheme(), "http" | "https") { bail!("provider.endpoint має бути HTTP(S)"); }
     if p.poll_interval_seconds < 8.0 { bail!("poll_interval_seconds має бути не менше 8 секунд"); }
