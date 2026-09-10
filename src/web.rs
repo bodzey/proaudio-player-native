@@ -30,6 +30,7 @@ use crate::config::{
     effective_audio, effective_provider, save_audio_settings, save_provider_settings,
     save_provider_token, validate_audio, validate_provider, AppConfig, ProviderConfig,
 };
+use crate::dlna;
 use crate::fourstream;
 use crate::source_arbiter::SharedSourceState;
 
@@ -933,6 +934,13 @@ impl WebController {
                     }
                 }
             }
+            if source_type == "DLNA / UPnP" {
+                match dlna::client().player().await {
+                    Ok(Some(player)) => return Ok(player),
+                    Ok(None) => {}
+                    Err(err) => debug!(error = %err, "DLNA AVTransport metadata unavailable"),
+                }
+            }
             return Ok(self.external_fallback(external));
         }
 
@@ -945,6 +953,19 @@ impl WebController {
                     }
                 }
             }
+        }
+
+        match dlna::client().known_player().await {
+            Ok(Some(player))
+                if matches!(
+                    player.get("state").and_then(Value::as_str),
+                    Some("playing" | "paused")
+                ) =>
+            {
+                return Ok(player);
+            }
+            Ok(_) => {}
+            Err(err) => debug!(error = %err, "Cached DLNA AVTransport state unavailable"),
         }
 
         if mpd.get("available").and_then(Value::as_bool) == Some(true)
@@ -1038,6 +1059,8 @@ impl WebController {
             if output.code != 0 {
                 bail!("MPRIS-команда {method} не виконана: {}", output.stderr);
             }
+        } else if backend == "dlna-upnp" {
+            dlna::client().control(action).await?;
         } else {
             bail!("Активне джерело не має доступного керування");
         }
