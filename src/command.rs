@@ -12,7 +12,12 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
-pub async fn run(program: &str, args: &[&str], check: bool, timeout_secs: u64) -> Result<CommandOutput> {
+pub async fn run(
+    program: &str,
+    args: &[&str],
+    check: bool,
+    timeout_secs: u64,
+) -> Result<CommandOutput> {
     let child = Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
@@ -33,8 +38,16 @@ pub async fn run(program: &str, args: &[&str], check: bool, timeout_secs: u64) -
             "команда {} {} завершилася помилкою: {}",
             program,
             args.join(" "),
-            if stderr.is_empty() { format!("exit {code}") } else { stderr.clone() }
+            if stderr.is_empty() {
+                format!("exit {code}")
+            } else {
+                stderr.clone()
+            }
         ));
     }
-    Ok(CommandOutput { code, stdout, stderr })
+    Ok(CommandOutput {
+        code,
+        stdout,
+        stderr,
+    })
 }

@@ -58,12 +58,22 @@ fn device_uuid() -> String {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .or_else(|| fs::read_to_string("/etc/hostname").ok().map(|v| v.trim().to_owned()))
+        .or_else(|| {
+            fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|v| v.trim().to_owned())
+        })
         .unwrap_or_else(|| "proaudio-player".into());
-    let digest = hex::encode(Sha256::digest(format!("proaudio-player:{identity}").as_bytes()));
+    let digest = hex::encode(Sha256::digest(
+        format!("proaudio-player:{identity}").as_bytes(),
+    ));
     format!(
         "uuid:{}-{}-{}-{}-{}",
-        &digest[0..8], &digest[8..12], &digest[12..16], &digest[16..20], &digest[20..32]
+        &digest[0..8],
+        &digest[8..12],
+        &digest[12..16],
+        &digest[16..20],
+        &digest[20..32]
     )
 }
 
@@ -99,9 +109,8 @@ fn local_ip(peer: Option<SocketAddr>) -> String {
     let Ok(socket) = StdUdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
         return "127.0.0.1".into();
     };
-    let target = peer.unwrap_or_else(|| {
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53))
-    });
+    let target =
+        peer.unwrap_or_else(|| SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53)));
     if socket.connect(target).is_err() {
         return "127.0.0.1".into();
     }
@@ -133,10 +142,25 @@ fn as_u64(value: Option<&Value>) -> u64 {
 
 async fn player_status(controller: &WebController) -> Result<Value> {
     let status = controller.status().await?;
-    let player = status.get("player").and_then(Value::as_object).cloned().unwrap_or_default();
-    let mpd = status.get("mpd").and_then(Value::as_object).cloned().unwrap_or_default();
-    let priority = status.get("priority").and_then(Value::as_object).cloned().unwrap_or_default();
-    let state = player.get("state").and_then(Value::as_str).unwrap_or("stopped");
+    let player = status
+        .get("player")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mpd = status
+        .get("mpd")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let priority = status
+        .get("priority")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let state = player
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("stopped");
     let position = (as_f64(player.get("position_seconds")) * 1000.0).round() as u64;
     let duration = (as_f64(player.get("duration_seconds")) * 1000.0).round() as u64;
     let source = player.get("source").and_then(Value::as_str).unwrap_or("");
@@ -196,14 +220,18 @@ fn device_status(controller: &WebController) -> Value {
 
 async fn set_volume(controller: &WebController, value: &str) -> Result<()> {
     let percent = value.parse::<f64>().context("Invalid volume")?;
-    if !(0.0..=100.0).contains(&percent) { bail!("Invalid volume"); }
+    if !(0.0..=100.0).contains(&percent) {
+        bail!("Invalid volume");
+    }
     controller.ensure_controls_available().await?;
     controller.audio.set_music_volume(percent).await?;
     controller.audio.set_music_mute(percent == 0.0).await
 }
 
 async fn set_mute(controller: &WebController, value: &str) -> Result<()> {
-    if !matches!(value, "0" | "1") { bail!("Invalid mute"); }
+    if !matches!(value, "0" | "1") {
+        bail!("Invalid mute");
+    }
     controller.ensure_controls_available().await?;
     controller.audio.set_music_mute(value == "1").await
 }
@@ -214,11 +242,20 @@ async fn transport(controller: &WebController, action: &str) -> Result<()> {
     if action == "onepause" {
         let status = controller.status().await?;
         action = if status
-            .get("player").and_then(Value::as_object)
-            .and_then(|player| player.get("state")).and_then(Value::as_str) == Some("playing")
-        { "pause".into() } else { "play".into() };
+            .get("player")
+            .and_then(Value::as_object)
+            .and_then(|player| player.get("state"))
+            .and_then(Value::as_str)
+            == Some("playing")
+        {
+            "pause".into()
+        } else {
+            "play".into()
+        };
     }
-    if action == "resume" { action = "play".into(); }
+    if action == "resume" {
+        action = "play".into();
+    }
     if !matches!(action.as_str(), "play" | "pause" | "stop" | "next" | "prev") {
         bail!("Unsupported player command");
     }
@@ -238,40 +275,74 @@ async fn play_url(controller: &WebController, value: &str) -> Result<()> {
     Ok(())
 }
 
-async fn http_api(State(controller): State<WebController>, Query(query): Query<HashMap<String, String>>) -> GatewayResult {
+async fn http_api(
+    State(controller): State<WebController>,
+    Query(query): Query<HashMap<String, String>>,
+) -> GatewayResult {
     let command = query.get("command").cloned().unwrap_or_default();
     let lowered = command.to_ascii_lowercase();
     if matches!(lowered.as_str(), "getstatus" | "getstatusex") {
         return Ok(Json(device_status(&controller)).into_response());
     }
-    if matches!(lowered.as_str(), "getplayerstatus" | "getmetainfo" | "gettrackinfo") {
-        return player_status(&controller).await.map(|value| Json(value).into_response()).map_err(service_error);
+    if matches!(
+        lowered.as_str(),
+        "getplayerstatus" | "getmetainfo" | "gettrackinfo"
+    ) {
+        return player_status(&controller)
+            .await
+            .map(|value| Json(value).into_response())
+            .map_err(service_error);
     }
-    if lowered == "getdevicename" { return Ok(text_response(NAME, "text/plain; charset=utf-8")); }
-    if matches!(lowered.as_str(), "getnewver" | "getmvremoteupdatestartcheck") {
+    if lowered == "getdevicename" {
+        return Ok(text_response(NAME, "text/plain; charset=utf-8"));
+    }
+    if matches!(
+        lowered.as_str(),
+        "getnewver" | "getmvremoteupdatestartcheck"
+    ) {
         return Ok(Json(json!({"status":"0","NewVer":"0"})).into_response());
     }
-    if lowered == "wlangetconnectstate" { return Ok(text_response("OK", "text/plain; charset=utf-8")); }
-    if lowered == "getequalizer" { return Ok(text_response("0", "text/plain; charset=utf-8")); }
+    if lowered == "wlangetconnectstate" {
+        return Ok(text_response("OK", "text/plain; charset=utf-8"));
+    }
+    if lowered == "getequalizer" {
+        return Ok(text_response("0", "text/plain; charset=utf-8"));
+    }
     if lowered == "multiroom:getslavelist" {
         return Ok(Json(json!({"slaves":"0","slave_list":[]})).into_response());
     }
-    if lowered.starts_with("setplayercmd:play:http://") || lowered.starts_with("setplayercmd:play:https://")
-        || lowered.starts_with("setplayercmd:playlist:http://") || lowered.starts_with("setplayercmd:playlist:https://")
+    if lowered.starts_with("setplayercmd:play:http://")
+        || lowered.starts_with("setplayercmd:play:https://")
+        || lowered.starts_with("setplayercmd:playlist:http://")
+        || lowered.starts_with("setplayercmd:playlist:https://")
     {
-        play_url(&controller, command.splitn(3, ':').nth(2).unwrap_or("")).await.map_err(service_error)?;
+        play_url(&controller, command.splitn(3, ':').nth(2).unwrap_or(""))
+            .await
+            .map_err(service_error)?;
         return Ok(text_response("OK", "text/plain; charset=utf-8"));
     }
     if lowered.starts_with("setplayercmd:vol:") {
-        set_volume(&controller, command.rsplit(':').next().unwrap_or("")).await.map_err(service_error)?;
+        set_volume(&controller, command.rsplit(':').next().unwrap_or(""))
+            .await
+            .map_err(service_error)?;
         return Ok(text_response("OK", "text/plain; charset=utf-8"));
     }
     if lowered.starts_with("setplayercmd:mute:") {
-        set_mute(&controller, command.rsplit(':').next().unwrap_or("")).await.map_err(service_error)?;
+        set_mute(&controller, command.rsplit(':').next().unwrap_or(""))
+            .await
+            .map_err(service_error)?;
         return Ok(text_response("OK", "text/plain; charset=utf-8"));
     }
     if lowered.starts_with("setplayercmd:") {
-        transport(&controller, command.split_once(':').map(|(_, value)| value).unwrap_or("")).await.map_err(service_error)?;
+        transport(
+            &controller,
+            command
+                .split_once(':')
+                .map(|(_, value)| value)
+                .unwrap_or(""),
+        )
+        .await
+        .map_err(service_error)?;
         return Ok(text_response("OK", "text/plain; charset=utf-8"));
     }
     Err(bad_request("unknown command"))
@@ -279,10 +350,16 @@ async fn http_api(State(controller): State<WebController>, Query(query): Query<H
 
 fn soap_value(body: &str, name: &str) -> String {
     for marker in [format!("<{name}"), format!(":{name}")] {
-        let Some(position) = body.find(&marker) else { continue; };
-        let Some(end) = body[position..].find('>') else { continue; };
+        let Some(position) = body.find(&marker) else {
+            continue;
+        };
+        let Some(end) = body[position..].find('>') else {
+            continue;
+        };
         let start = position + end + 1;
-        let Some(length) = body[start..].find('<') else { continue; };
+        let Some(length) = body[start..].find('<') else {
+            continue;
+        };
         return body[start..start + length].to_owned();
     }
     String::new()
@@ -290,59 +367,128 @@ fn soap_value(body: &str, name: &str) -> String {
 
 fn clock(milliseconds: &str) -> String {
     let total = milliseconds.parse::<u64>().unwrap_or(0) / 1000;
-    format!("{:02}:{:02}:{:02}", total / 3600, (total % 3600) / 60, total % 60)
+    format!(
+        "{:02}:{:02}:{:02}",
+        total / 3600,
+        (total % 3600) / 60,
+        total % 60
+    )
 }
 
 fn xml_escape(value: &str) -> String {
-    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
-async fn soap_control(State(controller): State<WebController>, headers: HeaderMap, body: Bytes) -> GatewayResult {
-    let action_header = headers.get("SOAPACTION").and_then(|v| v.to_str().ok()).unwrap_or("").trim_matches('"');
-    let (service, action) = action_header.split_once('#').ok_or_else(|| bad_request("Missing SOAPACTION"))?;
+async fn soap_control(
+    State(controller): State<WebController>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> GatewayResult {
+    let action_header = headers
+        .get("SOAPACTION")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim_matches('"');
+    let (service, action) = action_header
+        .split_once('#')
+        .ok_or_else(|| bad_request("Missing SOAPACTION"))?;
     let body = std::str::from_utf8(&body).map_err(|_| bad_request("Invalid SOAP XML"))?;
-    if !body.contains('<') || !body.contains('>') { return Err(bad_request("Invalid SOAP XML")); }
+    if !body.contains('<') || !body.contains('>') {
+        return Err(bad_request("Invalid SOAP XML"));
+    }
     let player = player_status(&controller).await.map_err(service_error)?;
     let get = |name: &str| player.get(name).and_then(Value::as_str).unwrap_or("");
     let mut values: Vec<(&str, String)> = Vec::new();
     match action {
         "GetTransportInfo" => values.extend([
-            ("CurrentTransportState", match get("status") { "play" => "PLAYING", "pause" => "PAUSED_PLAYBACK", _ => "STOPPED" }.into()),
-            ("CurrentTransportStatus", "OK".into()), ("CurrentSpeed", "1".into())]),
+            (
+                "CurrentTransportState",
+                match get("status") {
+                    "play" => "PLAYING",
+                    "pause" => "PAUSED_PLAYBACK",
+                    _ => "STOPPED",
+                }
+                .into(),
+            ),
+            ("CurrentTransportStatus", "OK".into()),
+            ("CurrentSpeed", "1".into()),
+        ]),
         "GetPositionInfo" => values.extend([
-            ("Track", "1".into()), ("TrackDuration", clock(get("totlen"))), ("TrackMetaData", "".into()),
-            ("TrackURI", "".into()), ("RelTime", clock(get("curpos"))), ("AbsTime", clock(get("curpos"))),
-            ("RelCount", "0".into()), ("AbsCount", "0".into())]),
+            ("Track", "1".into()),
+            ("TrackDuration", clock(get("totlen"))),
+            ("TrackMetaData", "".into()),
+            ("TrackURI", "".into()),
+            ("RelTime", clock(get("curpos"))),
+            ("AbsTime", clock(get("curpos"))),
+            ("RelCount", "0".into()),
+            ("AbsCount", "0".into()),
+        ]),
         "GetMediaInfo" => values.extend([
-            ("NrTracks", get("plicount").into()), ("MediaDuration", clock(get("totlen"))), ("CurrentURI", "".into()),
-            ("CurrentURIMetaData", "".into()), ("NextURI", "".into()), ("NextURIMetaData", "".into()),
-            ("PlayMedium", "NETWORK".into()), ("RecordMedium", "NOT_IMPLEMENTED".into()), ("WriteStatus", "NOT_IMPLEMENTED".into())]),
+            ("NrTracks", get("plicount").into()),
+            ("MediaDuration", clock(get("totlen"))),
+            ("CurrentURI", "".into()),
+            ("CurrentURIMetaData", "".into()),
+            ("NextURI", "".into()),
+            ("NextURIMetaData", "".into()),
+            ("PlayMedium", "NETWORK".into()),
+            ("RecordMedium", "NOT_IMPLEMENTED".into()),
+            ("WriteStatus", "NOT_IMPLEMENTED".into()),
+        ]),
         "GetVolume" => values.push(("CurrentVolume", get("vol").into())),
         "GetMute" => values.push(("CurrentMute", get("mute").into())),
-        "SetVolume" => set_volume(&controller, &soap_value(body, "DesiredVolume")).await.map_err(service_error)?,
-        "SetMute" => set_mute(&controller, &soap_value(body, "DesiredMute")).await.map_err(service_error)?,
+        "SetVolume" => set_volume(&controller, &soap_value(body, "DesiredVolume"))
+            .await
+            .map_err(service_error)?,
+        "SetMute" => set_mute(&controller, &soap_value(body, "DesiredMute"))
+            .await
+            .map_err(service_error)?,
         "Play" | "Pause" | "Stop" | "Next" | "Previous" => {
-            let transport_action = if action == "Previous" { "prev".to_owned() } else { action.to_ascii_lowercase() };
-            transport(&controller, &transport_action).await.map_err(service_error)?;
+            let transport_action = if action == "Previous" {
+                "prev".to_owned()
+            } else {
+                action.to_ascii_lowercase()
+            };
+            transport(&controller, &transport_action)
+                .await
+                .map_err(service_error)?;
         }
         _ => return Err(bad_request(format!("Unsupported SOAP action: {action}"))),
     }
     let fallback = if matches!(action, "GetVolume" | "GetMute" | "SetVolume" | "SetMute") {
         "urn:schemas-upnp-org:service:RenderingControl:1"
-    } else { "urn:schemas-upnp-org:service:AVTransport:1" };
-    let namespace = if service.is_empty() { fallback } else { service };
-    let fields = values.iter().map(|(key, value)| format!("<{key}>{}</{key}>", xml_escape(value))).collect::<String>();
+    } else {
+        "urn:schemas-upnp-org:service:AVTransport:1"
+    };
+    let namespace = if service.is_empty() {
+        fallback
+    } else {
+        service
+    };
+    let fields = values
+        .iter()
+        .map(|(key, value)| format!("<{key}>{}</{key}>", xml_escape(value)))
+        .collect::<String>();
     Ok(text_response(format!(
         "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:{action}Response xmlns:u=\"{}\">{fields}</u:{action}Response></s:Body></s:Envelope>",
         xml_escape(namespace)), "text/xml; charset=utf-8"))
 }
 
 async fn description(State(controller): State<WebController>, headers: HeaderMap) -> Response {
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(str::to_owned)
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
         .unwrap_or_else(|| format!("127.0.0.1:{}", controller.config.api.port));
     let udn = device_uuid();
     let linkplay = linkplay_uuid(&udn);
-    text_response(format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+    text_response(
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
  <specVersion><major>1</major><minor>0</minor></specVersion><URLBase>http://{host}/</URLBase>
  <device><deviceType>{DEVICE_TYPE}</deviceType><friendlyName>{NAME}</friendlyName>
@@ -352,12 +498,31 @@ async fn description(State(controller): State<WebController>, headers: HeaderMap
    <service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><serviceId>urn:upnp-org:serviceId:AVTransport</serviceId><SCPDURL>/upnp/service.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL>/upnp/event</eventSubURL></service>
    <service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId><SCPDURL>/upnp/service.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL>/upnp/event</eventSubURL></service>
    <service><serviceType>{WIIMU_SERVICE_TYPE}</serviceType><serviceId>urn:wiimu-com:serviceId:PlayQueue</serviceId><SCPDURL>/upnp/playqueue.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL>/upnp/event</eventSubURL></service>
-  </serviceList></device></root>"#), "text/xml; charset=utf-8")
+  </serviceList></device></root>"#
+        ),
+        "text/xml; charset=utf-8",
+    )
 }
 
 async fn service_description() -> Response {
-    let actions = ["GetTransportInfo","GetPositionInfo","GetMediaInfo","Play","Pause","Stop","Next","Previous","GetVolume","SetVolume","GetMute","SetMute"];
-    let action_list = actions.iter().map(|name| format!("<action><name>{name}</name></action>")).collect::<String>();
+    let actions = [
+        "GetTransportInfo",
+        "GetPositionInfo",
+        "GetMediaInfo",
+        "Play",
+        "Pause",
+        "Stop",
+        "Next",
+        "Previous",
+        "GetVolume",
+        "SetVolume",
+        "GetMute",
+        "SetMute",
+    ];
+    let action_list = actions
+        .iter()
+        .map(|name| format!("<action><name>{name}</name></action>"))
+        .collect::<String>();
     text_response(format!("<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList>{action_list}</actionList><serviceStateTable></serviceStateTable></scpd>"), "text/xml; charset=utf-8")
 }
 
@@ -374,30 +539,89 @@ pub fn router() -> Router<WebController> {
 fn alive_messages(port: u16, udn: &str) -> Vec<Vec<u8>> {
     let location = format!("http://{}:{port}/upnp/device.xml", local_ip(None));
     [
-        ("upnp:rootdevice".to_owned(), format!("{udn}::upnp:rootdevice")),
+        (
+            "upnp:rootdevice".to_owned(),
+            format!("{udn}::upnp:rootdevice"),
+        ),
         (udn.to_owned(), udn.to_owned()),
         (DEVICE_TYPE.to_owned(), format!("{udn}::{DEVICE_TYPE}")),
-        (WIIMU_SERVICE_TYPE.to_owned(), format!("{udn}::{WIIMU_SERVICE_TYPE}")),
-    ].into_iter().map(|(nt, usn)| [
-        "NOTIFY * HTTP/1.1".into(), format!("HOST: {SSDP_ADDRESS}:{SSDP_PORT}"), "CACHE-CONTROL: max-age=120".into(),
-        format!("LOCATION: {location}"), format!("NT: {nt}"), "NTS: ssdp:alive".into(),
-        "SERVER: Linux/5.x UPnP/1.0 Linkplay/4.8 ProAudioPlayer/dev".into(), format!("USN: {usn}"), String::new(), String::new()
-    ].join("\r\n").into_bytes()).collect()
+        (
+            WIIMU_SERVICE_TYPE.to_owned(),
+            format!("{udn}::{WIIMU_SERVICE_TYPE}"),
+        ),
+    ]
+    .into_iter()
+    .map(|(nt, usn)| {
+        [
+            "NOTIFY * HTTP/1.1".into(),
+            format!("HOST: {SSDP_ADDRESS}:{SSDP_PORT}"),
+            "CACHE-CONTROL: max-age=120".into(),
+            format!("LOCATION: {location}"),
+            format!("NT: {nt}"),
+            "NTS: ssdp:alive".into(),
+            "SERVER: Linux/5.x UPnP/1.0 Linkplay/4.8 ProAudioPlayer/dev".into(),
+            format!("USN: {usn}"),
+            String::new(),
+            String::new(),
+        ]
+        .join("\r\n")
+        .into_bytes()
+    })
+    .collect()
 }
 
 fn ssdp_response(message: &str, peer: SocketAddr, port: u16, udn: &str) -> Option<Vec<u8>> {
-    if !message.to_ascii_uppercase().starts_with("M-SEARCH") { return None; }
-    let headers = message.lines().skip(1).filter_map(|line| line.split_once(':'))
-        .map(|(key,value)| (key.trim().to_ascii_uppercase(), value.trim().to_owned())).collect::<HashMap<_,_>>();
-    if !headers.get("MAN").is_some_and(|value| value.to_ascii_uppercase().contains("SSDP:DISCOVER")) { return None; }
+    if !message.to_ascii_uppercase().starts_with("M-SEARCH") {
+        return None;
+    }
+    let headers = message
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.trim().to_ascii_uppercase(), value.trim().to_owned()))
+        .collect::<HashMap<_, _>>();
+    if !headers
+        .get("MAN")
+        .is_some_and(|value| value.to_ascii_uppercase().contains("SSDP:DISCOVER"))
+    {
+        return None;
+    }
     let requested = headers.get("ST").map(String::as_str).unwrap_or("ssdp:all");
-    if !matches!(requested, "ssdp:all" | "upnp:rootdevice") && requested != udn && requested != DEVICE_TYPE && requested != WIIMU_SERVICE_TYPE { return None; }
-    let st = if requested == "ssdp:all" { DEVICE_TYPE } else { requested };
-    let usn = if st == udn { udn.to_owned() } else { format!("{udn}::{st}") };
-    Some(["HTTP/1.1 200 OK".into(), "CACHE-CONTROL: max-age=120".into(), "EXT:".into(),
-        format!("LOCATION: http://{}:{port}/upnp/device.xml", local_ip(Some(peer))),
-        "SERVER: Linux/5.x UPnP/1.0 Linkplay/4.8 ProAudioPlayer/dev".into(), format!("ST: {st}"), format!("USN: {usn}"), String::new(), String::new()
-    ].join("\r\n").into_bytes())
+    if !matches!(requested, "ssdp:all" | "upnp:rootdevice")
+        && requested != udn
+        && requested != DEVICE_TYPE
+        && requested != WIIMU_SERVICE_TYPE
+    {
+        return None;
+    }
+    let st = if requested == "ssdp:all" {
+        DEVICE_TYPE
+    } else {
+        requested
+    };
+    let usn = if st == udn {
+        udn.to_owned()
+    } else {
+        format!("{udn}::{st}")
+    };
+    Some(
+        [
+            "HTTP/1.1 200 OK".into(),
+            "CACHE-CONTROL: max-age=120".into(),
+            "EXT:".into(),
+            format!(
+                "LOCATION: http://{}:{port}/upnp/device.xml",
+                local_ip(Some(peer))
+            ),
+            "SERVER: Linux/5.x UPnP/1.0 Linkplay/4.8 ProAudioPlayer/dev".into(),
+            format!("ST: {st}"),
+            format!("USN: {usn}"),
+            String::new(),
+            String::new(),
+        ]
+        .join("\r\n")
+        .into_bytes(),
+    )
 }
 
 pub async fn run_ssdp(_controller: WebController, port: u16) -> Result<()> {

@@ -125,13 +125,7 @@ impl SourceArbiter {
         let Some(index) = self.music_sink_index().await? else {
             return Ok(Vec::new());
         };
-        let out = command::run(
-            "pactl",
-            &["-f", "json", "list", "sink-inputs"],
-            false,
-            8,
-        )
-        .await?;
+        let out = command::run("pactl", &["-f", "json", "list", "sink-inputs"], false, 8).await?;
         if out.code != 0 {
             return Ok(Vec::new());
         }
@@ -235,12 +229,18 @@ impl SourceArbiter {
         // systemd immediately starts a clean receiver instance.
         if matches!(key, "airplay" | "dlna") {
             for stream in streams {
-                let pid = stream.get("properties").and_then(Value::as_object)
-                    .and_then(|p| p.get("application.process.id")).and_then(Value::as_str);
+                let pid = stream
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|p| p.get("application.process.id"))
+                    .and_then(Value::as_str);
                 if let Some(pid) = pid.filter(|value| value.chars().all(|c| c.is_ascii_digit())) {
                     let out = command::run("kill", &["-TERM", pid], false, 3).await?;
                     if out.code != 0 {
-                        debug!(source = key, pid, "Не вдалося завершити receiver: {}", out.stderr);
+                        debug!(
+                            source = key,
+                            pid, "Не вдалося завершити receiver: {}", out.stderr
+                        );
                     }
                 }
             }
@@ -291,7 +291,12 @@ impl SourceArbiter {
                     )
                     .await?;
                     if out.code != 0 {
-                        warn!(stream = index, source = key, "Не вдалося змінити mute: {}", out.stderr);
+                        warn!(
+                            stream = index,
+                            source = key,
+                            "Не вдалося змінити mute: {}",
+                            out.stderr
+                        );
                     }
                 }
 
@@ -307,7 +312,12 @@ impl SourceArbiter {
                     )
                     .await?;
                     if out.code != 0 {
-                        warn!(stream = index, source = key, "Не вдалося встановити unity gain: {}", out.stderr);
+                        warn!(
+                            stream = index,
+                            source = key,
+                            "Не вдалося встановити unity gain: {}",
+                            out.stderr
+                        );
                     }
                 }
             }

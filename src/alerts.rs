@@ -26,8 +26,22 @@ pub struct AlertController {
 }
 
 impl AlertController {
-    pub fn new(config: Arc<AppConfig>, provider: AlertsProvider, audio: AudioEngine, store: StateStore, state: SharedRuntimeState) -> Self {
-        Self { config, provider, audio, store, state, minute_task: None, last_alert_announcement: None }
+    pub fn new(
+        config: Arc<AppConfig>,
+        provider: AlertsProvider,
+        audio: AudioEngine,
+        store: StateStore,
+        state: SharedRuntimeState,
+    ) -> Self {
+        Self {
+            config,
+            provider,
+            audio,
+            store,
+            state,
+            minute_task: None,
+            last_alert_announcement: None,
+        }
     }
 
     async fn persist(&self) -> Result<()> {
@@ -38,7 +52,12 @@ impl AlertController {
     pub async fn recover(&mut self) -> Result<()> {
         let (was_active, minute_snapshot, mode, alert_snapshot) = {
             let mut state = self.state.lock().await;
-            let values = (state.minute_silence_active, state.minute_silence_snapshot.clone(), state.mode.clone(), state.audio_snapshot.clone());
+            let values = (
+                state.minute_silence_active,
+                state.minute_silence_snapshot.clone(),
+                state.mode.clone(),
+                state.audio_snapshot.clone(),
+            );
             if state.minute_silence_active {
                 warn!("Відновлення після перерваної хвилини мовчання");
                 state.minute_silence_active = false;
@@ -66,7 +85,10 @@ impl AlertController {
     }
 
     async fn cancel_minute_silence(&mut self) -> Result<Option<AudioSnapshot>> {
-        if let Some(handle) = self.minute_task.take() { handle.abort(); let _ = handle.await; }
+        if let Some(handle) = self.minute_task.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
         let snapshot = {
             let mut state = self.state.lock().await;
             let snapshot = state.minute_silence_snapshot.clone();
@@ -80,25 +102,38 @@ impl AlertController {
 
     fn minute_due(&self, state: &RuntimeState) -> Result<bool> {
         let (_, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
-        if !minute.enabled { return Ok(false); }
+        if !minute.enabled {
+            return Ok(false);
+        }
         let tz: chrono_tz::Tz = minute.timezone.parse()?;
         let local = Utc::now().with_timezone(&tz);
         let date = local.date_naive();
         let date_text = date.to_string();
-        if state.last_minute_silence_date.as_deref() == Some(date_text.as_str()) { return Ok(false); }
+        if state.last_minute_silence_date.as_deref() == Some(date_text.as_str()) {
+            return Ok(false);
+        }
         let time = chrono::NaiveTime::parse_from_str(&minute.start_time, "%H:%M:%S")?;
         let naive = date.and_time(time);
-        let scheduled = tz.from_local_datetime(&naive).single().or_else(|| tz.from_local_datetime(&naive).earliest())
+        let scheduled = tz
+            .from_local_datetime(&naive)
+            .single()
+            .or_else(|| tz.from_local_datetime(&naive).earliest())
             .ok_or_else(|| anyhow::anyhow!("не вдалося визначити час хвилини мовчання"))?;
         let latest = scheduled + chrono::Duration::seconds(minute.catch_up_seconds as i64);
         Ok(local >= scheduled && local <= latest)
     }
 
     async fn maybe_start_minute_silence(&mut self) -> Result<bool> {
-        if self.minute_task.as_ref().is_some_and(|t| !t.is_finished()) { return Ok(false); }
-        if self.minute_task.as_ref().is_some_and(|t| t.is_finished()) { self.minute_task.take(); }
+        if self.minute_task.as_ref().is_some_and(|t| !t.is_finished()) {
+            return Ok(false);
+        }
+        if self.minute_task.as_ref().is_some_and(|t| t.is_finished()) {
+            self.minute_task.take();
+        }
         let current_state = self.state.lock().await.clone();
-        if !self.minute_due(&current_state)? { return Ok(false); }
+        if !self.minute_due(&current_state)? {
+            return Ok(false);
+        }
 
         let snapshot = self.audio.snapshot().await?;
         let (audio_cfg, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
@@ -119,22 +154,30 @@ impl AlertController {
         self.minute_task = Some(tokio::spawn(async move {
             warn!("Початок щоденної хвилини мовчання");
             let result = async {
-                audio.enter_silence(&snapshot, minute.music_fade_seconds).await?;
-                audio.play(&minute.file, Some(minute.volume_percent)).await?;
+                audio
+                    .enter_silence(&snapshot, minute.music_fade_seconds)
+                    .await?;
+                audio
+                    .play(&minute.file, Some(minute.volume_percent))
+                    .await?;
                 let (mode, alert_snapshot) = {
                     let state = state.lock().await;
                     (state.mode.clone(), state.audio_snapshot.clone())
                 };
                 if mode == "alert" {
                     if let Some(alert) = alert_snapshot.as_ref() {
-                        if talkover { audio.restore(Some(alert)).await?; }
-                        else { audio.ensure_alert(alert).await?; }
+                        if talkover {
+                            audio.restore(Some(alert)).await?;
+                        } else {
+                            audio.ensure_alert(alert).await?;
+                        }
                     }
                 } else {
                     audio.restore(Some(&snapshot)).await?;
                 }
                 Ok::<(), anyhow::Error>(())
-            }.await;
+            }
+            .await;
             if let Err(err) = result {
                 error!("Помилка хвилини мовчання: {err:#}");
                 state.lock().await.last_error = Some(format!("Хвилина мовчання: {err}"));
@@ -154,7 +197,9 @@ impl AlertController {
                 if let Err(recovery_error) = recovery {
                     error!("Не вдалося відновити аудіо після помилки хвилини мовчання: {recovery_error:#}");
                 }
-            } else { warn!("Завершення щоденної хвилини мовчання"); }
+            } else {
+                warn!("Завершення щоденної хвилини мовчання");
+            }
             let snapshot_to_save = {
                 let mut s = state.lock().await;
                 s.minute_silence_active = false;
@@ -182,20 +227,37 @@ impl AlertController {
         restore
     }
 
-    async fn begin_alert(&mut self, status: &AlertStatus, override_snapshot: Option<AudioSnapshot>) -> Result<()> {
+    async fn begin_alert(
+        &mut self,
+        status: &AlertStatus,
+        override_snapshot: Option<AudioSnapshot>,
+    ) -> Result<()> {
         warn!(uids=?status.matched_uids, "Початок повітряної тривоги");
-        let snapshot = match override_snapshot { Some(v) => v, None => self.audio.snapshot().await? };
+        let snapshot = match override_snapshot {
+            Some(v) => v,
+            None => self.audio.snapshot().await?,
+        };
         {
             let mut state = self.state.lock().await;
-            state.mode = "alert".into(); state.clear_count = 0; state.entry_announced = false; state.clear_announced = false;
-            state.audio_snapshot = Some(snapshot.clone()); state.last_change_at = Some(Utc::now().to_rfc3339()); state.matched_uids = status.matched_uids.clone();
+            state.mode = "alert".into();
+            state.clear_count = 0;
+            state.entry_announced = false;
+            state.clear_announced = false;
+            state.audio_snapshot = Some(snapshot.clone());
+            state.last_change_at = Some(Utc::now().to_rfc3339());
+            state.matched_uids = status.matched_uids.clone();
         }
         self.persist().await?;
         let cfg = self.audio.config()?;
         if !cfg.duck_only_during_announcement {
             self.audio.enter_alert(&snapshot).await?;
         }
-        self.play_alert_announcement(&cfg.start_file, &snapshot, cfg.duck_only_during_announcement).await?;
+        self.play_alert_announcement(
+            &cfg.start_file,
+            &snapshot,
+            cfg.duck_only_during_announcement,
+        )
+        .await?;
         self.last_alert_announcement = Some(Instant::now());
         self.state.lock().await.entry_announced = true;
         self.persist().await
@@ -204,19 +266,31 @@ impl AlertController {
     async fn continue_alert(&mut self) -> Result<()> {
         let (snapshot, minute_active, entry_announced) = {
             let state = self.state.lock().await;
-            (state.audio_snapshot.clone(), state.minute_silence_active, state.entry_announced)
+            (
+                state.audio_snapshot.clone(),
+                state.minute_silence_active,
+                state.entry_announced,
+            )
         };
         let cfg = self.audio.config()?;
         if !minute_active && !cfg.duck_only_during_announcement {
-            if let Some(snapshot) = snapshot.as_ref() { self.audio.ensure_alert(snapshot).await?; }
+            if let Some(snapshot) = snapshot.as_ref() {
+                self.audio.ensure_alert(snapshot).await?;
+            }
         }
         let repeat_due = cfg.alert_repeat_interval_minutes > 0
             && self.last_alert_announcement.is_none_or(|last| {
-                last.elapsed() >= Duration::from_secs(cfg.alert_repeat_interval_minutes.saturating_mul(60))
+                last.elapsed()
+                    >= Duration::from_secs(cfg.alert_repeat_interval_minutes.saturating_mul(60))
             });
         if !minute_active && (!entry_announced || repeat_due) {
             if let Some(snapshot) = snapshot.as_ref() {
-                self.play_alert_announcement(&cfg.start_file, snapshot, cfg.duck_only_during_announcement).await?;
+                self.play_alert_announcement(
+                    &cfg.start_file,
+                    snapshot,
+                    cfg.duck_only_during_announcement,
+                )
+                .await?;
                 self.last_alert_announcement = Some(Instant::now());
                 self.state.lock().await.entry_announced = true;
                 self.persist().await?;
@@ -229,16 +303,23 @@ impl AlertController {
         warn!("Відбій повітряної тривоги");
         let (clear_announced, snapshot, last_silence) = {
             let state = self.state.lock().await;
-            (state.clear_announced, state.audio_snapshot.clone(), state.last_minute_silence_date.clone())
+            (
+                state.clear_announced,
+                state.audio_snapshot.clone(),
+                state.last_minute_silence_date.clone(),
+            )
         };
         let announcement_result = if !clear_announced {
             let cfg = self.audio.config()?;
             let result = match snapshot.as_ref() {
-                Some(snapshot) => self.play_alert_announcement(
-                    &cfg.end_file,
-                    snapshot,
-                    cfg.duck_only_during_announcement,
-                ).await,
+                Some(snapshot) => {
+                    self.play_alert_announcement(
+                        &cfg.end_file,
+                        snapshot,
+                        cfg.duck_only_during_announcement,
+                    )
+                    .await
+                }
                 None => self.audio.play(&cfg.end_file, None).await,
             };
             if result.is_ok() {
@@ -269,22 +350,41 @@ impl AlertController {
     async fn process(&mut self, status: AlertStatus) -> Result<()> {
         {
             let mut state = self.state.lock().await;
-            state.last_success_at = Some(status.checked_at.to_rfc3339()); state.last_error = None; state.matched_uids = status.matched_uids.clone();
+            state.last_success_at = Some(status.checked_at.to_rfc3339());
+            state.last_error = None;
+            state.matched_uids = status.matched_uids.clone();
         }
         let mode = self.state.lock().await.mode.clone();
         if status.active {
             self.state.lock().await.clear_count = 0;
             if mode == "normal" {
-                let minute_snapshot = if self.state.lock().await.minute_silence_active { self.cancel_minute_silence().await? } else { None };
+                let minute_snapshot = if self.state.lock().await.minute_silence_active {
+                    self.cancel_minute_silence().await?
+                } else {
+                    None
+                };
                 self.begin_alert(&status, minute_snapshot).await?;
-            } else { self.continue_alert().await?; self.persist().await?; }
+            } else {
+                self.continue_alert().await?;
+                self.persist().await?;
+            }
             return Ok(());
         }
-        if mode == "normal" { self.state.lock().await.clear_count = 0; self.persist().await?; return Ok(()); }
-        let clear_count = { let mut state = self.state.lock().await; state.clear_count += 1; state.clear_count };
+        if mode == "normal" {
+            self.state.lock().await.clear_count = 0;
+            self.persist().await?;
+            return Ok(());
+        }
+        let clear_count = {
+            let mut state = self.state.lock().await;
+            state.clear_count += 1;
+            state.clear_count
+        };
         self.persist().await?;
         if clear_count >= self.provider.current_config()?.clear_confirmations {
-            if self.state.lock().await.minute_silence_active { let _ = self.cancel_minute_silence().await?; }
+            if self.state.lock().await.minute_silence_active {
+                let _ = self.cancel_minute_silence().await?;
+            }
             self.clear_alert().await?;
         }
         Ok(())
@@ -292,20 +392,37 @@ impl AlertController {
 
     pub async fn run_once(&mut self) -> Result<f64> {
         match self.provider.fetch().await {
-            Ok(result) => { let next = result.next_poll_seconds; self.process(result.status).await?; Ok(next) }
+            Ok(result) => {
+                let next = result.next_poll_seconds;
+                self.process(result.status).await?;
+                Ok(next)
+            }
             Err(err) => {
                 error!("{err:#}");
                 self.state.lock().await.last_error = Some(err.to_string());
                 self.persist().await?;
-                let (mode, snapshot, minute_active) = { let state = self.state.lock().await; (state.mode.clone(), state.audio_snapshot.clone(), state.minute_silence_active) };
+                let (mode, snapshot, minute_active) = {
+                    let state = self.state.lock().await;
+                    (
+                        state.mode.clone(),
+                        state.audio_snapshot.clone(),
+                        state.minute_silence_active,
+                    )
+                };
                 if mode == "alert" && !minute_active {
                     let cfg = self.audio.config()?;
                     if !cfg.duck_only_during_announcement {
-                        if let Some(s) = snapshot.as_ref() { self.audio.ensure_alert(s).await?; }
+                        if let Some(s) = snapshot.as_ref() {
+                            self.audio.ensure_alert(s).await?;
+                        }
                     }
                 }
                 let c = self.provider.current_config()?;
-                Ok(if err.to_string().contains("HTTP 429") { c.rate_limit_backoff_seconds } else { c.poll_interval_seconds })
+                Ok(if err.to_string().contains("HTTP 429") {
+                    c.rate_limit_backoff_seconds
+                } else {
+                    c.poll_interval_seconds
+                })
             }
         }
     }
@@ -314,9 +431,14 @@ impl AlertController {
         self.recover().await?;
         let mut next_poll = Instant::now();
         loop {
-            if let Err(err) = self.maybe_start_minute_silence().await { error!("minute silence scheduler: {err:#}"); }
+            if let Err(err) = self.maybe_start_minute_silence().await {
+                error!("minute silence scheduler: {err:#}");
+            }
             if Instant::now() >= next_poll {
-                let poll = self.run_once().await.unwrap_or_else(|err| { error!("alert controller: {err:#}"); 8.0 });
+                let poll = self.run_once().await.unwrap_or_else(|err| {
+                    error!("alert controller: {err:#}");
+                    8.0
+                });
                 next_poll = Instant::now() + Duration::from_secs_f64(poll.max(0.25));
             }
             sleep(Duration::from_millis(250)).await;

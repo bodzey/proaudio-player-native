@@ -48,10 +48,7 @@ impl DlnaClient {
             .client
             .post(endpoint)
             .header("Content-Type", "text/xml; charset=\"utf-8\"")
-            .header(
-                "SOAPACTION",
-                format!("\"{AVTRANSPORT_SERVICE}#{action}\""),
-            )
+            .header("SOAPACTION", format!("\"{AVTRANSPORT_SERVICE}#{action}\""))
             .body(body)
             .timeout(Duration::from_secs(1))
             .send()
@@ -105,9 +102,7 @@ impl DlnaClient {
         hosts.dedup();
 
         for host in hosts {
-            let endpoint = format!(
-                "http://{host}:{AVTRANSPORT_PORT}{AVTRANSPORT_PATH}"
-            );
+            let endpoint = format!("http://{host}:{AVTRANSPORT_PORT}{AVTRANSPORT_PATH}");
             if self
                 .soap_at(&endpoint, "GetTransportInfo", "")
                 .await
@@ -128,12 +123,8 @@ impl DlnaClient {
     }
 
     async fn player_at(&self, endpoint: &str) -> Result<Value> {
-        let position = self
-            .soap_at(endpoint, "GetPositionInfo", "")
-            .await?;
-        let transport = self
-            .soap_at(endpoint, "GetTransportInfo", "")
-            .await?;
+        let position = self.soap_at(endpoint, "GetPositionInfo", "").await?;
+        let transport = self.soap_at(endpoint, "GetTransportInfo", "").await?;
         let actions = self
             .soap_at(endpoint, "GetCurrentTransportActions", "")
             .await?;
@@ -271,10 +262,10 @@ fn parse_player(position: &str, transport: &str, actions: &str) -> Value {
         _ => "stopped",
     };
 
-    let elapsed = nonempty(tag_value(position, "RelTime"))
-        .filter(|value| value != "NOT_IMPLEMENTED");
-    let duration = nonempty(tag_value(position, "TrackDuration"))
-        .filter(|value| value != "NOT_IMPLEMENTED");
+    let elapsed =
+        nonempty(tag_value(position, "RelTime")).filter(|value| value != "NOT_IMPLEMENTED");
+    let duration =
+        nonempty(tag_value(position, "TrackDuration")).filter(|value| value != "NOT_IMPLEMENTED");
     let position_seconds = clock_to_seconds(elapsed.as_deref());
     let duration_seconds = clock_to_seconds(duration.as_deref());
     let progress = match (position_seconds, duration_seconds) {

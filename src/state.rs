@@ -36,30 +36,53 @@ pub struct RuntimeState {
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
-            mode: "normal".into(), clear_count: 0, entry_announced: false,
-            clear_announced: false, audio_snapshot: None, last_success_at: None,
-            last_change_at: None, last_error: None, matched_uids: Vec::new(),
-            last_minute_silence_date: None, minute_silence_active: false,
+            mode: "normal".into(),
+            clear_count: 0,
+            entry_announced: false,
+            clear_announced: false,
+            audio_snapshot: None,
+            last_success_at: None,
+            last_change_at: None,
+            last_error: None,
+            matched_uids: Vec::new(),
+            last_minute_silence_date: None,
+            minute_silence_active: false,
             minute_silence_snapshot: None,
         }
     }
 }
 
 #[derive(Clone)]
-pub struct StateStore { path: PathBuf }
+pub struct StateStore {
+    path: PathBuf,
+}
 
 impl StateStore {
-    pub fn new(path: impl Into<PathBuf>) -> Self { Self { path: path.into() } }
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
     pub fn load(&self) -> RuntimeState {
-        let Ok(text) = fs::read_to_string(&self.path) else { return RuntimeState::default(); };
-        let Ok(state) = serde_json::from_str::<RuntimeState>(&text) else { return RuntimeState::default(); };
-        if matches!(state.mode.as_str(), "normal" | "alert") { state } else { RuntimeState::default() }
+        let Ok(text) = fs::read_to_string(&self.path) else {
+            return RuntimeState::default();
+        };
+        let Ok(state) = serde_json::from_str::<RuntimeState>(&text) else {
+            return RuntimeState::default();
+        };
+        if matches!(state.mode.as_str(), "normal" | "alert") {
+            state
+        } else {
+            RuntimeState::default()
+        }
     }
 
     pub fn save(&self, state: &RuntimeState) -> Result<()> {
-        if let Some(parent) = self.path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let tmp = self.path.with_extension(format!("json.{}.{}.tmp", std::process::id(), sequence));
+        let tmp = self
+            .path
+            .with_extension(format!("json.{}.{}.tmp", std::process::id(), sequence));
         let payload = serde_json::to_vec_pretty(state)?;
         let result = (|| -> Result<()> {
             use std::io::Write;

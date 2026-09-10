@@ -1,10 +1,10 @@
 use std::convert::Infallible;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::pin::Pin;
-use std::task::{Context as TaskContext, Poll};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -53,7 +53,10 @@ struct EventStream {
 impl futures_core::Stream for EventStream {
     type Item = std::result::Result<Event, Infallible>;
 
-    fn poll_next(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+    ) -> Poll<Option<Self::Item>> {
         self.receiver.poll_recv(context)
     }
 }
@@ -100,10 +103,7 @@ fn collapse_single(mut value: Value) -> Value {
 fn microseconds_to_seconds(value: &Value) -> Option<f64> {
     match value {
         Value::Number(v) => v.as_f64().map(|n| (n / 1_000_000.0).max(0.0)),
-        Value::String(v) => v
-            .parse::<f64>()
-            .ok()
-            .map(|n| (n / 1_000_000.0).max(0.0)),
+        Value::String(v) => v.parse::<f64>().ok().map(|n| (n / 1_000_000.0).max(0.0)),
         _ => None,
     }
 }
@@ -144,7 +144,11 @@ pub struct WebController {
 }
 
 impl WebController {
-    pub fn new(config: Arc<AppConfig>, state: SharedRuntimeState, source_state: SharedSourceState) -> Self {
+    pub fn new(
+        config: Arc<AppConfig>,
+        state: SharedRuntimeState,
+        source_state: SharedSourceState,
+    ) -> Self {
         let (events, _) = broadcast::channel(8);
         Self {
             audio: AudioEngine::new(config.clone()),
@@ -177,14 +181,21 @@ impl WebController {
     pub async fn ensure_controls_available(&self) -> Result<()> {
         let state = self.state.lock().await;
         let talkover = effective_audio(&self.config.audio, &self.config.minute_silence)?
-            .0.duck_only_during_announcement;
+            .0
+            .duck_only_during_announcement;
         if state.minute_silence_active || (state.mode == "alert" && !talkover) {
             bail!("Керування музикою заблоковано пріоритетним оповіщенням");
         }
         Ok(())
     }
 
-    pub async fn run(&self, program: &str, args: &[&str], check: bool, timeout: u64) -> Result<command::CommandOutput> {
+    pub async fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        check: bool,
+        timeout: u64,
+    ) -> Result<command::CommandOutput> {
         command::run(program, args, check, timeout).await
     }
 
@@ -192,7 +203,11 @@ impl WebController {
         let current = self
             .run(
                 "mpc",
-                &["--format", "%file%\t%title%\t%artist%\t%album%\t%name%", "current"],
+                &[
+                    "--format",
+                    "%file%\t%title%\t%artist%\t%album%\t%name%",
+                    "current",
+                ],
                 false,
                 8,
             )
@@ -206,7 +221,11 @@ impl WebController {
             }));
         }
 
-        let mut fields = current.stdout.split('\t').map(str::to_owned).collect::<Vec<_>>();
+        let mut fields = current
+            .stdout
+            .split('\t')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         fields.resize(5, String::new());
         let state_re = Regex::new(r"\[(playing|paused)\]")?;
         let volume_re = Regex::new(r"volume:\s*(\d+)%")?;
@@ -226,10 +245,24 @@ impl WebController {
         let file = fields.first().cloned().unwrap_or_default();
         let is_stream = file.starts_with("http://") || file.starts_with("https://");
         let station = fields.get(4).cloned().unwrap_or_default();
-        let title = fields.get(1).filter(|v| !v.is_empty()).cloned()
+        let title = fields
+            .get(1)
+            .filter(|v| !v.is_empty())
+            .cloned()
             .or_else(|| (!station.is_empty()).then(|| station.clone()))
-            .or_else(|| Path::new(&file).file_name().and_then(|v| v.to_str()).map(str::to_owned))
-            .unwrap_or_else(|| if is_stream { "Мережевий потік".into() } else { String::new() });
+            .or_else(|| {
+                Path::new(&file)
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| {
+                if is_stream {
+                    "Мережевий потік".into()
+                } else {
+                    String::new()
+                }
+            });
 
         Ok(json!({
             "available": true,
@@ -251,7 +284,9 @@ impl WebController {
     }
 
     pub async fn active_sources(&self) -> Result<Vec<Value>> {
-        let sinks = self.run("pactl", &["-f", "json", "list", "sinks"], false, 8).await?;
+        let sinks = self
+            .run("pactl", &["-f", "json", "list", "sinks"], false, 8)
+            .await?;
         let inputs = self
             .run("pactl", &["-f", "json", "list", "sink-inputs"], false, 8)
             .await?;
@@ -270,9 +305,7 @@ impl WebController {
         let winner = self.source_state.read().await.clone();
         let mut result = Vec::new();
         for item in inputs.as_array().cloned().unwrap_or_default() {
-            if music_index.is_some()
-                && item.get("sink").and_then(Value::as_i64) != music_index
-            {
+            if music_index.is_some() && item.get("sink").and_then(Value::as_i64) != music_index {
                 continue;
             }
             if item.get("corked").and_then(Value::as_bool) == Some(true) {
@@ -307,7 +340,11 @@ impl WebController {
                     title
                 } else {
                     let name = property("media.name");
-                    if name.is_empty() { "Аудіопотік".into() } else { name }
+                    if name.is_empty() {
+                        "Аудіопотік".into()
+                    } else {
+                        name
+                    }
                 }
             };
             let identity = format!("{application} {binary}").to_ascii_lowercase();
@@ -340,9 +377,7 @@ impl WebController {
         let volume = self
             .run("pactl", &["get-sink-volume", sink], true, 8)
             .await?;
-        let mute = self
-            .run("pactl", &["get-sink-mute", sink], true, 8)
-            .await?;
+        let mute = self.run("pactl", &["get-sink-mute", sink], true, 8).await?;
         let re = Regex::new(r"(\d+(?:\.\d+)?)%")?;
         let db_re = Regex::new(r"(-?\d+(?:\.\d+)?)\s*dB")?;
         let first = volume.stdout.lines().next().unwrap_or_default();
@@ -356,10 +391,17 @@ impl WebController {
         } else {
             values.iter().sum::<f64>() / values.len() as f64
         };
-        let db_values = db_re.captures_iter(first).filter_map(|c| c.get(1))
-            .filter_map(|m| m.as_str().parse::<f64>().ok()).collect::<Vec<_>>();
+        let db_values = db_re
+            .captures_iter(first)
+            .filter_map(|c| c.get(1))
+            .filter_map(|m| m.as_str().parse::<f64>().ok())
+            .collect::<Vec<_>>();
         let db = if db_values.is_empty() {
-            if average <= 0.0 { -60.0 } else { 20.0 * (average / 100.0).log10() }
+            if average <= 0.0 {
+                -60.0
+            } else {
+                20.0 * (average / 100.0).log10()
+            }
         } else {
             db_values.iter().sum::<f64>() / db_values.len() as f64
         };
@@ -372,7 +414,9 @@ impl WebController {
     }
 
     pub async fn physical_sink(&self) -> Result<String> {
-        let output = self.run("pactl", &["list", "short", "sinks"], true, 8).await?;
+        let output = self
+            .run("pactl", &["list", "short", "sinks"], true, 8)
+            .await?;
         let mut candidates = output
             .stdout
             .lines()
@@ -392,7 +436,8 @@ impl WebController {
         // The bus state is authoritative: it identifies the sink that actually
         // receives both loopbacks. Do not guess from USB priority after hotplug.
         if let Ok(state) = fs::read_to_string(AUDIO_BUS_STATE_FILE) {
-            if let Some(active) = state.lines()
+            if let Some(active) = state
+                .lines()
                 .find_map(|line| line.strip_prefix("PHYSICAL="))
                 .map(str::trim)
             {
@@ -406,7 +451,10 @@ impl WebController {
                 return Ok(candidates.remove(position));
             }
         }
-        if let Some(position) = candidates.iter().position(|name| name.starts_with("alsa_output.usb-")) {
+        if let Some(position) = candidates
+            .iter()
+            .position(|name| name.starts_with("alsa_output.usb-"))
+        {
             return Ok(candidates.remove(position));
         }
         Ok(candidates.remove(0))
@@ -414,15 +462,20 @@ impl WebController {
 
     fn configured_output() -> Option<String> {
         fs::read_to_string(AUDIO_OUTPUT_FILE).ok().and_then(|text| {
-            text.lines().find_map(|line| line.strip_prefix("PHYSICAL_SINK="))
-                .map(str::trim).filter(|value| !value.is_empty() && *value != "AUTO").map(str::to_owned)
+            text.lines()
+                .find_map(|line| line.strip_prefix("PHYSICAL_SINK="))
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "AUTO")
+                .map(str::to_owned)
         })
     }
 
     fn write_configured_output(output: Option<&str>) -> Result<()> {
         let path = Path::new(AUDIO_OUTPUT_FILE);
         if let Some(output) = output {
-            if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
             let temporary = path.with_extension("env.tmp");
             fs::write(&temporary, format!("PHYSICAL_SINK={output}\n"))?;
             fs::rename(&temporary, path)?;
@@ -433,23 +486,33 @@ impl WebController {
     }
 
     fn routed_output() -> Option<String> {
-        fs::read_to_string(AUDIO_BUS_STATE_FILE).ok().and_then(|text| {
-            text.lines().find_map(|line| line.strip_prefix("PHYSICAL="))
-                .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
-        })
+        fs::read_to_string(AUDIO_BUS_STATE_FILE)
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("PHYSICAL="))
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            })
     }
 
     async fn wait_for_routed_output(&self, expected: &str) -> bool {
         for _ in 0..100 {
-            if Self::routed_output().as_deref() == Some(expected) { return true; }
+            if Self::routed_output().as_deref() == Some(expected) {
+                return true;
+            }
             sleep(Duration::from_millis(100)).await;
         }
         false
     }
 
     pub async fn audio_outputs(&self) -> Result<Vec<Value>> {
-        let output = self.run("pactl", &["-f", "json", "list", "sinks"], true, 8).await?;
-        let sinks: Value = serde_json::from_str(&output.stdout).context("Некоректна відповідь PipeWire")?;
+        let output = self
+            .run("pactl", &["-f", "json", "list", "sinks"], true, 8)
+            .await?;
+        let sinks: Value =
+            serde_json::from_str(&output.stdout).context("Некоректна відповідь PipeWire")?;
         let selected = Self::configured_output();
         let current = self.physical_sink().await.ok();
         Ok(sinks.as_array().into_iter().flatten().filter_map(|sink| {
@@ -481,7 +544,9 @@ impl WebController {
         let _guard = self.audio_control_lock.lock().await;
         let requested = requested.trim();
         let outputs = self.audio_outputs().await?;
-        let selected = outputs.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(requested))
+        let selected = outputs
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(requested))
             .ok_or_else(|| anyhow!("Вибраний аудіовихід зараз недоступний"))?;
         if Self::routed_output().as_deref() == Some(requested) {
             Self::write_configured_output(Some(requested))?;
@@ -505,43 +570,57 @@ impl WebController {
         let percent_re = Regex::new(r"Playback[^\n]*\[(\d+)%\]")?;
         let db_re = Regex::new(r"\[(-?\d+(?:\.\d+)?)dB\]")?;
         let limits_re = Regex::new(r"Limits:\s+Playback\s+(-?\d+)\s+-\s+(-?\d+)")?;
-        let db_scale_re = Regex::new(
-            r"dBscale-min=(-?\d+(?:\.\d+)?)dB,step=(-?\d+(?:\.\d+)?)dB",
-        )?;
-        let db_minmax_re = Regex::new(
-            r"dBminmax-min=(-?\d+(?:\.\d+)?)dB,max=(-?\d+(?:\.\d+)?)dB",
-        )?;
+        let db_scale_re = Regex::new(r"dBscale-min=(-?\d+(?:\.\d+)?)dB,step=(-?\d+(?:\.\d+)?)dB")?;
+        let db_minmax_re = Regex::new(r"dBminmax-min=(-?\d+(?:\.\d+)?)dB,max=(-?\d+(?:\.\d+)?)dB")?;
         let mut result = Vec::new();
 
         for capture in card_re.captures_iter(&cards_text) {
-            let card = capture.get(1).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
+            let card = capture
+                .get(1)
+                .and_then(|m| m.as_str().parse::<u32>().ok())
+                .unwrap_or(0);
             let card_name = capture.get(2).map(|m| m.as_str().trim()).unwrap_or("");
             let card_text = card.to_string();
-            let controls = self.run("amixer", &["-c", &card_text, "scontrols"], false, 8).await?;
-            let contents = self.run("amixer", &["-c", &card_text, "contents"], false, 8).await?;
-            if controls.code != 0 { continue; }
+            let controls = self
+                .run("amixer", &["-c", &card_text, "scontrols"], false, 8)
+                .await?;
+            let contents = self
+                .run("amixer", &["-c", &card_text, "contents"], false, 8)
+                .await?;
+            if controls.code != 0 {
+                continue;
+            }
 
             for control_capture in control_re.captures_iter(&controls.stdout) {
                 let control = control_capture.get(1).map(|m| m.as_str()).unwrap_or("");
-                let details = self.run("amixer", &["-c", &card_text, "sget", control], false, 8).await?;
-                if details.code != 0 || !details.stdout.contains("Playback") { continue; }
+                let details = self
+                    .run("amixer", &["-c", &card_text, "sget", control], false, 8)
+                    .await?;
+                if details.code != 0 || !details.stdout.contains("Playback") {
+                    continue;
+                }
 
-                let values = percent_re.captures_iter(&details.stdout)
+                let values = percent_re
+                    .captures_iter(&details.stdout)
                     .filter_map(|c| c.get(1))
                     .filter_map(|m| m.as_str().parse::<f64>().ok())
                     .collect::<Vec<_>>();
-                if values.is_empty() { continue; }
+                if values.is_empty() {
+                    continue;
+                }
                 let percent = values.iter().sum::<f64>() / values.len() as f64;
-                let actual_db_values = db_re.captures_iter(&details.stdout)
+                let actual_db_values = db_re
+                    .captures_iter(&details.stdout)
                     .filter_map(|c| c.get(1))
                     .filter_map(|m| m.as_str().parse::<f64>().ok())
                     .collect::<Vec<_>>();
-                let actual_db = (!actual_db_values.is_empty()).then(|| {
-                    actual_db_values.iter().sum::<f64>() / actual_db_values.len() as f64
-                });
+                let actual_db = (!actual_db_values.is_empty())
+                    .then(|| actual_db_values.iter().sum::<f64>() / actual_db_values.len() as f64);
 
                 let volume_marker = format!("name='{control} Playback Volume'");
-                let content_block = contents.stdout.split("\nnumid=")
+                let content_block = contents
+                    .stdout
+                    .split("\nnumid=")
                     .find(|block| block.contains(&volume_marker))
                     .unwrap_or("");
                 let (db_min, db_max) = if let Some(c) = db_minmax_re.captures(content_block) {
@@ -553,10 +632,18 @@ impl WebController {
                     let min = c.get(1).and_then(|m| m.as_str().parse::<f64>().ok());
                     let step = c.get(2).and_then(|m| m.as_str().parse::<f64>().ok());
                     let limits = limits_re.captures(&details.stdout);
-                    let raw_min = limits.as_ref().and_then(|v| v.get(1)).and_then(|m| m.as_str().parse::<f64>().ok());
-                    let raw_max = limits.as_ref().and_then(|v| v.get(2)).and_then(|m| m.as_str().parse::<f64>().ok());
+                    let raw_min = limits
+                        .as_ref()
+                        .and_then(|v| v.get(1))
+                        .and_then(|m| m.as_str().parse::<f64>().ok());
+                    let raw_max = limits
+                        .as_ref()
+                        .and_then(|v| v.get(2))
+                        .and_then(|m| m.as_str().parse::<f64>().ok());
                     let max = match (min, step, raw_min, raw_max) {
-                        (Some(min), Some(step), Some(raw_min), Some(raw_max)) => Some(min + (raw_max - raw_min) * step),
+                        (Some(min), Some(step), Some(raw_min), Some(raw_max)) => {
+                            Some(min + (raw_max - raw_min) * step)
+                        }
                         _ => None,
                     };
                     (min, max)
@@ -599,20 +686,32 @@ impl WebController {
     pub async fn primary_hardware_mixer(&self) -> Result<Value> {
         let mixers = self.hardware_mixers().await?;
         let selected_card = self.audio_outputs().await.ok().and_then(|outputs| {
-            outputs.into_iter()
+            outputs
+                .into_iter()
                 .find(|item| item.get("selected").and_then(Value::as_bool) == Some(true))
                 .and_then(|item| item.get("alsa_card").and_then(Value::as_u64))
         });
-        let candidates = mixers.iter().filter(|item| {
-            selected_card.is_none() || item.get("card").and_then(Value::as_u64) == selected_card
-        }).collect::<Vec<_>>();
-        ["Master", "Headphone", "PCM", "Speaker"].iter()
-            .find_map(|preferred| candidates.iter().find(|item| item.get("control").and_then(Value::as_str) == Some(*preferred)).copied())
+        let candidates = mixers
+            .iter()
+            .filter(|item| {
+                selected_card.is_none() || item.get("card").and_then(Value::as_u64) == selected_card
+            })
+            .collect::<Vec<_>>();
+        ["Master", "Headphone", "PCM", "Speaker"]
+            .iter()
+            .find_map(|preferred| {
+                candidates
+                    .iter()
+                    .find(|item| item.get("control").and_then(Value::as_str) == Some(*preferred))
+                    .copied()
+            })
             .or_else(|| candidates.first().copied())
             .cloned()
             .ok_or_else(|| {
                 if let Some(card) = selected_card {
-                    anyhow!("Вибраний ALSA-пристрій card {card} не має апаратного регулятора гучності")
+                    anyhow!(
+                        "Вибраний ALSA-пристрій card {card} не має апаратного регулятора гучності"
+                    )
                 } else {
                     anyhow!("Апаратний ALSA-регулятор не знайдено")
                 }
@@ -628,7 +727,10 @@ impl WebController {
                 let sink = self.physical_sink().await?;
                 let mut master = self.sink_state(&sink).await?;
                 if let Some(object) = master.as_object_mut() {
-                    object.insert("card_name".into(), Value::String("Програмний Master".into()));
+                    object.insert(
+                        "card_name".into(),
+                        Value::String("Програмний Master".into()),
+                    );
                     object.insert("control".into(), Value::String(sink));
                     object.insert("backend".into(), Value::String("pipewire".into()));
                 }
@@ -640,31 +742,63 @@ impl WebController {
 
     pub async fn set_mixer_db(&self, target: &str, db: f64, muted: Option<bool>) -> Result<Value> {
         let _guard = self.audio_control_lock.lock().await;
-        if !(-60.0..=0.0).contains(&db) { bail!("Рівень має бути в межах -60..0 dB"); }
+        if !(-60.0..=0.0).contains(&db) {
+            bail!("Рівень має бути в межах -60..0 dB");
+        }
         if target == "master" {
             if let Ok(mixer) = self.primary_hardware_mixer().await {
-                let card = mixer.get("card").and_then(Value::as_u64).ok_or_else(|| anyhow!("Некоректна ALSA-карта"))?.to_string();
-                let control = mixer.get("control").and_then(Value::as_str).ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
+                let card = mixer
+                    .get("card")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| anyhow!("Некоректна ALSA-карта"))?
+                    .to_string();
+                let control = mixer
+                    .get("control")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
                 if muted == Some(true) || db <= -60.0 {
-                    self.run("amixer", &["-c", &card, "sset", control, "mute"], true, 8).await?;
+                    self.run("amixer", &["-c", &card, "sset", control, "mute"], true, 8)
+                        .await?;
                 } else if let Some(reference) = mixer.get("db_reference").and_then(Value::as_f64) {
-                    let minimum = mixer.get("db_min").and_then(Value::as_f64).unwrap_or(reference - 60.0);
+                    let minimum = mixer
+                        .get("db_min")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(reference - 60.0);
                     let hardware_db = (reference + db).max(minimum);
                     let value = format!("{hardware_db:.2}dB");
-                    self.run("amixer", &["-c", &card, "sset", control, "--", &value, "unmute"], true, 8).await?;
+                    self.run(
+                        "amixer",
+                        &["-c", &card, "sset", control, "--", &value, "unmute"],
+                        true,
+                        8,
+                    )
+                    .await?;
                 } else {
                     let percent = (10.0_f64.powf(db / 20.0) * 100.0).clamp(1.0, 100.0);
                     let value = format!("{percent:.0}%");
-                    self.run("amixer", &["-c", &card, "sset", control, &value, "unmute"], true, 8).await?;
+                    self.run(
+                        "amixer",
+                        &["-c", &card, "sset", control, &value, "unmute"],
+                        true,
+                        8,
+                    )
+                    .await?;
                 }
             } else {
                 let sink = self.physical_sink().await?;
                 let is_muted = muted == Some(true) || db <= -60.0;
                 if !is_muted {
                     let value = format!("{db:.1}dB");
-                    self.run("pactl", &["set-sink-volume", &sink, &value], true, 8).await?;
+                    self.run("pactl", &["set-sink-volume", &sink, &value], true, 8)
+                        .await?;
                 }
-                self.run("pactl", &["set-sink-mute", &sink, if is_muted { "1" } else { "0" }], true, 8).await?;
+                self.run(
+                    "pactl",
+                    &["set-sink-mute", &sink, if is_muted { "1" } else { "0" }],
+                    true,
+                    8,
+                )
+                .await?;
             }
         } else {
             let sink = match target {
@@ -675,9 +809,16 @@ impl WebController {
             let is_muted = muted == Some(true) || db <= -60.0;
             if !is_muted {
                 let value = format!("{db:.1}dB");
-                self.run("pactl", &["set-sink-volume", sink, &value], true, 8).await?;
+                self.run("pactl", &["set-sink-volume", sink, &value], true, 8)
+                    .await?;
             }
-            self.run("pactl", &["set-sink-mute", sink, if is_muted { "1" } else { "0" }], true, 8).await?;
+            self.run(
+                "pactl",
+                &["set-sink-mute", sink, if is_muted { "1" } else { "0" }],
+                true,
+                8,
+            )
+            .await?;
         }
         self.mixer_state().await
     }
@@ -752,7 +893,12 @@ impl WebController {
             .iter()
             .find(|name| name.as_str() == prefix)
             .cloned()
-            .or_else(|| names.iter().find(|name| name.starts_with(&format!("{prefix}."))).cloned())
+            .or_else(|| {
+                names
+                    .iter()
+                    .find(|name| name.starts_with(&format!("{prefix}.")))
+                    .cloned()
+            })
     }
 
     async fn mpris_player(&self, source: &str, service: &str) -> Result<Option<Value>> {
@@ -797,18 +943,37 @@ impl WebController {
             state = "stopped".into();
         }
         let position = properties.get("Position").and_then(microseconds_to_seconds);
-        let duration = metadata.get("mpris:length").and_then(microseconds_to_seconds);
+        let duration = metadata
+            .get("mpris:length")
+            .and_then(microseconds_to_seconds);
         let progress = match (position, duration) {
             (Some(p), Some(d)) if d > 0.0 => (p * 100.0 / d).clamp(0.0, 100.0).round() as u32,
             _ => 0,
         };
-        let can_control = properties.get("CanControl").and_then(Value::as_bool).unwrap_or(false);
-        let control = |name: &str| can_control && properties.get(name).and_then(Value::as_bool).unwrap_or(false);
-        let backend = if source == "Spotify Connect" { "spotify-mpris" } else { "airplay-mpris" };
+        let can_control = properties
+            .get("CanControl")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let control = |name: &str| {
+            can_control
+                && properties
+                    .get(name)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        };
+        let backend = if source == "Spotify Connect" {
+            "spotify-mpris"
+        } else {
+            "airplay-mpris"
+        };
         let art_url = metadata
             .get("mpris:artUrl")
             .and_then(Value::as_str)
-            .filter(|value| Url::parse(value).ok().is_some_and(|u| matches!(u.scheme(), "http" | "https")));
+            .filter(|value| {
+                Url::parse(value)
+                    .ok()
+                    .is_some_and(|u| matches!(u.scheme(), "http" | "https"))
+            });
         Ok(Some(json!({
             "source": source,
             "backend": backend,
@@ -834,9 +999,15 @@ impl WebController {
     }
 
     fn local_player(&self, mpd: &Value) -> Value {
-        let state = mpd.get("state").and_then(Value::as_str).unwrap_or("stopped");
+        let state = mpd
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("stopped");
         let queue_length = mpd.get("queue_length").and_then(Value::as_u64).unwrap_or(0);
-        let has_track = mpd.get("file").and_then(Value::as_str).is_some_and(|v| !v.is_empty());
+        let has_track = mpd
+            .get("file")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty());
         let elapsed = mpd.get("elapsed").and_then(Value::as_str);
         let duration = mpd.get("duration").and_then(Value::as_str);
         json!({
@@ -906,7 +1077,9 @@ impl WebController {
             return Ok(self.local_player(mpd));
         }
         let external = winner.as_deref().and_then(|key| {
-            sources.iter().find(|source| source.get("key").and_then(Value::as_str) == Some(key))
+            sources
+                .iter()
+                .find(|source| source.get("key").and_then(Value::as_str) == Some(key))
         });
         if let Some(external) = external {
             let source_type = external.get("type").and_then(Value::as_str).unwrap_or("");
@@ -932,7 +1105,10 @@ impl WebController {
         for source_type in ["Spotify Connect", "AirPlay"] {
             if let Some(service) = self.mpris_service(source_type, &names).await {
                 if let Some(player) = self.mpris_player(source_type, &service).await? {
-                    if matches!(player.get("state").and_then(Value::as_str), Some("playing" | "paused")) {
+                    if matches!(
+                        player.get("state").and_then(Value::as_str),
+                        Some("playing" | "paused")
+                    ) {
                         return Ok(player);
                     }
                 }
@@ -953,9 +1129,14 @@ impl WebController {
         }
 
         if mpd.get("available").and_then(Value::as_bool) == Some(true)
-            && (matches!(mpd.get("state").and_then(Value::as_str), Some("playing" | "paused"))
-                || mpd.get("queue_length").and_then(Value::as_u64).unwrap_or(0) > 0
-                || mpd.get("file").and_then(Value::as_str).is_some_and(|v| !v.is_empty()))
+            && (matches!(
+                mpd.get("state").and_then(Value::as_str),
+                Some("playing" | "paused")
+            ) || mpd.get("queue_length").and_then(Value::as_u64).unwrap_or(0) > 0
+                || mpd
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| !v.is_empty()))
         {
             return Ok(self.local_player(mpd));
         }
@@ -964,7 +1145,8 @@ impl WebController {
 
     pub async fn status(&self) -> Result<Value> {
         let snapshot = self.audio.snapshot().await?;
-        let music_volume = snapshot.volumes_percent.iter().sum::<f64>() / snapshot.volumes_percent.len().max(1) as f64;
+        let music_volume = snapshot.volumes_percent.iter().sum::<f64>()
+            / snapshot.volumes_percent.len().max(1) as f64;
         let hardware = self.primary_hardware_mixer().await.ok();
         let volume = music_volume;
         let muted = snapshot.muted;
@@ -973,9 +1155,15 @@ impl WebController {
             Err(_) => None,
         };
         let alert_bus = self.sink_state(&self.config.audio.alert_sink).await.ok();
-        let mpd = self.mpd_status().await.unwrap_or_else(|_| json!({ "available": false, "state": "unavailable" }));
+        let mpd = self
+            .mpd_status()
+            .await
+            .unwrap_or_else(|_| json!({ "available": false, "state": "unavailable" }));
         let sources = self.active_sources().await.unwrap_or_default();
-        let mut player = self.resolve_active_player(&sources, &mpd).await.unwrap_or_else(|_| self.idle_player());
+        let mut player = self
+            .resolve_active_player(&sources, &mpd)
+            .await
+            .unwrap_or_else(|_| self.idle_player());
         if let Some(object) = player.as_object_mut() {
             object.remove("_service");
         }
@@ -1013,10 +1201,16 @@ impl WebController {
         {
             bail!(
                 "{} не підтримує цю команду через веб-інтерфейс",
-                player.get("source").and_then(Value::as_str).unwrap_or("Активне джерело")
+                player
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Активне джерело")
             );
         }
-        let backend = player.get("backend").and_then(Value::as_str).unwrap_or("none");
+        let backend = player
+            .get("backend")
+            .and_then(Value::as_str)
+            .unwrap_or("none");
         if backend == "mpd" {
             self.run("mpc", &[action], true, 8).await?;
         } else if matches!(backend, "spotify-mpris" | "airplay-mpris") {
@@ -1035,7 +1229,14 @@ impl WebController {
             let output = self
                 .run(
                     "busctl",
-                    &["--system", "call", service, MPRIS_PATH, MPRIS_PLAYER_INTERFACE, method],
+                    &[
+                        "--system",
+                        "call",
+                        service,
+                        MPRIS_PATH,
+                        MPRIS_PLAYER_INTERFACE,
+                        method,
+                    ],
                     false,
                     4,
                 )
@@ -1064,14 +1265,23 @@ impl WebController {
 
     pub async fn playlists(&self) -> Result<Vec<String>> {
         let output = self.run("mpc", &["lsplaylists"], true, 8).await?;
-        Ok(output.stdout.lines().filter(|line| !line.is_empty()).map(str::to_owned).collect())
+        Ok(output
+            .stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     pub async fn queue(&self) -> Result<Vec<Value>> {
         let output = self
             .run(
                 "mpc",
-                &["--format", "%position%\t%file%\t%title%\t%artist%\t%album%", "playlist"],
+                &[
+                    "--format",
+                    "%position%\t%file%\t%title%\t%artist%\t%album%",
+                    "playlist",
+                ],
                 true,
                 8,
             )
@@ -1080,7 +1290,9 @@ impl WebController {
         for line in output.stdout.lines() {
             let mut fields = line.split('\t').map(str::to_owned).collect::<Vec<_>>();
             fields.resize(5, String::new());
-            let Ok(position) = fields[0].parse::<u32>() else { continue; };
+            let Ok(position) = fields[0].parse::<u32>() else {
+                continue;
+            };
             let title = if fields[2].is_empty() {
                 Path::new(&fields[1])
                     .file_name()
@@ -1103,17 +1315,34 @@ impl WebController {
 }
 
 #[derive(Deserialize)]
-struct VolumeBody { percent: f64 }
+struct VolumeBody {
+    percent: f64,
+}
 #[derive(Deserialize)]
-struct MuteBody { muted: bool }
+struct MuteBody {
+    muted: bool,
+}
 #[derive(Deserialize)]
-struct AudioLevelBody { target: String, percent: f64 }
+struct AudioLevelBody {
+    target: String,
+    percent: f64,
+}
 #[derive(Deserialize)]
-struct MixerBody { target: String, db: f64, muted: Option<bool> }
+struct MixerBody {
+    target: String,
+    db: f64,
+    muted: Option<bool>,
+}
 #[derive(Deserialize)]
-struct HardwareBody { card: u32, control: String, percent: u32 }
+struct HardwareBody {
+    card: u32,
+    control: String,
+    percent: u32,
+}
 #[derive(Deserialize)]
-struct AudioOutputBody { id: String }
+struct AudioOutputBody {
+    id: String,
+}
 #[derive(Deserialize, Default)]
 struct AudioSettingsBody {
     duck_db: Option<f64>,
@@ -1126,15 +1355,25 @@ struct AudioSettingsBody {
     duck_only_during_announcement: Option<bool>,
 }
 #[derive(Deserialize)]
-struct PlayerBody { action: String }
+struct PlayerBody {
+    action: String,
+}
 #[derive(Deserialize)]
-struct PathBody { path: String }
+struct PathBody {
+    path: String,
+}
 #[derive(Deserialize)]
-struct PlaylistBody { name: String }
+struct PlaylistBody {
+    name: String,
+}
 #[derive(Deserialize)]
-struct StreamBody { url: String }
+struct StreamBody {
+    url: String,
+}
 #[derive(Deserialize)]
-struct QueueBody { position: u32 }
+struct QueueBody {
+    position: u32,
+}
 #[derive(Deserialize, Default)]
 struct ProviderBody {
     endpoint: Option<String>,
@@ -1155,7 +1394,9 @@ fn safe_mpd_path(value: &str, playlist: bool) -> Result<String> {
         || value.contains('\n')
         || value.starts_with('-')
         || path.is_absolute()
-        || path.components().any(|component| component.as_os_str() == "..")
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "..")
         || (playlist && value.contains('/'))
     {
         bail!("Некоректний шлях");
@@ -1165,13 +1406,27 @@ fn safe_mpd_path(value: &str, playlist: bool) -> Result<String> {
 
 fn apply_provider_body(base: ProviderConfig, body: &ProviderBody) -> Result<ProviderConfig> {
     let mut config = base;
-    if let Some(v) = body.endpoint.as_deref() { config.endpoint = v.trim().to_owned(); }
-    if let Some(v) = body.location_uid { config.location_uid = v; }
-    if let Some(v) = body.location_type.as_deref() { config.location_type = v.trim().to_ascii_lowercase(); }
-    if let Some(v) = body.poll_interval_seconds { config.poll_interval_seconds = v; }
-    if let Some(v) = body.request_timeout_seconds { config.request_timeout_seconds = v; }
-    if let Some(v) = body.rate_limit_backoff_seconds { config.rate_limit_backoff_seconds = v; }
-    if let Some(v) = body.clear_confirmations { config.clear_confirmations = v; }
+    if let Some(v) = body.endpoint.as_deref() {
+        config.endpoint = v.trim().to_owned();
+    }
+    if let Some(v) = body.location_uid {
+        config.location_uid = v;
+    }
+    if let Some(v) = body.location_type.as_deref() {
+        config.location_type = v.trim().to_ascii_lowercase();
+    }
+    if let Some(v) = body.poll_interval_seconds {
+        config.poll_interval_seconds = v;
+    }
+    if let Some(v) = body.request_timeout_seconds {
+        config.request_timeout_seconds = v;
+    }
+    if let Some(v) = body.rate_limit_backoff_seconds {
+        config.rate_limit_backoff_seconds = v;
+    }
+    if let Some(v) = body.clear_confirmations {
+        config.clear_confirmations = v;
+    }
     validate_provider(&config)?;
     Ok(config)
 }
@@ -1198,7 +1453,11 @@ async fn events(State(controller): State<WebController>) -> impl IntoResponse {
         loop {
             match receiver.recv().await {
                 Ok(payload) => {
-                    if sender.send(Ok(Event::default().event("status").data(payload))).await.is_err() {
+                    if sender
+                        .send(Ok(Event::default().event("status").data(payload)))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1207,33 +1466,71 @@ async fn events(State(controller): State<WebController>) -> impl IntoResponse {
             }
         }
     });
-    Sse::new(EventStream { receiver: stream })
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+    Sse::new(EventStream { receiver: stream }).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    )
 }
 
 async fn status(State(controller): State<WebController>) -> ApiResult {
     controller.status().await.map(Json).map_err(map_internal)
 }
 
-async fn set_volume(State(controller): State<WebController>, Json(body): Json<VolumeBody>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
+async fn set_volume(
+    State(controller): State<WebController>,
+    Json(body): Json<VolumeBody>,
+) -> ApiResult {
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
     if !(0.0..=100.0).contains(&body.percent) {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Гучність має бути 0..100"));
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Гучність має бути 0..100",
+        ));
     }
-    controller.audio.set_music_volume(body.percent).await.map_err(map_internal)?;
-    controller.audio.set_music_mute(body.percent <= 0.0).await.map_err(map_internal)?;
-    Ok(Json(json!({ "volume": body.percent, "muted": body.percent == 0.0 })))
+    controller
+        .audio
+        .set_music_volume(body.percent)
+        .await
+        .map_err(map_internal)?;
+    controller
+        .audio
+        .set_music_mute(body.percent <= 0.0)
+        .await
+        .map_err(map_internal)?;
+    Ok(Json(
+        json!({ "volume": body.percent, "muted": body.percent == 0.0 }),
+    ))
 }
 
-async fn set_mute(State(controller): State<WebController>, Json(body): Json<MuteBody>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
-    controller.audio.set_music_mute(body.muted).await.map_err(map_internal)?;
+async fn set_mute(
+    State(controller): State<WebController>,
+    Json(body): Json<MuteBody>,
+) -> ApiResult {
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
+    controller
+        .audio
+        .set_music_mute(body.muted)
+        .await
+        .map_err(map_internal)?;
     Ok(Json(json!({ "muted": body.muted })))
 }
 
-async fn set_audio_level(State(controller): State<WebController>, Json(body): Json<AudioLevelBody>) -> ApiResult {
+async fn set_audio_level(
+    State(controller): State<WebController>,
+    Json(body): Json<AudioLevelBody>,
+) -> ApiResult {
     if !(0.0..=100.0).contains(&body.percent) {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Гучність має бути 0..100"));
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Гучність має бути 0..100",
+        ));
     }
     let sink = match body.target.as_str() {
         "master" => controller.physical_sink().await.map_err(map_internal)?,
@@ -1241,39 +1538,85 @@ async fn set_audio_level(State(controller): State<WebController>, Json(body): Js
         "alert" => controller.config.audio.alert_sink.clone(),
         _ => return Err(api_error(StatusCode::BAD_REQUEST, "Невідомий аудіорівень")),
     };
-    controller.audio.set_sink_percent(&sink, body.percent).await.map_err(map_internal)?;
-    controller.sink_state(&sink).await.map(Json).map_err(map_internal)
+    controller
+        .audio
+        .set_sink_percent(&sink, body.percent)
+        .await
+        .map_err(map_internal)?;
+    controller
+        .sink_state(&sink)
+        .await
+        .map(Json)
+        .map_err(map_internal)
 }
 
 async fn get_mixer(State(controller): State<WebController>) -> ApiResult {
-    controller.mixer_state().await.map(Json).map_err(map_internal)
+    controller
+        .mixer_state()
+        .await
+        .map(Json)
+        .map_err(map_internal)
 }
 
-async fn set_mixer(State(controller): State<WebController>, Json(body): Json<MixerBody>) -> ApiResult {
+async fn set_mixer(
+    State(controller): State<WebController>,
+    Json(body): Json<MixerBody>,
+) -> ApiResult {
     // Master is the final physical output safety control and must remain
     // available even while alerts or the minute of silence own the music bus.
     if body.target != "master" {
-        controller.ensure_controls_available().await.map_err(map_internal)?;
+        controller
+            .ensure_controls_available()
+            .await
+            .map_err(map_internal)?;
     }
-    controller.set_mixer_db(&body.target, body.db, body.muted).await.map(Json).map_err(map_internal)
+    controller
+        .set_mixer_db(&body.target, body.db, body.muted)
+        .await
+        .map(Json)
+        .map_err(map_internal)
 }
 
 async fn audio_outputs(State(controller): State<WebController>) -> ApiResult {
-    controller.audio_outputs().await.map(|items| Json(json!({ "items": items }))).map_err(map_internal)
+    controller
+        .audio_outputs()
+        .await
+        .map(|items| Json(json!({ "items": items })))
+        .map_err(map_internal)
 }
 
-async fn select_audio_output(State(controller): State<WebController>, Json(body): Json<AudioOutputBody>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
-    controller.select_audio_output(&body.id).await.map(Json).map_err(map_internal)
+async fn select_audio_output(
+    State(controller): State<WebController>,
+    Json(body): Json<AudioOutputBody>,
+) -> ApiResult {
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
+    controller
+        .select_audio_output(&body.id)
+        .await
+        .map(Json)
+        .map_err(map_internal)
 }
 
 async fn hardware(State(controller): State<WebController>) -> ApiResult {
-    controller.hardware_mixers().await.map(|items| Json(json!({ "items": items }))).map_err(map_internal)
+    controller
+        .hardware_mixers()
+        .await
+        .map(|items| Json(json!({ "items": items })))
+        .map_err(map_internal)
 }
 
-async fn set_hardware(State(controller): State<WebController>, Json(body): Json<HardwareBody>) -> ApiResult {
+async fn set_hardware(
+    State(controller): State<WebController>,
+    Json(body): Json<HardwareBody>,
+) -> ApiResult {
     if body.percent > 100 {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Некоректний ALSA-регулятор"));
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Некоректний ALSA-регулятор",
+        ));
     }
     let available = controller.hardware_mixers().await.map_err(map_internal)?;
     let exists = available.iter().any(|item| {
@@ -1281,56 +1624,130 @@ async fn set_hardware(State(controller): State<WebController>, Json(body): Json<
             && item.get("control").and_then(Value::as_str) == Some(body.control.as_str())
     });
     if !exists {
-        return Err(api_error(StatusCode::BAD_REQUEST, "ALSA-регулятор не знайдено"));
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "ALSA-регулятор не знайдено",
+        ));
     }
     let card = body.card.to_string();
     let percent = format!("{}%", body.percent);
-    controller.run("amixer", &["-c", &card, "sset", &body.control, &percent, "unmute"], true, 8).await.map_err(map_internal)?;
-    Ok(Json(json!({ "card": body.card, "control": body.control, "volume": body.percent })))
+    controller
+        .run(
+            "amixer",
+            &["-c", &card, "sset", &body.control, &percent, "unmute"],
+            true,
+            8,
+        )
+        .await
+        .map_err(map_internal)?;
+    Ok(Json(
+        json!({ "card": body.card, "control": body.control, "volume": body.percent }),
+    ))
 }
 
 async fn get_audio_settings(State(controller): State<WebController>) -> ApiResult {
     controller.audio_settings().map(Json).map_err(map_internal)
 }
 
-async fn put_audio_settings(State(controller): State<WebController>, Json(body): Json<AudioSettingsBody>) -> ApiResult {
-    let (mut audio, mut minute) = effective_audio(&controller.config.audio, &controller.config.minute_silence).map_err(map_internal)?;
-    if let Some(v) = body.duck_db { audio.duck_db = v; }
-    if let Some(v) = body.alert_volume_percent { audio.alert_volume_percent = v; }
-    if let Some(v) = body.minute_silence_volume_percent { minute.volume_percent = v; }
-    if let Some(v) = body.default_restore_volume_percent { audio.default_restore_volume_percent = v; }
-    if let Some(v) = body.duck_fade_seconds { audio.duck_fade_seconds = v; }
-    if let Some(v) = body.restore_fade_seconds { audio.restore_fade_seconds = v; }
-    if let Some(v) = body.alert_repeat_interval_minutes { audio.alert_repeat_interval_minutes = v; }
-    if let Some(v) = body.duck_only_during_announcement { audio.duck_only_during_announcement = v; }
+async fn put_audio_settings(
+    State(controller): State<WebController>,
+    Json(body): Json<AudioSettingsBody>,
+) -> ApiResult {
+    let (mut audio, mut minute) =
+        effective_audio(&controller.config.audio, &controller.config.minute_silence)
+            .map_err(map_internal)?;
+    if let Some(v) = body.duck_db {
+        audio.duck_db = v;
+    }
+    if let Some(v) = body.alert_volume_percent {
+        audio.alert_volume_percent = v;
+    }
+    if let Some(v) = body.minute_silence_volume_percent {
+        minute.volume_percent = v;
+    }
+    if let Some(v) = body.default_restore_volume_percent {
+        audio.default_restore_volume_percent = v;
+    }
+    if let Some(v) = body.duck_fade_seconds {
+        audio.duck_fade_seconds = v;
+    }
+    if let Some(v) = body.restore_fade_seconds {
+        audio.restore_fade_seconds = v;
+    }
+    if let Some(v) = body.alert_repeat_interval_minutes {
+        audio.alert_repeat_interval_minutes = v;
+    }
+    if let Some(v) = body.duck_only_during_announcement {
+        audio.duck_only_during_announcement = v;
+    }
     validate_audio(&audio, &minute).map_err(map_internal)?;
     save_audio_settings(&audio, &minute).map_err(map_internal)?;
     controller.audio_settings().map(Json).map_err(map_internal)
 }
 
-async fn player(State(controller): State<WebController>, Json(body): Json<PlayerBody>) -> ApiResult {
-    controller.control_active_player(&body.action).await.map(Json).map_err(map_internal)
+async fn player(
+    State(controller): State<WebController>,
+    Json(body): Json<PlayerBody>,
+) -> ApiResult {
+    controller
+        .control_active_player(&body.action)
+        .await
+        .map(Json)
+        .map_err(map_internal)
 }
 
 async fn library(State(controller): State<WebController>) -> ApiResult {
-    controller.library().await.map(|items| Json(json!({ "items": items }))).map_err(map_internal)
+    controller
+        .library()
+        .await
+        .map(|items| Json(json!({ "items": items })))
+        .map_err(map_internal)
 }
 
 async fn refresh_library(State(controller): State<WebController>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
-    controller.run("mpc", &["update"], true, 60).await.map_err(map_internal)?;
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
+    controller
+        .run("mpc", &["update"], true, 60)
+        .await
+        .map_err(map_internal)?;
     Ok(Json(json!({ "updating": true })))
 }
 
-async fn play_file(State(controller): State<WebController>, Json(body): Json<PathBody>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
+async fn play_file(
+    State(controller): State<WebController>,
+    Json(body): Json<PathBody>,
+) -> ApiResult {
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
     let path = safe_mpd_path(&body.path, false).map_err(map_internal)?;
-    if !controller.library().await.map_err(map_internal)?.contains(&path) {
-        return Err(api_error(StatusCode::NOT_FOUND, "Файл відсутній у бібліотеці"));
+    if !controller
+        .library()
+        .await
+        .map_err(map_internal)?
+        .contains(&path)
+    {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "Файл відсутній у бібліотеці",
+        ));
     }
-    controller.run("mpc", &["clear"], true, 8).await.map_err(map_internal)?;
-    controller.run("mpc", &["add", &path], true, 8).await.map_err(map_internal)?;
-    controller.run("mpc", &["play"], true, 8).await.map_err(map_internal)?;
+    controller
+        .run("mpc", &["clear"], true, 8)
+        .await
+        .map_err(map_internal)?;
+    controller
+        .run("mpc", &["add", &path], true, 8)
+        .await
+        .map_err(map_internal)?;
+    controller
+        .run("mpc", &["play"], true, 8)
+        .await
+        .map_err(map_internal)?;
     Ok(Json(json!({ "playing": path })))
 }
 
@@ -1345,8 +1762,10 @@ fn validate_stream_url(value: &str) -> Result<String> {
         bail!("Підтримуються лише HTTP/HTTPS-потоки без облікових даних у URL");
     }
     let host = parsed.host_str().unwrap_or_default();
-    if matches!(host.to_ascii_lowercase().as_str(), "localhost" | "localhost.localdomain")
-        || host.to_ascii_lowercase().ends_with(".local")
+    if matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "localhost.localdomain"
+    ) || host.to_ascii_lowercase().ends_with(".local")
     {
         bail!("Локальні адреси потоків заборонені");
     }
@@ -1380,58 +1799,142 @@ async fn play_stream(
     State(controller): State<WebController>,
     Json(body): Json<StreamBody>,
 ) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
     let url = validate_stream_url(&body.url)
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
-    controller.run("mpc", &["clear"], true, 8).await.map_err(map_internal)?;
-    controller.run("mpc", &["add", &url], true, 15).await.map_err(map_internal)?;
-    controller.run("mpc", &["play"], true, 8).await.map_err(map_internal)?;
+    controller
+        .run("mpc", &["clear"], true, 8)
+        .await
+        .map_err(map_internal)?;
+    controller
+        .run("mpc", &["add", &url], true, 15)
+        .await
+        .map_err(map_internal)?;
+    controller
+        .run("mpc", &["play"], true, 8)
+        .await
+        .map_err(map_internal)?;
     Ok(Json(json!({ "playing": url, "source": "network_stream" })))
 }
 
 async fn playlists(State(controller): State<WebController>) -> ApiResult {
-    controller.playlists().await.map(|items| Json(json!({ "items": items }))).map_err(map_internal)
+    controller
+        .playlists()
+        .await
+        .map(|items| Json(json!({ "items": items })))
+        .map_err(map_internal)
 }
 
-async fn load_playlist(State(controller): State<WebController>, Json(body): Json<PlaylistBody>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
+async fn load_playlist(
+    State(controller): State<WebController>,
+    Json(body): Json<PlaylistBody>,
+) -> ApiResult {
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
     let name = safe_mpd_path(&body.name, true).map_err(map_internal)?;
-    if !controller.playlists().await.map_err(map_internal)?.contains(&name) {
+    if !controller
+        .playlists()
+        .await
+        .map_err(map_internal)?
+        .contains(&name)
+    {
         return Err(api_error(StatusCode::NOT_FOUND, "Плейліст не знайдено"));
     }
-    controller.run("mpc", &["clear"], true, 8).await.map_err(map_internal)?;
-    controller.run("mpc", &["load", &name], true, 8).await.map_err(map_internal)?;
-    controller.run("mpc", &["play"], true, 8).await.map_err(map_internal)?;
+    controller
+        .run("mpc", &["clear"], true, 8)
+        .await
+        .map_err(map_internal)?;
+    controller
+        .run("mpc", &["load", &name], true, 8)
+        .await
+        .map_err(map_internal)?;
+    controller
+        .run("mpc", &["play"], true, 8)
+        .await
+        .map_err(map_internal)?;
     Ok(Json(json!({ "playing_playlist": name })))
 }
 
 async fn queue(State(controller): State<WebController>) -> ApiResult {
-    controller.queue().await.map(|items| Json(json!({ "items": items }))).map_err(map_internal)
+    controller
+        .queue()
+        .await
+        .map(|items| Json(json!({ "items": items })))
+        .map_err(map_internal)
 }
 
-async fn play_queue(State(controller): State<WebController>, Json(body): Json<QueueBody>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
-    if body.position == 0 || !controller.queue().await.map_err(map_internal)?.iter().any(|item| item.get("position").and_then(Value::as_u64) == Some(body.position as u64)) {
-        return Err(api_error(StatusCode::NOT_FOUND, "Позицію у черзі не знайдено"));
+async fn play_queue(
+    State(controller): State<WebController>,
+    Json(body): Json<QueueBody>,
+) -> ApiResult {
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
+    if body.position == 0
+        || !controller
+            .queue()
+            .await
+            .map_err(map_internal)?
+            .iter()
+            .any(|item| item.get("position").and_then(Value::as_u64) == Some(body.position as u64))
+    {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "Позицію у черзі не знайдено",
+        ));
     }
     let position = body.position.to_string();
-    controller.run("mpc", &["play", &position], true, 8).await.map_err(map_internal)?;
+    controller
+        .run("mpc", &["play", &position], true, 8)
+        .await
+        .map_err(map_internal)?;
     Ok(Json(json!({ "playing_position": body.position })))
 }
 
-async fn remove_queue(State(controller): State<WebController>, Json(body): Json<QueueBody>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
-    if body.position == 0 || !controller.queue().await.map_err(map_internal)?.iter().any(|item| item.get("position").and_then(Value::as_u64) == Some(body.position as u64)) {
-        return Err(api_error(StatusCode::NOT_FOUND, "Позицію у черзі не знайдено"));
+async fn remove_queue(
+    State(controller): State<WebController>,
+    Json(body): Json<QueueBody>,
+) -> ApiResult {
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
+    if body.position == 0
+        || !controller
+            .queue()
+            .await
+            .map_err(map_internal)?
+            .iter()
+            .any(|item| item.get("position").and_then(Value::as_u64) == Some(body.position as u64))
+    {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "Позицію у черзі не знайдено",
+        ));
     }
     let position = body.position.to_string();
-    controller.run("mpc", &["del", &position], true, 8).await.map_err(map_internal)?;
+    controller
+        .run("mpc", &["del", &position], true, 8)
+        .await
+        .map_err(map_internal)?;
     Ok(Json(json!({ "removed_position": body.position })))
 }
 
 async fn clear_queue(State(controller): State<WebController>) -> ApiResult {
-    controller.ensure_controls_available().await.map_err(map_internal)?;
-    controller.run("mpc", &["clear"], true, 8).await.map_err(map_internal)?;
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_internal)?;
+    controller
+        .run("mpc", &["clear"], true, 8)
+        .await
+        .map_err(map_internal)?;
     Ok(Json(json!({ "cleared": true })))
 }
 
@@ -1439,7 +1942,10 @@ async fn get_alert_settings(State(controller): State<WebController>) -> ApiResul
     controller.alert_settings().map(Json).map_err(map_internal)
 }
 
-async fn put_alert_settings(State(controller): State<WebController>, Json(body): Json<ProviderBody>) -> ApiResult {
+async fn put_alert_settings(
+    State(controller): State<WebController>,
+    Json(body): Json<ProviderBody>,
+) -> ApiResult {
     let current = effective_provider(&controller.config.provider).map_err(map_internal)?;
     let candidate = apply_provider_body(current, &body).map_err(map_internal)?;
     if let Some(token) = body.token.as_deref() {
@@ -1451,10 +1957,18 @@ async fn put_alert_settings(State(controller): State<WebController>, Json(body):
     controller.alert_settings().map(Json).map_err(map_internal)
 }
 
-async fn test_alert_settings(State(controller): State<WebController>, Json(body): Json<ProviderBody>) -> ApiResult {
+async fn test_alert_settings(
+    State(controller): State<WebController>,
+    Json(body): Json<ProviderBody>,
+) -> ApiResult {
     let current = effective_provider(&controller.config.provider).map_err(map_internal)?;
     let candidate = apply_provider_body(current, &body).map_err(map_internal)?;
-    let token = match body.token.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    let token = match body
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         Some(value) => value.to_owned(),
         None => candidate.resolve_token().map_err(map_internal)?,
     };
@@ -1469,14 +1983,25 @@ async fn test_alert_settings(State(controller): State<WebController>, Json(body)
         .context("Не вдалося отримати статус тривоги")
         .map_err(map_internal)?;
     if response.status() != StatusCode::OK {
-        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, format!("API повернув HTTP {}", response.status())));
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("API повернув HTTP {}", response.status()),
+        ));
     }
-    let payload = response.json::<String>().await.map_err(|e| map_internal(e.into()))?;
+    let payload = response
+        .json::<String>()
+        .await
+        .map_err(|e| map_internal(e.into()))?;
     if !matches!(payload.as_str(), "A" | "P" | "N") {
-        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "API повернув невідомий статус"));
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "API повернув невідомий статус",
+        ));
     }
     let active = payload == "A" || (payload == "P" && candidate.partial_status_is_active());
-    Ok(Json(json!({ "ok": true, "active": active, "state": if active { "active" } else { "clear" }, "location_uid": candidate.location_uid })))
+    Ok(Json(
+        json!({ "ok": true, "active": active, "state": if active { "active" } else { "clear" }, "location_uid": candidate.location_uid }),
+    ))
 }
 
 fn api_routes() -> Router<WebController> {
@@ -1489,9 +2014,15 @@ fn api_routes() -> Router<WebController> {
         .route("/mute", post(set_mute))
         .route("/audio/level", post(set_audio_level))
         .route("/audio/mixer", get(get_mixer).post(set_mixer))
-        .route("/audio/outputs", get(audio_outputs).post(select_audio_output))
+        .route(
+            "/audio/outputs",
+            get(audio_outputs).post(select_audio_output),
+        )
         .route("/audio/hardware", get(hardware).post(set_hardware))
-        .route("/settings/audio", get(get_audio_settings).put(put_audio_settings))
+        .route(
+            "/settings/audio",
+            get(get_audio_settings).put(put_audio_settings),
+        )
         .route("/player", post(player))
         .route("/library", get(library))
         .route("/library/update", post(refresh_library))
@@ -1503,7 +2034,10 @@ fn api_routes() -> Router<WebController> {
         .route("/queue/play", post(play_queue))
         .route("/queue/remove", post(remove_queue))
         .route("/queue/clear", post(clear_queue))
-        .route("/settings/alerts", get(get_alert_settings).put(put_alert_settings))
+        .route(
+            "/settings/alerts",
+            get(get_alert_settings).put(put_alert_settings),
+        )
         .route("/settings/alerts/test", post(test_alert_settings))
 }
 

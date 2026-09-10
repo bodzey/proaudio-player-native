@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 mod alerts;
+mod api;
 mod audio;
 mod command;
 mod config;
@@ -9,7 +10,6 @@ mod fourstream;
 mod provider;
 mod source_arbiter;
 mod state;
-mod api;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,17 +24,21 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use alerts::{AlertController, SharedRuntimeState};
+use api::ApiController;
 use audio::AudioEngine;
 use config::{load_config, AppConfig};
 use provider::AlertsProvider;
 use source_arbiter::SourceArbiter;
 use state::StateStore;
-use api::ApiController;
 
 const DEFAULT_CONFIG: &str = "/etc/proaudio-player-alert/config.yaml";
 
 #[derive(Parser)]
-#[command(name = "proaudio-player-native", version, about = "Native ProAudio network audio player")]
+#[command(
+    name = "proaudio-player-native",
+    version,
+    about = "Native ProAudio network audio player"
+)]
 struct Cli {
     #[arg(long, default_value = DEFAULT_CONFIG)]
     config: PathBuf,
@@ -69,7 +73,9 @@ fn init_logging(config: &AppConfig) {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
-fn runtime(config: Arc<AppConfig>) -> Result<(StateStore, SharedRuntimeState, AudioEngine, AlertsProvider)> {
+fn runtime(
+    config: Arc<AppConfig>,
+) -> Result<(StateStore, SharedRuntimeState, AudioEngine, AlertsProvider)> {
     let store = StateStore::new(config.state_file.clone());
     let state = Arc::new(Mutex::new(store.load()));
     let audio = AudioEngine::new(config.clone());
@@ -79,13 +85,8 @@ fn runtime(config: Arc<AppConfig>) -> Result<(StateStore, SharedRuntimeState, Au
 
 async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     let (store, state, audio, provider) = runtime(config.clone())?;
-    let alert_controller = AlertController::new(
-        config.clone(),
-        provider,
-        audio,
-        store,
-        state.clone(),
-    );
+    let alert_controller =
+        AlertController::new(config.clone(), provider, audio, store, state.clone());
     let source_state = Arc::new(RwLock::new(None));
     let arbiter = SourceArbiter::new(config.clone(), source_state.clone());
     let api_controller = ApiController::new(config.clone(), state, source_state);
@@ -158,7 +159,9 @@ async fn test_silence(config: Arc<AppConfig>) -> Result<()> {
         audio
             .enter_silence(&snapshot, minute.music_fade_seconds)
             .await?;
-        audio.play(&minute.file, Some(minute.volume_percent)).await?;
+        audio
+            .play(&minute.file, Some(minute.volume_percent))
+            .await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;

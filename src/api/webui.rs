@@ -74,10 +74,9 @@ async fn serve_asset(relative: &str) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static(content_type(&path)),
     );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     response.headers_mut().insert(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),

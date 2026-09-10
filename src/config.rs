@@ -12,39 +12,105 @@ use url::Url;
 fn default_endpoint() -> String {
     "http://192.168.88.122/v1/iot/active_air_raid_alerts/{uid}.json".into()
 }
-fn default_token_file() -> PathBuf { "/etc/proaudio-player-alert/alerts-token".into() }
-fn default_provider_settings() -> PathBuf { "/var/lib/proaudio-player-alert/provider-settings.yaml".into() }
-fn default_audio_settings() -> PathBuf { "/var/lib/proaudio-player-alert/audio-settings.yaml".into() }
-fn default_music_sink() -> String { "proaudio_player_music".into() }
-fn default_alert_sink() -> String { "proaudio_player_alert".into() }
-fn default_start_file() -> PathBuf { "/var/lib/proaudio-player-alert/media/alarm_start.mp3".into() }
-fn default_end_file() -> PathBuf { "/var/lib/proaudio-player-alert/media/alarm_end.mp3".into() }
-fn default_silence_file() -> PathBuf { "/var/lib/proaudio-player-alert/media/minute_silence.mp3".into() }
-fn default_player_binary() -> String { "/usr/bin/mpv".into() }
-fn default_state_file() -> PathBuf { "/var/lib/proaudio-player-alert/state.json".into() }
-fn default_location_uid() -> u32 { 1133 }
-fn default_location_type() -> String { "hromada".into() }
-fn default_poll() -> f64 { 8.0 }
-fn default_timeout() -> f64 { 7.0 }
-fn default_backoff() -> f64 { 60.0 }
-fn default_clear_confirmations() -> u32 { 2 }
-fn default_duck_db() -> f64 { -12.0 }
-fn default_duck_fade() -> f64 { 1.0 }
-fn default_restore_fade() -> f64 { 3.0 }
-fn default_volume() -> f64 { 100.0 }
-fn default_alert_repeat_minutes() -> u64 { 0 }
-fn default_sample_rate_mode() -> SampleRateMode { SampleRateMode::Fixed }
-fn default_sample_rate() -> u32 { 48_000 }
-fn default_allowed_sample_rates() -> Vec<u32> { vec![44_100, 48_000] }
-fn default_false() -> bool { false }
-fn default_timezone() -> String { "Europe/Kyiv".into() }
-fn default_silence_time() -> String { "08:59:50".into() }
-fn default_catchup() -> u64 { 120 }
-fn default_true() -> bool { true }
-fn default_host() -> String { "0.0.0.0".into() }
-fn default_port() -> u16 { 8080 }
-fn default_library_items() -> usize { 5000 }
-fn default_log_level() -> String { "INFO".into() }
+fn default_token_file() -> PathBuf {
+    "/etc/proaudio-player-alert/alerts-token".into()
+}
+fn default_provider_settings() -> PathBuf {
+    "/var/lib/proaudio-player-alert/provider-settings.yaml".into()
+}
+fn default_audio_settings() -> PathBuf {
+    "/var/lib/proaudio-player-alert/audio-settings.yaml".into()
+}
+fn default_music_sink() -> String {
+    "proaudio_player_music".into()
+}
+fn default_alert_sink() -> String {
+    "proaudio_player_alert".into()
+}
+fn default_start_file() -> PathBuf {
+    "/var/lib/proaudio-player-alert/media/alarm_start.mp3".into()
+}
+fn default_end_file() -> PathBuf {
+    "/var/lib/proaudio-player-alert/media/alarm_end.mp3".into()
+}
+fn default_silence_file() -> PathBuf {
+    "/var/lib/proaudio-player-alert/media/minute_silence.mp3".into()
+}
+fn default_player_binary() -> String {
+    "/usr/bin/mpv".into()
+}
+fn default_state_file() -> PathBuf {
+    "/var/lib/proaudio-player-alert/state.json".into()
+}
+fn default_location_uid() -> u32 {
+    1133
+}
+fn default_location_type() -> String {
+    "hromada".into()
+}
+fn default_poll() -> f64 {
+    8.0
+}
+fn default_timeout() -> f64 {
+    7.0
+}
+fn default_backoff() -> f64 {
+    60.0
+}
+fn default_clear_confirmations() -> u32 {
+    2
+}
+fn default_duck_db() -> f64 {
+    -12.0
+}
+fn default_duck_fade() -> f64 {
+    1.0
+}
+fn default_restore_fade() -> f64 {
+    3.0
+}
+fn default_volume() -> f64 {
+    100.0
+}
+fn default_alert_repeat_minutes() -> u64 {
+    0
+}
+fn default_sample_rate_mode() -> SampleRateMode {
+    SampleRateMode::Fixed
+}
+fn default_sample_rate() -> u32 {
+    48_000
+}
+fn default_allowed_sample_rates() -> Vec<u32> {
+    vec![44_100, 48_000]
+}
+fn default_false() -> bool {
+    false
+}
+fn default_timezone() -> String {
+    "Europe/Kyiv".into()
+}
+fn default_silence_time() -> String {
+    "08:59:50".into()
+}
+fn default_catchup() -> u64 {
+    120
+}
+fn default_true() -> bool {
+    true
+}
+fn default_host() -> String {
+    "0.0.0.0".into()
+}
+fn default_port() -> u16 {
+    8080
+}
+fn default_library_items() -> usize {
+    5000
+}
+fn default_log_level() -> String {
+    "INFO".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -73,10 +139,15 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            endpoint: default_endpoint(), token: None, token_file: default_token_file(),
-            settings_file: default_provider_settings(), location_uid: default_location_uid(),
-            location_type: default_location_type(), poll_interval_seconds: default_poll(),
-            request_timeout_seconds: default_timeout(), rate_limit_backoff_seconds: default_backoff(),
+            endpoint: default_endpoint(),
+            token: None,
+            token_file: default_token_file(),
+            settings_file: default_provider_settings(),
+            location_uid: default_location_uid(),
+            location_type: default_location_type(),
+            poll_interval_seconds: default_poll(),
+            request_timeout_seconds: default_timeout(),
+            rate_limit_backoff_seconds: default_backoff(),
             clear_confirmations: default_clear_confirmations(),
         }
     }
@@ -84,7 +155,8 @@ impl Default for ProviderConfig {
 
 impl ProviderConfig {
     pub fn status_endpoint(&self) -> String {
-        self.endpoint.replace("{uid}", &self.location_uid.to_string())
+        self.endpoint
+            .replace("{uid}", &self.location_uid.to_string())
     }
 
     pub fn partial_status_is_active(&self) -> bool {
@@ -92,16 +164,25 @@ impl ProviderConfig {
     }
 
     pub fn resolve_token(&self) -> Result<String> {
-        if let Some(token) = self.token.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(token) = self
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             return Ok(token.to_owned());
         }
         if let Ok(value) = fs::read_to_string(&self.token_file) {
             let value = value.trim();
-            if !value.is_empty() { return Ok(value.to_owned()); }
+            if !value.is_empty() {
+                return Ok(value.to_owned());
+            }
         }
         if let Ok(value) = env::var("ALERTS_API_TOKEN") {
             let value = value.trim();
-            if !value.is_empty() { return Ok(value.to_owned()); }
+            if !value.is_empty() {
+                return Ok(value.to_owned());
+            }
         }
         bail!("не задано токен alerts.in.ua")
     }
@@ -155,15 +236,21 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            music_sink: default_music_sink(), alert_sink: default_alert_sink(),
-            duck_db: default_duck_db(), duck_fade_seconds: default_duck_fade(),
-            restore_fade_seconds: default_restore_fade(), alert_volume_percent: default_volume(),
+            music_sink: default_music_sink(),
+            alert_sink: default_alert_sink(),
+            duck_db: default_duck_db(),
+            duck_fade_seconds: default_duck_fade(),
+            restore_fade_seconds: default_restore_fade(),
+            alert_volume_percent: default_volume(),
             default_restore_volume_percent: default_volume(),
             alert_repeat_interval_minutes: default_alert_repeat_minutes(),
-            sample_rate_mode: default_sample_rate_mode(), sample_rate: default_sample_rate(),
+            sample_rate_mode: default_sample_rate_mode(),
+            sample_rate: default_sample_rate(),
             allowed_sample_rates: default_allowed_sample_rates(),
-            duck_only_during_announcement: default_false(), start_file: default_start_file(),
-            end_file: default_end_file(), player_binary: default_player_binary(),
+            duck_only_during_announcement: default_false(),
+            start_file: default_start_file(),
+            end_file: default_end_file(),
+            player_binary: default_player_binary(),
             settings_file: default_audio_settings(),
         }
     }
@@ -190,9 +277,15 @@ pub struct MinuteSilenceConfig {
 
 impl Default for MinuteSilenceConfig {
     fn default() -> Self {
-        Self { enabled: true, timezone: default_timezone(), start_time: default_silence_time(),
-            catch_up_seconds: default_catchup(), music_fade_seconds: default_duck_fade(),
-            volume_percent: default_volume(), file: default_silence_file() }
+        Self {
+            enabled: true,
+            timezone: default_timezone(),
+            start_time: default_silence_time(),
+            catch_up_seconds: default_catchup(),
+            music_fade_seconds: default_duck_fade(),
+            volume_percent: default_volume(),
+            file: default_silence_file(),
+        }
     }
 }
 
@@ -209,7 +302,14 @@ pub struct ApiConfig {
     pub max_library_items: usize,
 }
 impl Default for ApiConfig {
-    fn default() -> Self { Self { enabled: true, host: default_host(), port: default_port(), max_library_items: default_library_items() } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            host: default_host(),
+            port: default_port(),
+            max_library_items: default_library_items(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,26 +327,45 @@ pub struct AppConfig {
 }
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { provider: ProviderConfig::default(), audio: AudioConfig::default(), minute_silence: MinuteSilenceConfig::default(), api: ApiConfig::default(), state_file: default_state_file(), log_level: default_log_level() }
+        Self {
+            provider: ProviderConfig::default(),
+            audio: AudioConfig::default(),
+            minute_silence: MinuteSilenceConfig::default(),
+            api: ApiConfig::default(),
+            state_file: default_state_file(),
+            log_level: default_log_level(),
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct ProviderSettingsFile { provider: Option<ProviderConfigPatch> }
+struct ProviderSettingsFile {
+    provider: Option<ProviderConfigPatch>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderConfigPatch {
-    endpoint: Option<String>, location_uid: Option<u32>, location_type: Option<String>,
-    poll_interval_seconds: Option<f64>, request_timeout_seconds: Option<f64>,
-    rate_limit_backoff_seconds: Option<f64>, clear_confirmations: Option<u32>,
+    endpoint: Option<String>,
+    location_uid: Option<u32>,
+    location_type: Option<String>,
+    poll_interval_seconds: Option<f64>,
+    request_timeout_seconds: Option<f64>,
+    rate_limit_backoff_seconds: Option<f64>,
+    clear_confirmations: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct AudioSettingsFile { audio: Option<AudioSettingsPatch> }
+struct AudioSettingsFile {
+    audio: Option<AudioSettingsPatch>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioSettingsPatch {
-    pub duck_db: Option<f64>, pub duck_fade_seconds: Option<f64>, pub restore_fade_seconds: Option<f64>,
-    pub alert_volume_percent: Option<f64>, pub default_restore_volume_percent: Option<f64>,
-    pub minute_silence_volume_percent: Option<f64>, pub alert_repeat_interval_minutes: Option<u64>,
+    pub duck_db: Option<f64>,
+    pub duck_fade_seconds: Option<f64>,
+    pub restore_fade_seconds: Option<f64>,
+    pub alert_volume_percent: Option<f64>,
+    pub default_restore_volume_percent: Option<f64>,
+    pub minute_silence_volume_percent: Option<f64>,
+    pub alert_repeat_interval_minutes: Option<u64>,
     pub duck_only_during_announcement: Option<bool>,
 }
 
@@ -260,39 +379,80 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<AppConfig> {
 
 pub fn effective_provider(base: &ProviderConfig) -> Result<ProviderConfig> {
     let mut out = base.clone();
-    if !base.settings_file.exists() { return Ok(out); }
+    if !base.settings_file.exists() {
+        return Ok(out);
+    }
     let raw = fs::read_to_string(&base.settings_file)?;
-    if raw.trim().is_empty() { return Ok(out); }
+    if raw.trim().is_empty() {
+        return Ok(out);
+    }
     let file: ProviderSettingsFile = serde_yaml::from_str(&raw)?;
     if let Some(p) = file.provider {
-        if let Some(v) = p.endpoint { out.endpoint = v; }
-        if let Some(v) = p.location_uid { out.location_uid = v; }
-        if let Some(v) = p.location_type { out.location_type = v; }
-        if let Some(v) = p.poll_interval_seconds { out.poll_interval_seconds = v; }
-        if let Some(v) = p.request_timeout_seconds { out.request_timeout_seconds = v; }
-        if let Some(v) = p.rate_limit_backoff_seconds { out.rate_limit_backoff_seconds = v; }
-        if let Some(v) = p.clear_confirmations { out.clear_confirmations = v; }
+        if let Some(v) = p.endpoint {
+            out.endpoint = v;
+        }
+        if let Some(v) = p.location_uid {
+            out.location_uid = v;
+        }
+        if let Some(v) = p.location_type {
+            out.location_type = v;
+        }
+        if let Some(v) = p.poll_interval_seconds {
+            out.poll_interval_seconds = v;
+        }
+        if let Some(v) = p.request_timeout_seconds {
+            out.request_timeout_seconds = v;
+        }
+        if let Some(v) = p.rate_limit_backoff_seconds {
+            out.rate_limit_backoff_seconds = v;
+        }
+        if let Some(v) = p.clear_confirmations {
+            out.clear_confirmations = v;
+        }
     }
     validate_provider(&out)?;
     Ok(out)
 }
 
-pub fn effective_audio(base: &AudioConfig, minute: &MinuteSilenceConfig) -> Result<(AudioConfig, MinuteSilenceConfig)> {
+pub fn effective_audio(
+    base: &AudioConfig,
+    minute: &MinuteSilenceConfig,
+) -> Result<(AudioConfig, MinuteSilenceConfig)> {
     let mut audio = base.clone();
     let mut silence = minute.clone();
-    if !base.settings_file.exists() { return Ok((audio, silence)); }
+    if !base.settings_file.exists() {
+        return Ok((audio, silence));
+    }
     let raw = fs::read_to_string(&base.settings_file)?;
-    if raw.trim().is_empty() { return Ok((audio, silence)); }
+    if raw.trim().is_empty() {
+        return Ok((audio, silence));
+    }
     let file: AudioSettingsFile = serde_yaml::from_str(&raw)?;
     if let Some(a) = file.audio {
-        if let Some(v) = a.duck_db { audio.duck_db = v; }
-        if let Some(v) = a.duck_fade_seconds { audio.duck_fade_seconds = v; }
-        if let Some(v) = a.restore_fade_seconds { audio.restore_fade_seconds = v; }
-        if let Some(v) = a.alert_volume_percent { audio.alert_volume_percent = v; }
-        if let Some(v) = a.default_restore_volume_percent { audio.default_restore_volume_percent = v; }
-        if let Some(v) = a.minute_silence_volume_percent { silence.volume_percent = v; }
-        if let Some(v) = a.alert_repeat_interval_minutes { audio.alert_repeat_interval_minutes = v; }
-        if let Some(v) = a.duck_only_during_announcement { audio.duck_only_during_announcement = v; }
+        if let Some(v) = a.duck_db {
+            audio.duck_db = v;
+        }
+        if let Some(v) = a.duck_fade_seconds {
+            audio.duck_fade_seconds = v;
+        }
+        if let Some(v) = a.restore_fade_seconds {
+            audio.restore_fade_seconds = v;
+        }
+        if let Some(v) = a.alert_volume_percent {
+            audio.alert_volume_percent = v;
+        }
+        if let Some(v) = a.default_restore_volume_percent {
+            audio.default_restore_volume_percent = v;
+        }
+        if let Some(v) = a.minute_silence_volume_percent {
+            silence.volume_percent = v;
+        }
+        if let Some(v) = a.alert_repeat_interval_minutes {
+            audio.alert_repeat_interval_minutes = v;
+        }
+        if let Some(v) = a.duck_only_during_announcement {
+            audio.duck_only_during_announcement = v;
+        }
     }
     validate_audio(&audio, &silence)?;
     Ok((audio, silence))
@@ -311,7 +471,9 @@ pub fn save_provider_settings(config: &ProviderConfig) -> Result<()> {
 
 pub fn save_provider_token(config: &ProviderConfig, token: &str) -> Result<()> {
     let token = token.trim();
-    if token.is_empty() { bail!("API-токен не може бути порожнім"); }
+    if token.is_empty() {
+        bail!("API-токен не може бути порожнім");
+    }
     if let Some(parent) = config.token_file.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -341,8 +503,13 @@ pub fn save_audio_settings(audio: &AudioConfig, minute: &MinuteSilenceConfig) ->
 }
 
 fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
-    let tmp = path.with_extension(format!("{}.tmp", path.extension().and_then(|v| v.to_str()).unwrap_or("")));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|v| v.to_str()).unwrap_or("")
+    ));
     {
         let mut file = fs::File::create(&tmp)?;
         file.set_permissions(fs::Permissions::from_mode(mode))?;
@@ -354,34 +521,64 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 }
 
 pub fn validate_provider(p: &ProviderConfig) -> Result<()> {
-    if p.location_uid == 0 { bail!("provider.location_uid має бути додатним"); }
-    if !matches!(p.location_type.as_str(), "hromada" | "raion" | "oblast" | "standalone" | "city") {
+    if p.location_uid == 0 {
+        bail!("provider.location_uid має бути додатним");
+    }
+    if !matches!(
+        p.location_type.as_str(),
+        "hromada" | "raion" | "oblast" | "standalone" | "city"
+    ) {
         bail!("невідомий provider.location_type");
     }
-    if !p.endpoint.contains("{uid}") { bail!("provider.endpoint має містити шаблон {{uid}}"); }
-    let parsed = Url::parse(&p.status_endpoint()).context("provider.endpoint має бути коректною HTTP(S)-адресою")?;
-    if !matches!(parsed.scheme(), "http" | "https") { bail!("provider.endpoint має бути HTTP(S)"); }
-    if p.poll_interval_seconds < 8.0 { bail!("poll_interval_seconds має бути не менше 8 секунд"); }
-    if p.request_timeout_seconds <= 0.0 { bail!("request_timeout_seconds має бути більшим за нуль"); }
-    if p.rate_limit_backoff_seconds < 60.0 { bail!("rate_limit_backoff_seconds має бути не менше 60 секунд"); }
-    if p.clear_confirmations == 0 { bail!("clear_confirmations має бути не менше 1"); }
+    if !p.endpoint.contains("{uid}") {
+        bail!("provider.endpoint має містити шаблон {{uid}}");
+    }
+    let parsed = Url::parse(&p.status_endpoint())
+        .context("provider.endpoint має бути коректною HTTP(S)-адресою")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("provider.endpoint має бути HTTP(S)");
+    }
+    if p.poll_interval_seconds < 8.0 {
+        bail!("poll_interval_seconds має бути не менше 8 секунд");
+    }
+    if p.request_timeout_seconds <= 0.0 {
+        bail!("request_timeout_seconds має бути більшим за нуль");
+    }
+    if p.rate_limit_backoff_seconds < 60.0 {
+        bail!("rate_limit_backoff_seconds має бути не менше 60 секунд");
+    }
+    if p.clear_confirmations == 0 {
+        bail!("clear_confirmations має бути не менше 1");
+    }
     Ok(())
 }
 
 pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
-    if !(-60.0..=0.0).contains(&a.duck_db) { bail!("duck_db має бути в межах -60..0"); }
+    if !(-60.0..=0.0).contains(&a.duck_db) {
+        bail!("duck_db має бути в межах -60..0");
+    }
     for (name, value) in [
         ("alert_volume_percent", a.alert_volume_percent),
-        ("default_restore_volume_percent", a.default_restore_volume_percent),
+        (
+            "default_restore_volume_percent",
+            a.default_restore_volume_percent,
+        ),
         ("minute_silence.volume_percent", m.volume_percent),
     ] {
-        if !(0.0..=100.0).contains(&value) { bail!("{name} має бути в межах 0..100"); }
+        if !(0.0..=100.0).contains(&value) {
+            bail!("{name} має бути в межах 0..100");
+        }
     }
     if a.alert_repeat_interval_minutes > 1_440 {
         bail!("alert_repeat_interval_minutes має бути 0..1440");
     }
-    if a.allowed_sample_rates.is_empty() { bail!("audio.allowed_sample_rates не може бути порожнім"); }
-    if a.allowed_sample_rates.iter().any(|rate| !(8_000..=384_000).contains(rate)) {
+    if a.allowed_sample_rates.is_empty() {
+        bail!("audio.allowed_sample_rates не може бути порожнім");
+    }
+    if a.allowed_sample_rates
+        .iter()
+        .any(|rate| !(8_000..=384_000).contains(rate))
+    {
         bail!("audio.allowed_sample_rates містить непідтримувану частоту");
     }
     if !a.allowed_sample_rates.contains(&a.sample_rate) {
@@ -401,9 +598,13 @@ pub fn validate_config(c: &AppConfig) -> Result<()> {
     validate_audio(&c.audio, &c.minute_silence)?;
     chrono::NaiveTime::parse_from_str(&c.minute_silence.start_time, "%H:%M:%S")
         .map_err(|_| anyhow!("minute_silence.start_time має формат HH:MM:SS"))?;
-    c.minute_silence.timezone.parse::<chrono_tz::Tz>()
+    c.minute_silence
+        .timezone
+        .parse::<chrono_tz::Tz>()
         .map_err(|_| anyhow!("невідомий часовий пояс minute_silence.timezone"))?;
-    if c.api.max_library_items == 0 || c.api.max_library_items > 50_000 { bail!("api.max_library_items має бути 1..50000"); }
+    if c.api.max_library_items == 0 || c.api.max_library_items > 50_000 {
+        bail!("api.max_library_items має бути 1..50000");
+    }
     Ok(())
 }
 
@@ -422,7 +623,10 @@ mod tests {
 
     #[test]
     fn configured_rate_must_be_allowed() {
-        let audio = AudioConfig { sample_rate: 96_000, ..AudioConfig::default() };
+        let audio = AudioConfig {
+            sample_rate: 96_000,
+            ..AudioConfig::default()
+        };
         assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
     }
 
