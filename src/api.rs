@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::State;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use regex::Regex;
@@ -34,13 +34,7 @@ use crate::dlna;
 use crate::fourstream;
 use crate::source_arbiter::SharedSourceState;
 
-const INDEX_HTML: &str = include_str!("../static/index.html");
-const APP_CSS: &str = include_str!("../static/app.css");
-const APP_JS: &str = include_str!("../static/app.js");
-const MANIFEST_JSON: &str = include_str!("../static/manifest.webmanifest");
-const SERVICE_WORKER_JS: &str = include_str!("../static/sw.js");
-const APP_ICON_SVG: &str = include_str!("../static/icon.svg");
-
+const API_VERSION: &str = "1";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const PLAYER_ACTIONS: &[&str] = &["play", "pause", "stop", "next", "prev"];
@@ -68,18 +62,6 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> ApiError {
 
 fn map_internal(err: anyhow::Error) -> ApiError {
     api_error(StatusCode::SERVICE_UNAVAILABLE, err.to_string())
-}
-
-fn content_response(content_type: &'static str, body: &'static str) -> Response {
-    let mut response = body.into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    response
 }
 
 fn unwrap_dbus(value: Value) -> Value {
@@ -1073,7 +1055,7 @@ impl WebController {
             .stdout
             .lines()
             .filter(|line| !line.is_empty())
-            .take(self.config.web.max_library_items)
+            .take(self.config.api.max_library_items)
             .map(str::to_owned)
             .collect())
     }
@@ -1192,19 +1174,20 @@ fn apply_provider_body(base: ProviderConfig, body: &ProviderBody) -> Result<Prov
     Ok(config)
 }
 
-async fn index() -> Html<&'static str> { Html(INDEX_HTML) }
-async fn css() -> Response { content_response("text/css; charset=utf-8", APP_CSS) }
-async fn js() -> Response { content_response("application/javascript; charset=utf-8", APP_JS) }
-async fn manifest() -> Response { content_response("application/manifest+json; charset=utf-8", MANIFEST_JSON) }
-async fn service_worker() -> Response {
-    let mut response = content_response("application/javascript; charset=utf-8", SERVICE_WORKER_JS);
-    response.headers_mut().insert(
-        header::HeaderName::from_static("service-worker-allowed"),
-        HeaderValue::from_static("/"),
-    );
-    response
+async fn health() -> Json<Value> {
+    Json(json!({ "status": "ok", "api_version": API_VERSION }))
 }
-async fn icon() -> Response { content_response("image/svg+xml; charset=utf-8", APP_ICON_SVG) }
+
+async fn capabilities() -> Json<Value> {
+    Json(json!({
+        "api_version": API_VERSION,
+        "events": "sse",
+        "features": [
+            "status", "player_control", "audio_mixer", "audio_outputs",
+            "library", "playlists", "queue", "network_streams", "alert_settings"
+        ]
+    }))
+}
 
 async fn events(State(controller): State<WebController>) -> impl IntoResponse {
     let mut receiver = controller.events.subscribe();
@@ -1494,47 +1477,49 @@ async fn test_alert_settings(State(controller): State<WebController>, Json(body)
     Ok(Json(json!({ "ok": true, "active": active, "state": if active { "active" } else { "clear" }, "location_uid": candidate.location_uid })))
 }
 
-pub fn router(controller: WebController) -> Router {
+fn api_routes() -> Router<WebController> {
     Router::new()
-        .route("/", get(index))
-        .route("/static/app.css", get(css))
-        .route("/static/app.js", get(js))
-        .route("/manifest.webmanifest", get(manifest))
-        .route("/sw.js", get(service_worker))
-        .route("/static/icon.svg", get(icon))
-        .route("/favicon.ico", get(icon))
-        .route("/api/status", get(status))
-        .route("/api/events", get(events))
-        .route("/api/volume", post(set_volume))
-        .route("/api/mute", post(set_mute))
-        .route("/api/audio/level", post(set_audio_level))
-        .route("/api/audio/mixer", get(get_mixer).post(set_mixer))
-        .route("/api/audio/outputs", get(audio_outputs).post(select_audio_output))
-        .route("/api/audio/hardware", get(hardware).post(set_hardware))
-        .route("/api/settings/audio", get(get_audio_settings).put(put_audio_settings))
-        .route("/api/player", post(player))
-        .route("/api/library", get(library))
-        .route("/api/library/update", post(refresh_library))
-        .route("/api/library/play", post(play_file))
-        .route("/api/streams/play", post(play_stream))
-        .route("/api/playlists", get(playlists))
-        .route("/api/playlists/load", post(load_playlist))
-        .route("/api/queue", get(queue))
-        .route("/api/queue/play", post(play_queue))
-        .route("/api/queue/remove", post(remove_queue))
-        .route("/api/queue/clear", post(clear_queue))
-        .route("/api/settings/alerts", get(get_alert_settings).put(put_alert_settings))
-        .route("/api/settings/alerts/test", post(test_alert_settings))
+        .route("/health", get(health))
+        .route("/capabilities", get(capabilities))
+        .route("/status", get(status))
+        .route("/events", get(events))
+        .route("/volume", post(set_volume))
+        .route("/mute", post(set_mute))
+        .route("/audio/level", post(set_audio_level))
+        .route("/audio/mixer", get(get_mixer).post(set_mixer))
+        .route("/audio/outputs", get(audio_outputs).post(select_audio_output))
+        .route("/audio/hardware", get(hardware).post(set_hardware))
+        .route("/settings/audio", get(get_audio_settings).put(put_audio_settings))
+        .route("/player", post(player))
+        .route("/library", get(library))
+        .route("/library/update", post(refresh_library))
+        .route("/library/play", post(play_file))
+        .route("/streams/play", post(play_stream))
+        .route("/playlists", get(playlists))
+        .route("/playlists/load", post(load_playlist))
+        .route("/queue", get(queue))
+        .route("/queue/play", post(play_queue))
+        .route("/queue/remove", post(remove_queue))
+        .route("/queue/clear", post(clear_queue))
+        .route("/settings/alerts", get(get_alert_settings).put(put_alert_settings))
+        .route("/settings/alerts/test", post(test_alert_settings))
+}
+
+pub fn router(controller: WebController) -> Router {
+    let routes = api_routes();
+    Router::new()
+        .nest("/api", routes.clone())
+        .nest("/api/v1", routes)
         .merge(fourstream::router())
         .with_state(controller)
 }
 
 pub async fn serve(controller: WebController) -> Result<()> {
-    let host = controller.config.web.host.clone();
-    let port = controller.config.web.port;
+    let host = controller.config.api.host.clone();
+    let port = controller.config.api.port;
     let address = format!("{host}:{port}");
     let listener = TcpListener::bind(&address).await?;
-    info!(%address, "Native Web UI started");
+    info!(%address, api_version = API_VERSION, "Native control API started");
 
     // One shared status producer serves every browser. This avoids each client
     // spawning its own pactl/mpc/busctl polling workload.

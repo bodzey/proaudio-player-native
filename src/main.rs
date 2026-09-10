@@ -9,7 +9,7 @@ mod fourstream;
 mod provider;
 mod source_arbiter;
 mod state;
-mod web;
+mod api;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use config::{load_config, AppConfig};
 use provider::AlertsProvider;
 use source_arbiter::SourceArbiter;
 use state::StateStore;
-use web::WebController;
+use api::WebController;
 
 const DEFAULT_CONFIG: &str = "/etc/proaudio-player-alert/config.yaml";
 
@@ -88,16 +88,16 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     );
     let source_state = Arc::new(RwLock::new(None));
     let arbiter = SourceArbiter::new(config.clone(), source_state.clone());
-    let web_controller = WebController::new(config.clone(), state, source_state);
+    let api_controller = WebController::new(config.clone(), state, source_state);
 
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
     tasks.spawn(async move { alert_controller.run_forever().await });
     tasks.spawn(async move { arbiter.run_forever().await });
-    if config.web.enabled {
+    if config.api.enabled {
         tasks.spawn(async move {
             loop {
-                if let Err(err) = web::serve(web_controller.clone()).await {
-                    error!(error = %err, "Web API stopped; retrying");
+                if let Err(err) = api::serve(api_controller.clone()).await {
+                    error!(error = %err, "Control API stopped; retrying");
                 }
                 sleep(Duration::from_secs(2)).await;
             }

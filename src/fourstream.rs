@@ -20,7 +20,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::web::WebController;
+use crate::api::WebController;
 
 const SSDP_ADDRESS: &str = "239.255.255.250";
 const SSDP_PORT: u16 = 1900;
@@ -190,7 +190,7 @@ fn device_status(controller: &WebController) -> Value {
         "region": "UA", "prompt_status": "0", "upnp_version": "1005", "cap1": "0x0", "capability": "0x0",
         "streams_all": "0x3", "streams": "0x3", "external": "0x0", "plm_support": "0x0", "preset_key": "0",
         "spotify_active": "1", "battery": "0", "battery_percent": "0", "securemode": "1",
-        "upnp_uuid": udn, "uart_pass_port": "0", "communication_port": controller.config.web.port.to_string(),
+        "upnp_uuid": udn, "uart_pass_port": "0", "communication_port": controller.config.api.port.to_string(),
     })
 }
 
@@ -339,7 +339,7 @@ async fn soap_control(State(controller): State<WebController>, headers: HeaderMa
 
 async fn description(State(controller): State<WebController>, headers: HeaderMap) -> Response {
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(str::to_owned)
-        .unwrap_or_else(|| format!("127.0.0.1:{}", controller.config.web.port));
+        .unwrap_or_else(|| format!("127.0.0.1:{}", controller.config.api.port));
     let udn = device_uuid();
     let linkplay = linkplay_uuid(&udn);
     text_response(format!(r#"<?xml version="1.0" encoding="UTF-8"?>

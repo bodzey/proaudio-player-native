@@ -198,7 +198,7 @@ impl Default for MinuteSilenceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct WebConfig {
+pub struct ApiConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_host")]
@@ -208,7 +208,7 @@ pub struct WebConfig {
     #[serde(default = "default_library_items")]
     pub max_library_items: usize,
 }
-impl Default for WebConfig {
+impl Default for ApiConfig {
     fn default() -> Self { Self { enabled: true, host: default_host(), port: default_port(), max_library_items: default_library_items() } }
 }
 
@@ -218,7 +218,8 @@ pub struct AppConfig {
     pub provider: ProviderConfig,
     pub audio: AudioConfig,
     pub minute_silence: MinuteSilenceConfig,
-    pub web: WebConfig,
+    #[serde(alias = "web")]
+    pub api: ApiConfig,
     #[serde(default = "default_state_file")]
     pub state_file: PathBuf,
     #[serde(default = "default_log_level")]
@@ -226,7 +227,7 @@ pub struct AppConfig {
 }
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { provider: ProviderConfig::default(), audio: AudioConfig::default(), minute_silence: MinuteSilenceConfig::default(), web: WebConfig::default(), state_file: default_state_file(), log_level: default_log_level() }
+        Self { provider: ProviderConfig::default(), audio: AudioConfig::default(), minute_silence: MinuteSilenceConfig::default(), api: ApiConfig::default(), state_file: default_state_file(), log_level: default_log_level() }
     }
 }
 
@@ -402,7 +403,7 @@ pub fn validate_config(c: &AppConfig) -> Result<()> {
         .map_err(|_| anyhow!("minute_silence.start_time має формат HH:MM:SS"))?;
     c.minute_silence.timezone.parse::<chrono_tz::Tz>()
         .map_err(|_| anyhow!("невідомий часовий пояс minute_silence.timezone"))?;
-    if c.web.max_library_items == 0 || c.web.max_library_items > 50_000 { bail!("web.max_library_items має бути 1..50000"); }
+    if c.api.max_library_items == 0 || c.api.max_library_items > 50_000 { bail!("api.max_library_items має бути 1..50000"); }
     Ok(())
 }
 
@@ -432,5 +433,17 @@ mod tests {
             ..AudioConfig::default()
         };
         assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
+    }
+
+    #[test]
+    fn legacy_web_section_is_accepted_as_api_config() {
+        let config: AppConfig = serde_yaml::from_str(
+            "web:\n  enabled: false\n  host: 127.0.0.1\n  port: 9090\n  max_library_items: 42\n",
+        )
+        .expect("legacy web section should remain compatible");
+        assert!(!config.api.enabled);
+        assert_eq!(config.api.host, "127.0.0.1");
+        assert_eq!(config.api.port, 9090);
+        assert_eq!(config.api.max_library_items, 42);
     }
 }
