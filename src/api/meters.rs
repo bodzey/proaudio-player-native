@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use serde_json::json;
@@ -422,7 +423,7 @@ fn ensure_started(controller: WebController) {
     });
 }
 
-async fn meter_events(State(controller): State<WebController>) -> Sse<EventStream> {
+async fn meter_events(State(controller): State<WebController>) -> impl IntoResponse {
     ensure_started(controller);
     let mut receiver = hub().sender.subscribe();
     let (sender, stream) = mpsc::channel(8);
