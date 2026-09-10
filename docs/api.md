@@ -14,6 +14,9 @@ API changes that remove or reinterpret fields require a new major URL version. N
 - `GET /api/v1/capabilities` — API version, event transport and features.
 - `GET /api/v1/status` — complete current player state.
 - `GET /api/v1/events` — Server-Sent Events stream. Status events use the `status` event name and contain the same JSON document as the status endpoint.
+- `GET /api/v1/meters` — high-rate Server-Sent Events stream for real signal metering. `meter` events contain 25 Hz stereo Peak/RMS/clip snapshots for `master`, `music` and `alert`. Capture is activated only while at least one meter client is connected.
+
+The meter path reads the monitor streams exposed by the PipeWire Pulse compatibility server. It measures actual PCM signal amplitude; mixer gain settings are never substituted for signal level.
 
 ## Player contract
 

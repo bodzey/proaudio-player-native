@@ -1,4 +1,5 @@
 mod backend;
+mod meters;
 mod webui;
 
 pub use backend::serve;

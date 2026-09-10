@@ -113,6 +113,7 @@ pub(super) fn router() -> Router<WebController> {
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(service_worker))
         .route("/static/{*path}", get(static_asset))
+        .merge(super::meters::router())
 }
 
 #[cfg(test)]
