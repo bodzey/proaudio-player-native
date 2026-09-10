@@ -29,7 +29,7 @@ use config::{load_config, AppConfig};
 use provider::AlertsProvider;
 use source_arbiter::SourceArbiter;
 use state::StateStore;
-use api::WebController;
+use api::ApiController;
 
 const DEFAULT_CONFIG: &str = "/etc/proaudio-player-alert/config.yaml";
 
@@ -88,7 +88,7 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     );
     let source_state = Arc::new(RwLock::new(None));
     let arbiter = SourceArbiter::new(config.clone(), source_state.clone());
-    let api_controller = WebController::new(config.clone(), state, source_state);
+    let api_controller = ApiController::new(config.clone(), state, source_state);
 
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
     tasks.spawn(async move { alert_controller.run_forever().await });

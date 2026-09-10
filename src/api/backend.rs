@@ -34,6 +34,8 @@ use crate::dlna;
 use crate::fourstream;
 use crate::source_arbiter::SharedSourceState;
 
+use super::webui;
+
 const API_VERSION: &str = "1";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
@@ -1511,6 +1513,7 @@ pub fn router(controller: WebController) -> Router {
         .nest("/api", routes.clone())
         .nest("/api/v1", routes)
         .merge(fourstream::router())
+        .merge(webui::router())
         .with_state(controller)
 }
 
