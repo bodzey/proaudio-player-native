@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -13,7 +13,12 @@ const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const AVTRANSPORT_PORT: u16 = 49494;
 const AVTRANSPORT_PATH: &str = "/upnp/control/rendertransport1";
 
-#[derive(Clone)]
+static CLIENT: OnceLock<DlnaClient> = OnceLock::new();
+
+pub fn client() -> &'static DlnaClient {
+    CLIENT.get_or_init(DlnaClient::new)
+}
+
 pub struct DlnaClient {
     client: reqwest::Client,
     endpoint: Arc<Mutex<Option<String>>>,
