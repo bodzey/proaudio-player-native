@@ -24,9 +24,11 @@ use super::backend::WebController;
 
 const SAMPLE_RATE: u32 = 48_000;
 const METER_INTERVAL: Duration = Duration::from_millis(40);
+const METER_WINDOW_FRAMES: usize = 1_920;
 const TOPOLOGY_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_DB: f64 = -60.0;
+const BYTES_PER_STEREO_FRAME: usize = 8;
 
 struct EventStream {
     receiver: mpsc::Receiver<std::result::Result<Event, Infallible>>,
@@ -141,7 +143,7 @@ struct MeterUpdate {
 struct MeterWindow {
     peak: [f64; 2],
     sum_squares: [f64; 2],
-    samples: u64,
+    samples: usize,
     clip: [bool; 2],
 }
 
@@ -160,9 +162,9 @@ impl MeterWindow {
         self.samples += 1;
     }
 
-    fn take(&mut self) -> StereoLevel {
+    fn take(&mut self) -> Option<StereoLevel> {
         if self.samples == 0 {
-            return StereoLevel::silence(true);
+            return None;
         }
         let count = self.samples as f64;
         let level = StereoLevel {
@@ -175,7 +177,7 @@ impl MeterWindow {
             available: true,
         };
         *self = Self::default();
-        level
+        Some(level)
     }
 }
 
@@ -237,42 +239,33 @@ async fn capture_once(
     let mut read_buffer = [0_u8; 8192];
     let mut pending = Vec::<u8>::with_capacity(16_384);
     let mut window = MeterWindow::default();
-    let mut tick = interval(METER_INTERVAL);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    tick.tick().await;
-
-    updates
-        .send(MeterUpdate {
-            target,
-            level: StereoLevel::silence(true),
-        })
-        .await
-        .map_err(|_| anyhow!("meter consumer stopped"))?;
 
     loop {
-        tokio::select! {
-            read = stdout.read(&mut read_buffer) => {
-                let read = read?;
-                if read == 0 {
-                    return Err(anyhow!("meter recorder stopped"));
-                }
-                pending.extend_from_slice(&read_buffer[..read]);
-                let usable = pending.len() / 8 * 8;
-                for frame in pending[..usable].chunks_exact(8) {
-                    let left = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
-                    let right = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-                    window.push(left, right);
-                }
-                if usable > 0 {
-                    pending.drain(..usable);
+        let read = stdout.read(&mut read_buffer).await?;
+        if read == 0 {
+            return Err(anyhow!("meter recorder stopped"));
+        }
+
+        pending.extend_from_slice(&read_buffer[..read]);
+        let usable = pending.len() / BYTES_PER_STEREO_FRAME * BYTES_PER_STEREO_FRAME;
+
+        for frame in pending[..usable].chunks_exact(BYTES_PER_STEREO_FRAME) {
+            let left = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+            let right = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+            window.push(left, right);
+
+            if window.samples >= METER_WINDOW_FRAMES {
+                if let Some(level) = window.take() {
+                    updates
+                        .send(MeterUpdate { target, level })
+                        .await
+                        .map_err(|_| anyhow!("meter consumer stopped"))?;
                 }
             }
-            _ = tick.tick() => {
-                updates
-                    .send(MeterUpdate { target, level: window.take() })
-                    .await
-                    .map_err(|_| anyhow!("meter consumer stopped"))?;
-            }
+        }
+
+        if usable > 0 {
+            pending.drain(..usable);
         }
     }
 }
