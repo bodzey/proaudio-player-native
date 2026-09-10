@@ -4,6 +4,7 @@ mod alerts;
 mod audio;
 mod command;
 mod config;
+mod dlna;
 mod fourstream;
 mod provider;
 mod source_arbiter;

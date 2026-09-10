@@ -68,6 +68,7 @@ function setMixerLocked(locked) {
 function transportNote(player) {
   if (player.backend === "spotify-mpris") return "Керування активним Spotify Connect через MPRIS.";
   if (player.backend === "airplay-mpris") return "Керування AirPlay залежить від підтримки remote control на пристрої-джерелі.";
+  if (player.backend === "dlna-upnp") return "Керування активним DLNA / UPnP через AVTransport.";
   if (player.backend === "mpd") return "Кнопки керують локальним MPD-плеєром.";
   if (player.backend === "external") return "Активне джерело не надає доступного керування треками.";
   return "Керування з’явиться після запуску підтримуваного джерела.";
@@ -145,7 +146,11 @@ function renderStatus(data) {
   $("#track-title").textContent = hasPlayer
     ? (player.title || "Аудіопотік")
     : "Очікування аудіо";
-  const metadata = [player.artist, player.album].filter(Boolean).join(" • ");
+  const metadata = [
+    player.artist,
+    player.album,
+    player.media_server ? `Медіасервер: ${player.media_server}` : "",
+  ].filter(Boolean).join(" • ");
   $("#track-meta").textContent = metadata
     || (hasPlayer ? player.source : "Оберіть ProAudio Player у Spotify, AirPlay, DLNA або запустіть локальний трек.");
 
