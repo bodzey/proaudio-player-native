@@ -149,7 +149,8 @@ impl DlnaClient {
     }
 
     pub async fn known_player(&self) -> Result<Option<Value>> {
-        let Some(endpoint) = ({ self.endpoint.lock().await.clone() }) else {
+        let cached = { self.endpoint.lock().await.clone() };
+        let Some(endpoint) = cached else {
             return Ok(None);
         };
         match self.player_at(&endpoint).await {
@@ -178,6 +179,12 @@ impl DlnaClient {
             return Err(error);
         }
         Ok(())
+    }
+}
+
+impl Default for DlnaClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
