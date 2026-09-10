@@ -28,7 +28,7 @@ No Python runtime is required by this project. The first parity implementation i
 
 The player control plane does not depend on a browser frontend. HTTP API startup, alerts, source arbitration, audio control and compatibility protocols work whether a Web UI is installed or not.
 
-The current compatibility frontend source is kept under `webui/` while it is being developed separately. It is not compiled into the Rust binary. Firmware may package those files independently under `/usr/share/proaudio-player/webui`; if present, the daemon can serve them on `/`, `/static/*`, `/manifest.webmanifest` and `/sw.js`. If they are absent, those frontend routes return 404 without affecting the player API.
+The browser frontend lives in the separate `bodzey/proaudio-player-webui` repository and is referenced here only as the `webui/` git submodule. It is not compiled into the Rust binary. Firmware may package the checked-out frontend independently under `/usr/share/proaudio-player/webui`; if present, the daemon can serve it on `/`, `/static/*`, `/manifest.webmanifest` and `/sw.js`. If it is absent, those frontend routes return 404 without affecting the player API.
 
 New frontend work should use `/api/v1`. See `docs/api.md` for the API contract. `PROAUDIO_WEBUI_DIR` can override the optional runtime frontend directory or disable frontend delivery explicitly.
 
@@ -36,6 +36,12 @@ New frontend work should use `/api/v1`. See `docs/api.md` for the API contract. 
 
 ```bash
 cargo build --release
+```
+
+The native binary does not require the Web UI submodule to be initialized. To also work with the current frontend locally, initialize it explicitly:
+
+```bash
+git submodule update --init webui
 ```
 
 The minimum supported Rust toolchain is 1.88 because the locked dependency graph includes ICU 2.3 in addition to stable Cargo Edition 2024 manifests.
@@ -54,7 +60,7 @@ For the development appliance image, use the `dev` branch of `bodzey/proaudio-pl
 proaudio-player-native --config /etc/proaudio-player-alert/config.yaml run
 ```
 
-For local frontend development against the checked-out compatibility UI:
+For local frontend development against the checked-out Web UI submodule:
 
 ```bash
 PROAUDIO_WEBUI_DIR="$PWD/webui" \
@@ -96,7 +102,7 @@ http://192.168.88.122/v1/iot/active_air_raid_alerts/{uid}.json
 
 The repository first targets functional parity. After hardware validation, command adapters (`pactl`, `amixer`, `mpc`, `busctl`) can be replaced incrementally by direct PipeWire, ALSA, MPD protocol and D-Bus integrations without changing the state machine or HTTP/4STREAM contracts.
 
-The Web UI is intentionally outside that core contract: it can move to a separate repository or release pipeline while continuing to consume the versioned API.
+The Web UI is intentionally outside that core contract. It is developed and versioned in its own repository while continuing to consume the versioned native API.
 
 ## Factory announcement media
 
