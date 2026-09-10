@@ -1,5 +1,14 @@
 /target/
+*.profraw
+*.profdata
+
+.env
+.env.*
+!.env.example
+
 *.log
-.DS_Store
+
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
