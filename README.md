@@ -2,7 +2,7 @@
 
 Native Rust control plane for ProAudio Player. The current behavior-parity reference is `bodzey/proaudio_player` branch `feature/4stream-integration` at `564f4be0a4b4ef5d63f8c3c4703f1d2e42ee138c`.
 
-Development lives on `dev`. `main` is reserved for promoted/stable snapshots.
+Development lives on `dev`. `main` is reserved for promoted/stable snapshots. `proaudio-player-firmware/dev` pins `proaudio-player-native/dev`; production firmware on `main` pins the corresponding stable native `main` revision.
 
 ## Current parity target
 
@@ -39,7 +39,7 @@ The resulting binary is:
 target/release/proaudio-player-native
 ```
 
-For the appliance image, use the `native` branch of `bodzey/proaudio-player-firmware` and its `proaudio_rpi4_64_native_defconfig` instead of building the target binary manually on Raspberry Pi.
+For the development appliance image, use the `dev` branch of `bodzey/proaudio-player-firmware` and its `proaudio_rpi4_64_native_defconfig` instead of building the target binary manually on Raspberry Pi. Stable production images use the firmware `main` branch, which pins the promoted native `main` revision.
 
 ## Run on the current player filesystem
 
