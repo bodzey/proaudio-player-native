@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AUDIO_ENV="${AUDIO_ENV:-/etc/proaudio-player-alert/audio.env}"
+OUTPUT_ENV="${OUTPUT_ENV:-/var/lib/proaudio-player-alert/audio-output.env}"
+STATE_FILE="${XDG_RUNTIME_DIR:-/run/proaudio-player}/proaudio-player-bus-modules"
+BUS_SCRIPT="${BUS_SCRIPT:-/usr/libexec/proaudio-player/audio-buses.sh}"
+
+load_config() {
+    PHYSICAL_SINK=AUTO
+    if [[ -f "$AUDIO_ENV" ]]; then
+        # shellcheck disable=SC1090
+        source "$AUDIO_ENV"
+    fi
+    if [[ -f "$OUTPUT_ENV" ]]; then
+        # shellcheck disable=SC1090
+        source "$OUTPUT_ENV"
+    fi
+    export MUSIC_SINK ALERT_SINK MASTER_SINK SAMPLE_RATE AUDIO_CHANNELS
+    export LOOPBACK_LATENCY_MSEC OUTPUT_VOLUME_PERCENT HARDWARE_MIXER_MODE SINK_WAIT_SECONDS
+}
+
+physical_candidates() {
+    pactl list short sinks 2>/dev/null |
+        awk -v music="${MUSIC_SINK:-proaudio_player_music}" \
+            -v alert="${ALERT_SINK:-proaudio_player_alert}" \
+            -v master="${MASTER_SINK:-proaudio_player_master}" '
+            $2 != music && $2 != alert && $2 != master && $2 != "auto_null" &&
+            $2 !~ /^proaudio_player_/ {
+                priority = ($NF == "RUNNING" ? 0 : 1)
+                print priority "\t" $2
+            }' |
+        sort -k1,1n -k2,2 |
+        cut -f2-
+}
+
+sink_available() {
+    local sink="$1"
+    pactl get-sink-volume "$sink" >/dev/null 2>&1
+}
+
+current_output() {
+    [[ -f "$STATE_FILE" ]] || return 0
+    awk -F= '$1 == "PHYSICAL" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE"
+}
+
+reconcile_output() {
+    load_config
+
+    local configured="${PHYSICAL_SINK:-AUTO}"
+    local desired=""
+    local current="$(current_output)"
+
+    if [[ "$configured" != "AUTO" ]] && sink_available "$configured"; then
+        desired="$configured"
+    else
+        desired="$(physical_candidates | head -n 1)"
+    fi
+
+    [[ -n "$desired" ]] || return 0
+    [[ "$current" == "$desired" ]] && return 0
+
+    # Preserve an explicitly configured output while it is temporarily absent.
+    # Only the environment of this switch operation falls back to AUTO.
+    export PHYSICAL_SINK="$desired"
+    echo "Audio hotplug: switching final output ${current:-<none>} -> $desired" >&2
+    "$BUS_SCRIPT" switch
+}
+
+export LC_ALL=C
+reconcile_output || true
+
+# PulseAudio/PipeWire-Pulse subscriptions are event driven. If the server itself
+# restarts the subscription exits; systemd restarts this watcher and reconciliation
+# happens again from the current graph state.
+pactl subscribe | while IFS= read -r event; do
+    case "$event" in
+        *" on sink "*|*" on server "*|*" on card "*)
+            reconcile_output || true
+            ;;
+    esac
+done
