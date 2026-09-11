@@ -67,6 +67,14 @@ fn map_internal(err: anyhow::Error) -> ApiError {
     api_error(StatusCode::SERVICE_UNAVAILABLE, err.to_string())
 }
 
+fn map_bad_request(err: anyhow::Error) -> ApiError {
+    api_error(StatusCode::BAD_REQUEST, err.to_string())
+}
+
+fn map_conflict(err: anyhow::Error) -> ApiError {
+    api_error(StatusCode::CONFLICT, err.to_string())
+}
+
 fn unwrap_dbus(value: Value) -> Value {
     match value {
         Value::Object(mut map) => {
@@ -987,7 +995,6 @@ impl WebController {
         let snapshot = self.audio.snapshot().await?;
         let music_volume = snapshot.volumes_percent.iter().sum::<f64>()
             / snapshot.volumes_percent.len().max(1) as f64;
-        let hardware = self.primary_hardware_mixer().await.ok();
         let volume = music_volume;
         let muted = snapshot.muted;
         let physical = match self.physical_sink().await {
@@ -995,6 +1002,23 @@ impl WebController {
             Err(_) => None,
         };
         let alert_bus = self.sink_state(&self.config.audio.alert_sink).await.ok();
+        let master = self
+            .audio
+            .master_state(DEFAULT_MASTER_SINK)
+            .await
+            .ok()
+            .map(|state| {
+                json!({
+                    "name": state.name,
+                    "volume": (state.average_percent() * 10.0).round() / 10.0,
+                    "db": (state.average_db() * 100.0).round() / 100.0,
+                    "muted": state.muted,
+                    "card_name": "Master",
+                    "control": DEFAULT_MASTER_SINK,
+                    "backend": self.audio.master_backend_name(),
+                    "transport_backend": self.audio.backend_name(),
+                })
+            });
         let mpd = self
             .mpd_status()
             .await
@@ -1016,8 +1040,9 @@ impl WebController {
             "sources": sources,
             "audio_levels": {
                 "music_bus": (music_volume * 10.0).round() / 10.0,
+                "master": master,
                 "physical": physical,
-                "hardware": hardware,
+                "hardware": Value::Null,
                 "alert_bus": alert_bus,
             },
             "player": player,
@@ -1275,7 +1300,8 @@ async fn capabilities() -> Json<Value> {
         "events": "sse",
         "features": [
             "status", "player_control", "audio_mixer", "audio_outputs", "audio_diagnostics",
-            "library", "playlists", "queue", "network_streams", "alert_settings"
+            "audio_hardware_read_only", "audio_settings", "meters", "library", "playlists",
+            "queue", "network_streams", "alert_settings"
         ]
     }))
 }
@@ -1315,16 +1341,16 @@ async fn set_volume(
     State(controller): State<WebController>,
     Json(body): Json<VolumeBody>,
 ) -> ApiResult {
-    controller
-        .ensure_controls_available()
-        .await
-        .map_err(map_internal)?;
     if !(0.0..=100.0).contains(&body.percent) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "Гучність має бути 0..100",
         ));
     }
+    controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_conflict)?;
     controller
         .audio
         .set_music_volume(body.percent)
@@ -1347,7 +1373,7 @@ async fn set_mute(
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
+        .map_err(map_conflict)?;
     controller
         .audio
         .set_music_mute(body.muted)
@@ -1365,6 +1391,15 @@ async fn set_audio_level(
             StatusCode::BAD_REQUEST,
             "Гучність має бути 0..100",
         ));
+    }
+    if !matches!(body.target.as_str(), "master" | "music" | "alert") {
+        return Err(api_error(StatusCode::BAD_REQUEST, "Невідомий аудіорівень"));
+    }
+    if body.target != "master" {
+        controller
+            .ensure_controls_available()
+            .await
+            .map_err(map_conflict)?;
     }
     let sink = match body.target.as_str() {
         "master" => {
@@ -1387,7 +1422,7 @@ async fn set_audio_level(
         }
         "music" => controller.config.audio.music_sink.clone(),
         "alert" => controller.config.audio.alert_sink.clone(),
-        _ => return Err(api_error(StatusCode::BAD_REQUEST, "Невідомий аудіорівень")),
+        _ => unreachable!(),
     };
     controller
         .audio
@@ -1413,13 +1448,22 @@ async fn set_mixer(
     State(controller): State<WebController>,
     Json(body): Json<MixerBody>,
 ) -> ApiResult {
+    if !matches!(body.target.as_str(), "master" | "music" | "alert") {
+        return Err(api_error(StatusCode::BAD_REQUEST, "Невідомий канал мікшера"));
+    }
+    if !body.db.is_finite() || !(-60.0..=0.0).contains(&body.db) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Рівень має бути в межах -60..0 dB",
+        ));
+    }
     // MASTER is the final logical attenuation stage before the safety limiter and
     // remains available even while priority audio owns the MUSIC bus.
     if body.target != "master" {
         controller
             .ensure_controls_available()
             .await
-            .map_err(map_internal)?;
+            .map_err(map_conflict)?;
     }
     controller
         .set_mixer_db(&body.target, body.db, body.muted)
@@ -1440,15 +1484,22 @@ async fn select_audio_output(
     State(controller): State<WebController>,
     Json(body): Json<AudioOutputBody>,
 ) -> ApiResult {
+    let id = body.id.trim();
+    if id.is_empty() || id.chars().any(|value| matches!(value, '\n' | '\r' | '\0')) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Некоректний ідентифікатор аудіовиходу",
+        ));
+    }
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
+        .map_err(map_conflict)?;
     controller
-        .select_audio_output(&body.id)
+        .select_audio_output(id)
         .await
         .map(Json)
-        .map_err(map_internal)
+        .map_err(map_conflict)
 }
 
 async fn hardware(State(controller): State<WebController>) -> ApiResult {
@@ -1502,7 +1553,7 @@ async fn put_audio_settings(
     if let Some(v) = body.duck_only_during_announcement {
         audio.duck_only_during_announcement = v;
     }
-    validate_audio(&audio, &minute).map_err(map_internal)?;
+    validate_audio(&audio, &minute).map_err(map_bad_request)?;
     save_audio_settings(&audio, &minute).map_err(map_internal)?;
     controller.audio_settings().map(Json).map_err(map_internal)
 }
@@ -1511,11 +1562,14 @@ async fn player(
     State(controller): State<WebController>,
     Json(body): Json<PlayerBody>,
 ) -> ApiResult {
+    if !PLAYER_ACTIONS.contains(&body.action.as_str()) {
+        return Err(api_error(StatusCode::BAD_REQUEST, "Невідома дія"));
+    }
     controller
         .control_active_player(&body.action)
         .await
         .map(Json)
-        .map_err(map_internal)
+        .map_err(map_conflict)
 }
 
 async fn library(State(controller): State<WebController>) -> ApiResult {
@@ -1530,7 +1584,7 @@ async fn refresh_library(State(controller): State<WebController>) -> ApiResult {
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
+        .map_err(map_conflict)?;
     controller
         .run("mpc", &["update"], true, 60)
         .await
@@ -1542,11 +1596,11 @@ async fn play_file(
     State(controller): State<WebController>,
     Json(body): Json<PathBody>,
 ) -> ApiResult {
+    let path = safe_mpd_path(&body.path, false).map_err(map_bad_request)?;
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
-    let path = safe_mpd_path(&body.path, false).map_err(map_internal)?;
+        .map_err(map_conflict)?;
     if !controller
         .library()
         .await
@@ -1621,12 +1675,11 @@ async fn play_stream(
     State(controller): State<WebController>,
     Json(body): Json<StreamBody>,
 ) -> ApiResult {
+    let url = validate_stream_url(&body.url).map_err(map_bad_request)?;
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
-    let url = validate_stream_url(&body.url)
-        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+        .map_err(map_conflict)?;
     controller
         .run("mpc", &["clear"], true, 8)
         .await
@@ -1654,11 +1707,11 @@ async fn load_playlist(
     State(controller): State<WebController>,
     Json(body): Json<PlaylistBody>,
 ) -> ApiResult {
+    let name = safe_mpd_path(&body.name, true).map_err(map_bad_request)?;
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
-    let name = safe_mpd_path(&body.name, true).map_err(map_internal)?;
+        .map_err(map_conflict)?;
     if !controller
         .playlists()
         .await
@@ -1697,7 +1750,7 @@ async fn play_queue(
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
+        .map_err(map_conflict)?;
     if body.position == 0
         || !controller
             .queue()
@@ -1726,7 +1779,7 @@ async fn remove_queue(
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
+        .map_err(map_conflict)?;
     if body.position == 0
         || !controller
             .queue()
@@ -1752,7 +1805,7 @@ async fn clear_queue(State(controller): State<WebController>) -> ApiResult {
     controller
         .ensure_controls_available()
         .await
-        .map_err(map_internal)?;
+        .map_err(map_conflict)?;
     controller
         .run("mpc", &["clear"], true, 8)
         .await
@@ -1769,7 +1822,7 @@ async fn put_alert_settings(
     Json(body): Json<ProviderBody>,
 ) -> ApiResult {
     let current = effective_provider(&controller.config.provider).map_err(map_internal)?;
-    let candidate = apply_provider_body(current, &body).map_err(map_internal)?;
+    let candidate = apply_provider_body(current, &body).map_err(map_bad_request)?;
     if let Some(token) = body.token.as_deref() {
         if !token.trim().is_empty() {
             save_provider_token(&candidate, token).map_err(map_internal)?;
@@ -1784,7 +1837,7 @@ async fn test_alert_settings(
     Json(body): Json<ProviderBody>,
 ) -> ApiResult {
     let current = effective_provider(&controller.config.provider).map_err(map_internal)?;
-    let candidate = apply_provider_body(current, &body).map_err(map_internal)?;
+    let candidate = apply_provider_body(current, &body).map_err(map_bad_request)?;
     let token = match body
         .token
         .as_deref()
@@ -1792,7 +1845,7 @@ async fn test_alert_settings(
         .filter(|v| !v.is_empty())
     {
         Some(value) => value.to_owned(),
-        None => candidate.resolve_token().map_err(map_internal)?,
+        None => candidate.resolve_token().map_err(map_bad_request)?,
     };
     let client = reqwest::Client::new();
     let response = client
