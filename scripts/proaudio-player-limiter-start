@@ -44,7 +44,7 @@ exec /usr/bin/proaudio-player-limiter \
     --rate "$SAMPLE_RATE" \
     --channels "$AUDIO_CHANNELS" \
     --enabled "$enabled" \
-    --ceiling-db "$LIMITER_CEILING_DB" \
+    --ceiling-db="$LIMITER_CEILING_DB" \
     --lookahead-ms "$LIMITER_LOOKAHEAD_MS" \
     --release-ms "$LIMITER_RELEASE_MS" \
     --oversample "$LIMITER_OVERSAMPLE"
