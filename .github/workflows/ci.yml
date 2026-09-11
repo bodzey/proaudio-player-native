@@ -20,6 +20,12 @@ jobs:
           bash -n scripts/proaudio-player-audioctl
           bash -n scripts/proaudio-player-limiter-start
           bash -n scripts/proaudio-player-output-watch
+      - name: Check source gain policy
+        run: |
+          grep -Eq 'mixer_type[[:space:]]+"none"' config/mpd.conf
+          grep -Eq 'replay_gain_handler[[:space:]]+"none"' config/mpd.conf
+          grep -Eq '^volume_controller[[:space:]]*=[[:space:]]*"none"' config/spotifyd.conf
+          grep -Eq 'ignore_volume_control[[:space:]]*=[[:space:]]*"yes"' config/shairport-sync.conf
       - name: Install PulseAudio client development files
         run: |
           sudo apt-get update
