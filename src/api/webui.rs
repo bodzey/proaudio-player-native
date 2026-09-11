@@ -92,6 +92,10 @@ async fn manifest() -> Response {
     serve_asset("manifest.webmanifest").await
 }
 
+async fn icon() -> Response {
+    serve_asset("icon.svg").await
+}
+
 async fn service_worker() -> Response {
     let mut response = serve_asset("sw.js").await;
     if response.status().is_success() {
@@ -103,7 +107,11 @@ async fn service_worker() -> Response {
     response
 }
 
-async fn static_asset(AxumPath(path): AxumPath<String>) -> Response {
+async fn bundled_asset(AxumPath(path): AxumPath<String>) -> Response {
+    serve_asset(&format!("assets/{path}")).await
+}
+
+async fn legacy_static_asset(AxumPath(path): AxumPath<String>) -> Response {
     serve_asset(&format!("static/{path}")).await
 }
 
@@ -111,8 +119,10 @@ pub(super) fn router() -> Router<WebController> {
     Router::<WebController>::new()
         .route("/", get(index))
         .route("/manifest.webmanifest", get(manifest))
+        .route("/icon.svg", get(icon))
         .route("/sw.js", get(service_worker))
-        .route("/static/{*path}", get(static_asset))
+        .route("/assets/{*path}", get(bundled_asset))
+        .route("/static/{*path}", get(legacy_static_asset))
         .merge(super::meters::router())
 }
 
@@ -122,10 +132,11 @@ mod tests {
 
     #[test]
     fn accepts_only_relative_asset_paths() {
+        assert!(safe_relative_path("assets/app.js").is_some());
         assert!(safe_relative_path("static/app.js").is_some());
         assert!(safe_relative_path("assets/icons/player.svg").is_some());
         assert!(safe_relative_path("../etc/passwd").is_none());
-        assert!(safe_relative_path("static/../../etc/passwd").is_none());
+        assert!(safe_relative_path("assets/../../etc/passwd").is_none());
         assert!(safe_relative_path("/etc/passwd").is_none());
         assert!(safe_relative_path("").is_none());
     }
