@@ -442,7 +442,7 @@ fn run(args: Args) -> Result<()> {
     wait_for_streams(&mut mainloop, &context, &record, &playback)?;
 
     eprintln!(
-        "output limiter: source={} sink={} rate={} channels={} enabled={} ceiling={:.2}dBTP lookahead={:.2}ms release={:.1}ms FIR={}x/{}tap",
+        "output limiter: source={} sink={} rate={} channels={} enabled={} ceiling={:.2}dBTP lookahead={:.2}ms/{}f release={:.1}ms FIR={}x/{}tap",
         args.source,
         args.sink,
         args.rate,
@@ -450,6 +450,7 @@ fn run(args: Args) -> Result<()> {
         args.enabled,
         args.ceiling_db,
         args.lookahead_ms,
+        limiter.lookahead_frames,
         args.release_ms,
         args.oversample,
         FIR_TAPS
