@@ -18,7 +18,6 @@ jobs:
         run: |
           bash -n scripts/audio-buses.sh
           bash -n scripts/proaudio-player-audioctl
-          bash -n scripts/proaudio-player-limiter-start
           bash -n scripts/proaudio-player-output-watch
       - name: Check source gain policy
         run: |
@@ -26,6 +25,14 @@ jobs:
           grep -Eq 'replay_gain_handler[[:space:]]+"none"' config/mpd.conf
           grep -Eq '^volume_controller[[:space:]]*=[[:space:]]*"none"' config/spotifyd.conf
           grep -Eq 'ignore_volume_control[[:space:]]*=[[:space:]]*"yes"' config/shairport-sync.conf
+      - name: Check direct output graph policy
+        run: |
+          grep -Eq 'OUTPUT_LOOP_MODULE' scripts/audio-buses.sh
+          grep -Eq 'load_loopback "\$MASTER_SINK" "\$physical"' scripts/audio-buses.sh
+          if grep -Eq '^LIMITER_' config/audio.env.example; then
+            echo 'the physical output path must not depend on the retired userspace PCM limiter' >&2
+            exit 1
+          fi
       - name: Check processing-rate authority
         run: |
           grep -Eq '^SAMPLE_RATE=[0-9]+$' config/audio.env.example
