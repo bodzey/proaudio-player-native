@@ -249,12 +249,12 @@ sink_input_for_module() {
     local module="$1"
     pactl list sink-inputs | awk -v wanted="$module" '
         /^Sink Input #[0-9]+/ {
-            index=$3
-            sub(/^#/, "", index)
+            input_index=$3
+            sub(/^#/, "", input_index)
             next
         }
         /^[[:space:]]*Owner Module:/ && $3 == wanted {
-            print index
+            print input_index
             exit
         }'
 }
