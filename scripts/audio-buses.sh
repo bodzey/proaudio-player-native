@@ -237,19 +237,21 @@ start_buses() {
 
     master_bus="$(pactl load-module module-null-sink \
         sink_name="$MASTER_SINK" \
-        sink_properties="device.description=ProAudio_Player_Final_Mix" \
+        sink_properties="device.description=ProAudio_Player_Final_Mix monitor.channel-volumes=true" \
         rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
     music_bus="$(pactl load-module module-null-sink \
         sink_name="$MUSIC_SINK" \
-        sink_properties="device.description=ProAudio_Player_Music_Bus" \
+        sink_properties="device.description=ProAudio_Player_Music_Bus monitor.channel-volumes=true" \
         rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
     alert_bus="$(pactl load-module module-null-sink \
         sink_name="$ALERT_SINK" \
-        sink_properties="device.description=ProAudio_Player_Alert_Bus" \
+        sink_properties="device.description=ProAudio_Player_Alert_Bus monitor.channel-volumes=true" \
         rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
 
     # MUSIC and ALERT are mixed in float by PipeWire/Pulse into one final bus.
-    # The safety limiter is the only path from MASTER.monitor to the physical sink.
+    # Explicit monitor.channel-volumes makes MUSIC/ALERT/MASTER sink gain part of
+    # the monitor signal as well, so ducking and MASTER attenuation are guaranteed
+    # to happen before the safety limiter.
     music_loop="$(load_loopback "$MUSIC_SINK" "$MASTER_SINK")"
     alert_loop="$(load_loopback "$ALERT_SINK" "$MASTER_SINK")"
     write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
