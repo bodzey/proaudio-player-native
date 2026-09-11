@@ -10,6 +10,7 @@ mod dlna;
 mod fourstream;
 mod output_gain;
 mod output_router;
+mod processing_domain;
 mod provider;
 mod pulse;
 mod source_arbiter;
@@ -212,7 +213,9 @@ async fn test_silence(config: Arc<AppConfig>) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = Arc::new(load_config(&cli.config)?);
+    let mut config = load_config(&cli.config)?;
+    processing_domain::apply(&mut config)?;
+    let config = Arc::new(config);
     init_logging(&config);
 
     match cli.command {
