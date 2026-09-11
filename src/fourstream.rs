@@ -21,10 +21,13 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::api::WebController;
+use crate::dlna;
 
 const SSDP_ADDRESS: &str = "239.255.255.250";
 const SSDP_PORT: u16 = 1900;
 const DEVICE_TYPE: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
+const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
+const RENDERING_SERVICE: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
 const WIIMU_SERVICE_TYPE: &str = "urn:schemas-wiimu-com:service:PlayQueue:1";
 const NAME: &str = "ProAudio Player";
 
@@ -61,7 +64,7 @@ fn device_uuid() -> String {
         .or_else(|| {
             fs::read_to_string("/etc/hostname")
                 .ok()
-                .map(|v| v.trim().to_owned())
+                .map(|value| value.trim().to_owned())
         })
         .unwrap_or_else(|| "proaudio-player".into());
     let digest = hex::encode(Sha256::digest(
@@ -164,6 +167,11 @@ async fn player_status(controller: &WebController) -> Result<Value> {
     let position = (as_f64(player.get("position_seconds")) * 1000.0).round() as u64;
     let duration = (as_f64(player.get("duration_seconds")) * 1000.0).round() as u64;
     let source = player.get("source").and_then(Value::as_str).unwrap_or("");
+    let track_uri = player
+        .get("track_uri")
+        .and_then(Value::as_str)
+        .or_else(|| mpd.get("stream_url").and_then(Value::as_str))
+        .unwrap_or("");
     Ok(json!({
         "type": "0", "ch": "0", "mode": source_mode(source), "loop": "0", "eq": "0",
         "status": match state { "playing" => "play", "paused" => "pause", _ => "stop" },
@@ -171,6 +179,7 @@ async fn player_status(controller: &WebController) -> Result<Value> {
         "Title": hex::encode_upper(player.get("title").and_then(Value::as_str).unwrap_or("").as_bytes()),
         "Artist": hex::encode_upper(player.get("artist").and_then(Value::as_str).unwrap_or("").as_bytes()),
         "Album": hex::encode_upper(player.get("album").and_then(Value::as_str).unwrap_or("").as_bytes()),
+        "track_uri": track_uri,
         "alarmflag": if priority.get("active").and_then(Value::as_bool).unwrap_or(false) { "1" } else { "0" },
         "plicount": as_u64(mpd.get("queue_length")).to_string(),
         "plicurr": as_u64(mpd.get("queue_position")).to_string(),
@@ -265,7 +274,11 @@ async fn transport(controller: &WebController, action: &str) -> Result<()> {
 
 async fn play_url(controller: &WebController, value: &str) -> Result<()> {
     let parsed = Url::parse(value).context("Invalid stream URL")?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         bail!("Invalid stream URL");
     }
     controller.ensure_controls_available().await?;
@@ -348,6 +361,15 @@ async fn http_api(
     Err(bad_request("unknown command"))
 }
 
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 fn soap_value(body: &str, name: &str) -> String {
     for marker in [format!("<{name}"), format!(":{name}")] {
         let Some(position) = body.find(&marker) else {
@@ -360,7 +382,7 @@ fn soap_value(body: &str, name: &str) -> String {
         let Some(length) = body[start..].find('<') else {
             continue;
         };
-        return body[start..start + length].to_owned();
+        return xml_unescape(body[start..start + length].trim());
     }
     String::new()
 }
@@ -384,6 +406,11 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+async fn dlna_transport(controller: &WebController, action: &str) -> Result<()> {
+    controller.ensure_controls_available().await?;
+    dlna::client().control(action).await
+}
+
 async fn soap_control(
     State(controller): State<WebController>,
     headers: HeaderMap,
@@ -391,7 +418,7 @@ async fn soap_control(
 ) -> GatewayResult {
     let action_header = headers
         .get("SOAPACTION")
-        .and_then(|v| v.to_str().ok())
+        .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .trim_matches('"');
     let (service, action) = action_header
@@ -401,6 +428,7 @@ async fn soap_control(
     if !body.contains('<') || !body.contains('>') {
         return Err(bad_request("Invalid SOAP XML"));
     }
+
     let player = player_status(&controller).await.map_err(service_error)?;
     let get = |name: &str| player.get(name).and_then(Value::as_str).unwrap_or("");
     let mut values: Vec<(&str, String)> = Vec::new();
@@ -422,16 +450,16 @@ async fn soap_control(
             ("Track", "1".into()),
             ("TrackDuration", clock(get("totlen"))),
             ("TrackMetaData", "".into()),
-            ("TrackURI", "".into()),
+            ("TrackURI", get("track_uri").into()),
             ("RelTime", clock(get("curpos"))),
             ("AbsTime", clock(get("curpos"))),
             ("RelCount", "0".into()),
             ("AbsCount", "0".into()),
         ]),
         "GetMediaInfo" => values.extend([
-            ("NrTracks", get("plicount").into()),
+            ("NrTracks", "1".into()),
             ("MediaDuration", clock(get("totlen"))),
-            ("CurrentURI", "".into()),
+            ("CurrentURI", get("track_uri").into()),
             ("CurrentURIMetaData", "".into()),
             ("NextURI", "".into()),
             ("NextURIMetaData", "".into()),
@@ -439,6 +467,54 @@ async fn soap_control(
             ("RecordMedium", "NOT_IMPLEMENTED".into()),
             ("WriteStatus", "NOT_IMPLEMENTED".into()),
         ]),
+        "GetCurrentTransportActions" => values.push((
+            "Actions",
+            "Play,Pause,Stop,Seek,Next,Previous".into(),
+        )),
+        "SetAVTransportURI" => {
+            controller
+                .ensure_controls_available()
+                .await
+                .map_err(service_error)?;
+            let uri = soap_value(body, "CurrentURI");
+            if uri.is_empty() {
+                return Err(bad_request("Missing CurrentURI"));
+            }
+            let metadata = soap_value(body, "CurrentURIMetaData");
+            dlna::client()
+                .set_uri(&uri, &metadata)
+                .await
+                .map_err(service_error)?;
+        }
+        "SetNextAVTransportURI" => {
+            controller
+                .ensure_controls_available()
+                .await
+                .map_err(service_error)?;
+            let uri = soap_value(body, "NextURI");
+            if uri.is_empty() {
+                return Err(bad_request("Missing NextURI"));
+            }
+            let metadata = soap_value(body, "NextURIMetaData");
+            dlna::client()
+                .set_next_uri(&uri, &metadata)
+                .await
+                .map_err(service_error)?;
+        }
+        "Seek" => {
+            controller
+                .ensure_controls_available()
+                .await
+                .map_err(service_error)?;
+            let unit = soap_value(body, "Unit");
+            if unit.to_ascii_uppercase() != "REL_TIME" {
+                return Err(bad_request("Only REL_TIME seek is supported"));
+            }
+            dlna::client()
+                .seek_rel_time(&soap_value(body, "Target"))
+                .await
+                .map_err(service_error)?;
+        }
         "GetVolume" => values.push(("CurrentVolume", get("vol").into())),
         "GetMute" => values.push(("CurrentMute", get("mute").into())),
         "SetVolume" => set_volume(&controller, &soap_value(body, "DesiredVolume"))
@@ -449,39 +525,40 @@ async fn soap_control(
             .map_err(service_error)?,
         "Play" | "Pause" | "Stop" | "Next" | "Previous" => {
             let transport_action = if action == "Previous" {
-                "prev".to_owned()
+                "prev"
             } else {
-                action.to_ascii_lowercase()
+                &action.to_ascii_lowercase()
             };
-            transport(&controller, &transport_action)
+            dlna_transport(&controller, transport_action)
                 .await
                 .map_err(service_error)?;
         }
         _ => return Err(bad_request(format!("Unsupported SOAP action: {action}"))),
     }
+
     let fallback = if matches!(action, "GetVolume" | "GetMute" | "SetVolume" | "SetMute") {
-        "urn:schemas-upnp-org:service:RenderingControl:1"
+        RENDERING_SERVICE
     } else {
-        "urn:schemas-upnp-org:service:AVTransport:1"
+        AVTRANSPORT_SERVICE
     };
-    let namespace = if service.is_empty() {
-        fallback
-    } else {
-        service
-    };
+    let namespace = if service.is_empty() { fallback } else { service };
     let fields = values
         .iter()
         .map(|(key, value)| format!("<{key}>{}</{key}>", xml_escape(value)))
         .collect::<String>();
-    Ok(text_response(format!(
-        "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:{action}Response xmlns:u=\"{}\">{fields}</u:{action}Response></s:Body></s:Envelope>",
-        xml_escape(namespace)), "text/xml; charset=utf-8"))
+    Ok(text_response(
+        format!(
+            "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:{action}Response xmlns:u=\"{}\">{fields}</u:{action}Response></s:Body></s:Envelope>",
+            xml_escape(namespace)
+        ),
+        "text/xml; charset=utf-8",
+    ))
 }
 
 async fn description(State(controller): State<WebController>, headers: HeaderMap) -> Response {
     let host = headers
         .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
+        .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("127.0.0.1:{}", controller.config.api.port));
     let udn = device_uuid();
@@ -492,11 +569,11 @@ async fn description(State(controller): State<WebController>, headers: HeaderMap
 <root xmlns="urn:schemas-upnp-org:device-1-0">
  <specVersion><major>1</major><minor>0</minor></specVersion><URLBase>http://{host}/</URLBase>
  <device><deviceType>{DEVICE_TYPE}</deviceType><friendlyName>{NAME}</friendlyName>
-  <manufacturer>Rakoit Technology(SZ) Co., Ltd.</manufacturer><manufacturerURL>https://github.com/bodzey/proaudio-player-native</manufacturerURL>
-  <modelDescription>LinkPlay compatible network audio renderer</modelDescription><modelName>ProAudio Player</modelName><modelNumber>dev</modelNumber>
+  <manufacturer>ProAudio Player</manufacturer><manufacturerURL>https://github.com/bodzey/proaudio-player-native</manufacturerURL>
+  <modelDescription>ProAudio network audio renderer</modelDescription><modelName>ProAudio Player</modelName><modelNumber>dev</modelNumber>
   <serialNumber>{linkplay}</serialNumber><UDN>{udn}</UDN><serviceList>
-   <service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><serviceId>urn:upnp-org:serviceId:AVTransport</serviceId><SCPDURL>/upnp/service.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL>/upnp/event</eventSubURL></service>
-   <service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId><SCPDURL>/upnp/service.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL>/upnp/event</eventSubURL></service>
+   <service><serviceType>{AVTRANSPORT_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:AVTransport</serviceId><SCPDURL>/upnp/avtransport.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL>/upnp/event</eventSubURL></service>
+   <service><serviceType>{RENDERING_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId><SCPDURL>/upnp/renderingcontrol.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL>/upnp/event</eventSubURL></service>
    <service><serviceType>{WIIMU_SERVICE_TYPE}</serviceType><serviceId>urn:wiimu-com:serviceId:PlayQueue</serviceId><SCPDURL>/upnp/playqueue.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL>/upnp/event</eventSubURL></service>
   </serviceList></device></root>"#
         ),
@@ -504,26 +581,53 @@ async fn description(State(controller): State<WebController>, headers: HeaderMap
     )
 }
 
-async fn service_description() -> Response {
-    let actions = [
-        "GetTransportInfo",
-        "GetPositionInfo",
-        "GetMediaInfo",
-        "Play",
-        "Pause",
-        "Stop",
-        "Next",
-        "Previous",
-        "GetVolume",
-        "SetVolume",
-        "GetMute",
-        "SetMute",
-    ];
+fn scpd(actions: &[&str]) -> Response {
     let action_list = actions
         .iter()
         .map(|name| format!("<action><name>{name}</name></action>"))
         .collect::<String>();
-    text_response(format!("<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList>{action_list}</actionList><serviceStateTable></serviceStateTable></scpd>"), "text/xml; charset=utf-8")
+    text_response(
+        format!(
+            "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList>{action_list}</actionList><serviceStateTable></serviceStateTable></scpd>"
+        ),
+        "text/xml; charset=utf-8",
+    )
+}
+
+async fn avtransport_description() -> Response {
+    scpd(&[
+        "SetAVTransportURI",
+        "SetNextAVTransportURI",
+        "GetTransportInfo",
+        "GetPositionInfo",
+        "GetMediaInfo",
+        "GetCurrentTransportActions",
+        "Play",
+        "Pause",
+        "Stop",
+        "Seek",
+        "Next",
+        "Previous",
+    ])
+}
+
+async fn rendering_description() -> Response {
+    scpd(&["GetVolume", "SetVolume", "GetMute", "SetMute"])
+}
+
+async fn service_description() -> Response {
+    scpd(&[
+        "SetAVTransportURI",
+        "GetTransportInfo",
+        "GetPositionInfo",
+        "Play",
+        "Pause",
+        "Stop",
+        "GetVolume",
+        "SetVolume",
+        "GetMute",
+        "SetMute",
+    ])
 }
 
 pub fn router() -> Router<WebController> {
@@ -532,6 +636,8 @@ pub fn router() -> Router<WebController> {
         .route("/upnp/device.xml", get(description))
         .route("/description.xml", get(description))
         .route("/upnp/service.xml", get(service_description))
+        .route("/upnp/avtransport.xml", get(avtransport_description))
+        .route("/upnp/renderingcontrol.xml", get(rendering_description))
         .route("/upnp/playqueue.xml", get(service_description))
         .route("/upnp/control", post(soap_control))
 }
@@ -546,6 +652,14 @@ fn alive_messages(port: u16, udn: &str) -> Vec<Vec<u8>> {
         (udn.to_owned(), udn.to_owned()),
         (DEVICE_TYPE.to_owned(), format!("{udn}::{DEVICE_TYPE}")),
         (
+            AVTRANSPORT_SERVICE.to_owned(),
+            format!("{udn}::{AVTRANSPORT_SERVICE}"),
+        ),
+        (
+            RENDERING_SERVICE.to_owned(),
+            format!("{udn}::{RENDERING_SERVICE}"),
+        ),
+        (
             WIIMU_SERVICE_TYPE.to_owned(),
             format!("{udn}::{WIIMU_SERVICE_TYPE}"),
         ),
@@ -559,7 +673,7 @@ fn alive_messages(port: u16, udn: &str) -> Vec<Vec<u8>> {
             format!("LOCATION: {location}"),
             format!("NT: {nt}"),
             "NTS: ssdp:alive".into(),
-            "SERVER: Linux/5.x UPnP/1.0 Linkplay/4.8 ProAudioPlayer/dev".into(),
+            "SERVER: Linux UPnP/1.0 ProAudioPlayer/dev".into(),
             format!("USN: {usn}"),
             String::new(),
             String::new(),
@@ -590,6 +704,8 @@ fn ssdp_response(message: &str, peer: SocketAddr, port: u16, udn: &str) -> Optio
     if !matches!(requested, "ssdp:all" | "upnp:rootdevice")
         && requested != udn
         && requested != DEVICE_TYPE
+        && requested != AVTRANSPORT_SERVICE
+        && requested != RENDERING_SERVICE
         && requested != WIIMU_SERVICE_TYPE
     {
         return None;
@@ -613,7 +729,7 @@ fn ssdp_response(message: &str, peer: SocketAddr, port: u16, udn: &str) -> Optio
                 "LOCATION: http://{}:{port}/upnp/device.xml",
                 local_ip(Some(peer))
             ),
-            "SERVER: Linux/5.x UPnP/1.0 Linkplay/4.8 ProAudioPlayer/dev".into(),
+            "SERVER: Linux UPnP/1.0 ProAudioPlayer/dev".into(),
             format!("ST: {st}"),
             format!("USN: {usn}"),
             String::new(),
@@ -639,18 +755,43 @@ pub async fn run_ssdp(_controller: WebController, port: u16) -> Result<()> {
     let mut ticker = interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut buffer = vec![0u8; 8192];
-    info!("4STREAM compatibility discovery active on SSDP");
+    info!("ProAudio Player UPnP/4STREAM discovery active on SSDP");
     loop {
         tokio::select! {
             _ = ticker.tick() => for message in alive_messages(port, &udn) {
-                if let Err(err) = socket.send_to(&message, destination).await { debug!("4STREAM ssdp:alive send failed: {err}"); }
+                if let Err(err) = socket.send_to(&message, destination).await { debug!("ssdp:alive send failed: {err}"); }
             },
             result = socket.recv_from(&mut buffer) => match result {
                 Ok((length, peer)) => if let Some(response) = ssdp_response(&String::from_utf8_lossy(&buffer[..length]), peer, port, &udn) {
-                    if let Err(err) = socket.send_to(&response, peer).await { debug!("4STREAM SSDP reply failed: {err}"); }
+                    if let Err(err) = socket.send_to(&response, peer).await { debug!("SSDP reply failed: {err}"); }
                 },
-                Err(err) => warn!("4STREAM SSDP receive failed: {err}"),
+                Err(err) => warn!("SSDP receive failed: {err}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soap_values_are_xml_unescaped() {
+        let body = "<CurrentURI>http://host/a?x=1&amp;y=2</CurrentURI>";
+        assert_eq!(soap_value(body, "CurrentURI"), "http://host/a?x=1&y=2");
+    }
+
+    #[test]
+    fn ssdp_supports_renderer_services() {
+        let response = ssdp_response(
+            &format!(
+                "M-SEARCH * HTTP/1.1\r\nMAN: \"ssdp:discover\"\r\nST: {AVTRANSPORT_SERVICE}\r\n\r\n"
+            ),
+            "192.0.2.10:1900".parse().unwrap(),
+            8080,
+            "uuid:test",
+        )
+        .unwrap();
+        assert!(String::from_utf8_lossy(&response).contains(AVTRANSPORT_SERVICE));
     }
 }
