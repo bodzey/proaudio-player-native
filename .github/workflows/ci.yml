@@ -40,10 +40,23 @@ jobs:
             echo 'audio.env must remain the single processing-rate authority' >&2
             exit 1
           fi
-      - name: Install PulseAudio client development files
+      - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpulse-dev pkg-config
+          sudo apt-get install -y busybox libpulse-dev pkg-config
+      - name: Check BusyBox awk loopback lookup
+        run: |
+          result="$(printf 'Sink Input #123\n\tOwner Module: 456\n' | busybox awk -v wanted=456 '
+            /^Sink Input #[0-9]+/ {
+              input_index=$3
+              sub(/^#/, "", input_index)
+              next
+            }
+            /^[[:space:]]*Owner Module:/ && $3 == wanted {
+              print input_index
+              exit
+            }')"
+          test "$result" = 123
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
