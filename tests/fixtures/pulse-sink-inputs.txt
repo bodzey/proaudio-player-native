@@ -1,0 +1,11 @@
+Sink Input #123
+	Driver: PipeWire
+	Owner Module: 456
+	Client: 42
+	Sink: 67
+
+Sink Input #124
+	Driver: PipeWire
+	Owner Module: 789
+	Client: 43
+	Sink: 51
