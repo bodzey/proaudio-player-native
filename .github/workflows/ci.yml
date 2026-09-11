@@ -14,6 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check audio helper scripts
+        run: |
+          bash -n scripts/audio-buses.sh
+          bash -n scripts/proaudio-player-audioctl
+          bash -n scripts/proaudio-player-limiter-start
+          bash -n scripts/proaudio-player-output-watch
       - name: Install PulseAudio client development files
         run: |
           sudo apt-get update
