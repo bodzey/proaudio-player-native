@@ -12,6 +12,19 @@ OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
 SINK_WAIT_SECONDS="${SINK_WAIT_SECONDS:-30}"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
+LOCK_DIR="${XDG_RUNTIME_DIR}/proaudio-player-audio-routing.lock"
+
+acquire_lock() {
+    local deadline=$((SECONDS + 15))
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        if ((SECONDS >= deadline)); then
+            echo "Не вдалося отримати блокування маршрутизації аудіо" >&2
+            return 1
+        fi
+        sleep 0.1
+    done
+    trap 'rmdir "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT INT TERM
+}
 
 physical_candidates() {
     pactl list short sinks |
@@ -148,10 +161,6 @@ prepare_hardware_mixer() {
         printf '%s\n' "$details" | playback_db_values | grep -q . || continue
         original_raw="$(printf '%s\n' "$details" | playback_raw_values)"
 
-        # The physical sink is muted by prepare_physical_sink while this probe runs.
-        # Ask ALSA for 0 dB, then verify the actual quantized hardware value. If a
-        # coarse control rounded above unity, request a negative value and verify
-        # again. Any failed probe is rolled back to the exact raw value we found.
         if ! amixer -q -c "$card" sset "$control" 0dB >/dev/null 2>&1; then
             continue
         fi
@@ -195,8 +204,8 @@ prepare_hardware_mixer() {
 
 prepare_physical_sink() {
     local physical="$1"
-    if ! [[ "$OUTPUT_VOLUME_PERCENT" =~ ^[0-9]+$ ]] || ((10#$OUTPUT_VOLUME_PERCENT > 100)); then
-        echo "OUTPUT_VOLUME_PERCENT має бути цілим числом від 0 до 100" >&2
+    if [[ "$OUTPUT_VOLUME_PERCENT" != "100" ]]; then
+        echo "OUTPUT_VOLUME_PERCENT має бути 100: фізичний software sink є фіксованим unity stage" >&2
         return 1
     fi
 
@@ -204,7 +213,7 @@ prepare_physical_sink() {
     # produce an audible positive-gain transient during probing.
     pactl set-sink-mute "$physical" 1
     prepare_hardware_mixer "$physical"
-    pactl set-sink-volume "$physical" "${OUTPUT_VOLUME_PERCENT}%"
+    pactl set-sink-volume "$physical" 100%
     pactl set-sink-mute "$physical" 0
 }
 
@@ -248,10 +257,6 @@ start_buses() {
         sink_properties="device.description=ProAudio_Player_Alert_Bus monitor.channel-volumes=true" \
         rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
 
-    # MUSIC and ALERT are mixed in float by PipeWire/Pulse into one final bus.
-    # Explicit monitor.channel-volumes makes MUSIC/ALERT/MASTER sink gain part of
-    # the monitor signal as well, so ducking and MASTER attenuation are guaranteed
-    # to happen before the safety limiter.
     music_loop="$(load_loopback "$MUSIC_SINK" "$MASTER_SINK")"
     alert_loop="$(load_loopback "$ALERT_SINK" "$MASTER_SINK")"
     write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
@@ -287,8 +292,6 @@ switch_output() {
     fi
 
     prepare_physical_sink "$physical"
-    # Atomic state replacement is watched by systemd; the limiter restarts against
-    # the new physical sink while the logical MUSIC/ALERT topology remains intact.
     write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
     echo "Фінальний вихід перемкнено на $physical"
 }
@@ -303,9 +306,18 @@ stop_buses() {
 }
 
 case "${1:-}" in
+    start|switch|stop|restart)
+        acquire_lock
+        ;;
+    *)
+        echo "Використання: $0 {start|switch|stop|restart}" >&2
+        exit 2
+        ;;
+esac
+
+case "$1" in
     start) start_buses ;;
     switch) switch_output ;;
     stop) stop_buses ;;
     restart) stop_buses; start_buses ;;
-    *) echo "Використання: $0 {start|switch|stop|restart}" >&2; exit 2 ;;
 esac
