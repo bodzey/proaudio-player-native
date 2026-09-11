@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::process::Command;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::audio_backend::{
@@ -13,7 +14,9 @@ use crate::audio_backend::{
 use crate::config::{effective_audio, AppConfig};
 use crate::output_gain::{BackendOutputGain, OutputGain};
 use crate::output_router::{ExternalOutputRouter, OutputDescriptor, OutputRouter};
-use crate::state::AudioSnapshot;
+use crate::state::{AudioSnapshot, MixerStateRuntime};
+
+const MIXER_STATE_FILE: &str = "/var/lib/proaudio-player-alert/mixer-state.json";
 
 #[derive(Clone)]
 pub struct AudioEngine {
@@ -21,6 +24,7 @@ pub struct AudioEngine {
     backend: Arc<dyn AudioBackend>,
     output_gain: Arc<dyn OutputGain>,
     output_router: Arc<dyn OutputRouter>,
+    mixer_state: MixerStateRuntime,
 }
 
 impl AudioEngine {
@@ -45,6 +49,7 @@ impl AudioEngine {
             backend,
             output_gain,
             output_router,
+            mixer_state: MixerStateRuntime::new(MIXER_STATE_FILE),
         }
     }
 
@@ -74,6 +79,45 @@ impl AudioEngine {
 
     pub fn subscribe_output_changes(&self) -> watch::Receiver<u64> {
         self.output_router.subscribe_changes()
+    }
+
+    pub fn start_mixer_state_writer(&self) -> JoinHandle<()> {
+        self.mixer_state.start_writer()
+    }
+
+    pub async fn restore_user_mixer(&self) -> Result<()> {
+        let cfg = self.config()?;
+        let state = self.mixer_state.snapshot();
+
+        let music_percent = state
+            .music_percent
+            .unwrap_or(cfg.default_restore_volume_percent);
+        self.backend
+            .set_sink_percent_channels(&cfg.music_sink, &[music_percent])
+            .await?;
+        self.backend
+            .set_sink_mute(&cfg.music_sink, state.music_muted.unwrap_or(false))
+            .await?;
+
+        let master_percent = state.master_percent.unwrap_or(100.0);
+        self.output_gain
+            .set_percent(crate::output_router::DEFAULT_MASTER_SINK, master_percent)
+            .await?;
+        self.output_gain
+            .set_mute(
+                crate::output_router::DEFAULT_MASTER_SINK,
+                state.master_muted.unwrap_or(false),
+            )
+            .await?;
+
+        let alert_percent = state.alert_percent.unwrap_or(cfg.alert_volume_percent);
+        self.backend
+            .set_sink_percent_channels(&cfg.alert_sink, &[alert_percent])
+            .await?;
+        self.backend
+            .set_sink_mute(&cfg.alert_sink, state.alert_muted.unwrap_or(false))
+            .await?;
+        Ok(())
     }
 
     pub async fn sink_state(&self, sink: &str) -> Result<SinkState> {
@@ -118,7 +162,10 @@ impl AudioEngine {
             bail!("гучність має бути 0..100");
         }
         self.output_gain.set_percent(sink, percent).await?;
-        self.output_gain.set_mute(sink, percent <= 0.0).await?;
+        let muted = percent <= 0.0;
+        self.output_gain.set_mute(sink, muted).await?;
+        self.mixer_state.set_master_percent(percent);
+        self.mixer_state.set_master_muted(muted);
         Ok(())
     }
 
@@ -127,11 +174,13 @@ impl AudioEngine {
             bail!("рівень має бути в межах -60..0 dB");
         }
         self.output_gain.set_db(sink, db).await?;
+        self.mixer_state.set_master_percent(db_to_percent(db));
         Ok(())
     }
 
     pub async fn set_master_mute(&self, sink: &str, muted: bool) -> Result<()> {
         self.output_gain.set_mute(sink, muted).await?;
+        self.mixer_state.set_master_muted(muted);
         Ok(())
     }
 
@@ -160,6 +209,10 @@ impl AudioEngine {
 
     pub async fn set_sink_mute(&self, sink: &str, muted: bool) -> Result<()> {
         self.backend.set_sink_mute(sink, muted).await?;
+        let cfg = self.config()?;
+        if sink == cfg.alert_sink {
+            self.mixer_state.set_alert_muted(muted);
+        }
         Ok(())
     }
 
@@ -168,6 +221,13 @@ impl AudioEngine {
             bail!("рівень має бути в межах -60..0 dB");
         }
         self.backend.set_sink_db(sink, db).await?;
+        let cfg = self.config()?;
+        let percent = db_to_percent(db);
+        if sink == cfg.music_sink {
+            self.mixer_state.set_music_percent(percent);
+        } else if sink == cfg.alert_sink {
+            self.mixer_state.set_alert_percent(percent);
+        }
         Ok(())
     }
 
@@ -176,27 +236,39 @@ impl AudioEngine {
             bail!("гучність має бути 0..100");
         }
         let cfg = self.config()?;
-        let values = [percent];
         self.backend
-            .set_sink_percent_channels(&cfg.music_sink, &values)
+            .set_sink_percent_channels(&cfg.music_sink, &[percent])
             .await?;
+        self.mixer_state.set_music_percent(percent);
         Ok(())
     }
 
     pub async fn set_music_mute(&self, muted: bool) -> Result<()> {
         let cfg = self.config()?;
-        self.set_sink_mute(&cfg.music_sink, muted).await
+        self.backend.set_sink_mute(&cfg.music_sink, muted).await?;
+        self.mixer_state.set_music_muted(muted);
+        Ok(())
     }
 
     pub async fn set_sink_percent(&self, sink: &str, percent: f64) -> Result<()> {
         if !(0.0..=100.0).contains(&percent) {
             bail!("гучність має бути 0..100");
         }
-        let values = [percent];
         self.backend
-            .set_sink_percent_channels(sink, &values)
+            .set_sink_percent_channels(sink, &[percent])
             .await?;
-        self.set_sink_mute(sink, percent <= 0.0).await
+        let muted = percent <= 0.0;
+        self.backend.set_sink_mute(sink, muted).await?;
+
+        let cfg = self.config()?;
+        if sink == cfg.music_sink {
+            self.mixer_state.set_music_percent(percent);
+            self.mixer_state.set_music_muted(muted);
+        } else if sink == cfg.alert_sink {
+            self.mixer_state.set_alert_percent(percent);
+            self.mixer_state.set_alert_muted(muted);
+        }
+        Ok(())
     }
 
     async fn fade(&self, sink: &str, start: &[f64], target: &[f64], duration: f64) -> Result<()> {
@@ -241,7 +313,7 @@ impl AudioEngine {
         let current = self.snapshot().await?;
         let target = self.ducked_volumes(snapshot)?;
         if !snapshot.muted {
-            self.set_sink_mute(&cfg.music_sink, false).await?;
+            self.backend.set_sink_mute(&cfg.music_sink, false).await?;
         }
         self.fade(
             &cfg.music_sink,
@@ -270,7 +342,10 @@ impl AudioEngine {
         let cfg = self.config()?;
         self.set_volume(&cfg.music_sink, &self.ducked_volumes(snapshot)?)
             .await?;
-        self.set_sink_mute(&cfg.music_sink, snapshot.muted).await
+        self.backend
+            .set_sink_mute(&cfg.music_sink, snapshot.muted)
+            .await?;
+        Ok(())
     }
 
     pub async fn restore(&self, snapshot: Option<&AudioSnapshot>) -> Result<()> {
@@ -284,7 +359,7 @@ impl AudioEngine {
             ),
         };
         if !muted {
-            self.set_sink_mute(&cfg.music_sink, false).await?;
+            self.backend.set_sink_mute(&cfg.music_sink, false).await?;
         }
         self.fade(
             &cfg.music_sink,
@@ -293,7 +368,8 @@ impl AudioEngine {
             cfg.restore_fade_seconds,
         )
         .await?;
-        self.set_sink_mute(&cfg.music_sink, muted).await
+        self.backend.set_sink_mute(&cfg.music_sink, muted).await?;
+        Ok(())
     }
 
     pub async fn play(
@@ -305,32 +381,81 @@ impl AudioEngine {
             bail!("файл оповіщення відсутній: {}", media_file.display());
         }
         let cfg = self.config()?;
-        self.set_sink_mute(&cfg.alert_sink, false).await?;
-        let volume = volume_percent.unwrap_or(cfg.alert_volume_percent);
-        let values = [volume];
-        self.backend
-            .set_sink_percent_channels(&cfg.alert_sink, &values)
-            .await?;
 
-        let output = Command::new(&cfg.player_binary)
-            .args(["--no-video", "--really-quiet", "--ao=pulse", "--volume=100"])
-            .arg(media_file)
-            .env("PULSE_SINK", &cfg.alert_sink)
-            .env("LC_ALL", "C")
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("не вдалося запустити {}", cfg.player_binary))?
-            .wait_with_output()
-            .await?;
-        if !output.status.success() {
-            return Err(anyhow!(
-                "не вдалося відтворити {}: {}",
-                media_file.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+        // Normal alert playback respects the persisted ALERT fader. A temporary
+        // override (used by minute silence) is applied only for this file and is
+        // restored even if mpv fails.
+        let override_snapshot = if let Some(volume) = volume_percent {
+            if !(0.0..=100.0).contains(&volume) {
+                bail!("гучність має бути 0..100");
+            }
+            let snapshot = self.snapshot_sink(&cfg.alert_sink).await?;
+            self.backend
+                .set_sink_percent_channels(&cfg.alert_sink, &[volume])
+                .await?;
+            self.backend.set_sink_mute(&cfg.alert_sink, false).await?;
+            Some(snapshot)
+        } else {
+            None
+        };
+
+        let playback = async {
+            let output = Command::new(&cfg.player_binary)
+                .args(["--no-video", "--really-quiet", "--ao=pulse", "--volume=100"])
+                .arg(media_file)
+                .env("PULSE_SINK", &cfg.alert_sink)
+                .env("LC_ALL", "C")
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .with_context(|| format!("не вдалося запустити {}", cfg.player_binary))?
+                .wait_with_output()
+                .await?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "не вдалося відтворити {}: {}",
+                    media_file.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            Ok::<(), anyhow::Error>(())
         }
-        Ok(())
+        .await;
+
+        let restore = async {
+            if let Some(snapshot) = override_snapshot.as_ref() {
+                self.set_volume(&cfg.alert_sink, &snapshot.volumes_percent)
+                    .await?;
+                self.backend
+                    .set_sink_mute(&cfg.alert_sink, snapshot.muted)
+                    .await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        playback?;
+        restore
+    }
+}
+
+fn db_to_percent(db: f64) -> f64 {
+    if db <= -60.0 {
+        0.0
+    } else {
+        (100.0 * 10f64.powf(db / 60.0)).clamp(0.0, 100.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pulse_db_percent_conversion_matches_cubic_volume_scale() {
+        assert!((db_to_percent(0.0) - 100.0).abs() < 1.0e-9);
+        assert!((db_to_percent(-6.0) - 79.432_823_472_428_14).abs() < 1.0e-9);
+        assert_eq!(db_to_percent(-60.0), 0.0);
     }
 }
