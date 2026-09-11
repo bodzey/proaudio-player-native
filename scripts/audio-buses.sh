@@ -140,6 +140,19 @@ max_db_value() {
     awk 'NR == 1 { max=$1 } $1 > max { max=$1 } END { if (NR) print max }'
 }
 
+reapply_playback_channels() {
+    local card="$1" control="$2" details="$3"
+    local raw_values
+    raw_values="$(printf '%s\n' "$details" | playback_raw_values)"
+    [[ -n "$raw_values" ]] || return 1
+
+    # Some multi-channel ALSA controls can report a safe cached value before every
+    # hardware channel has actually been programmed. Re-applying the verified raw
+    # per-channel list forces an explicit write. Do not alter playback switches here:
+    # the physical sink must remain muted for the whole normalization transaction.
+    amixer -q -c "$card" sset "$control" "$raw_values" >/dev/null 2>&1
+}
+
 prepare_hardware_mixer() {
     local physical="$1"
     [[ "$HARDWARE_MIXER_MODE" == "off" ]] && return 0
@@ -181,9 +194,16 @@ prepare_hardware_mixer() {
         fi
 
         if [[ -n "$max_db" ]] && awk -v value="$max_db" 'BEGIN { exit !(value <= 0.0001) }'; then
-            echo "ALSA card $card: '$control' hardware level = ${max_db} dB (safe unity ceiling)"
-            applied=1
-            continue
+            if ! reapply_playback_channels "$card" "$control" "$after"; then
+                echo "ALSA card $card: '$control' safe level set, but explicit channel initialization failed" >&2
+            fi
+            after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
+            max_db="$(printf '%s\n' "$after" | playback_db_values | max_db_value)"
+            if [[ -n "$max_db" ]] && awk -v value="$max_db" 'BEGIN { exit !(value <= 0.0001) }'; then
+                echo "ALSA card $card: '$control' hardware level = ${max_db} dB (safe unity ceiling)"
+                applied=1
+                continue
+            fi
         fi
 
         if [[ -n "$original_raw" ]] && amixer -q -c "$card" sset "$control" "$original_raw" >/dev/null 2>&1; then
