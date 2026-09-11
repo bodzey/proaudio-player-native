@@ -12,6 +12,7 @@ use crate::audio_backend::{
 };
 use crate::config::{effective_audio, AppConfig};
 use crate::output_gain::{BackendOutputGain, OutputGain};
+use crate::output_router::{ExternalOutputRouter, OutputDescriptor, OutputRouter};
 use crate::state::AudioSnapshot;
 
 #[derive(Clone)]
@@ -19,12 +20,18 @@ pub struct AudioEngine {
     config: Arc<AppConfig>,
     backend: Arc<dyn AudioBackend>,
     output_gain: Arc<dyn OutputGain>,
+    output_router: Arc<dyn OutputRouter>,
 }
 
 impl AudioEngine {
     pub fn new(config: Arc<AppConfig>, backend: Arc<dyn AudioBackend>) -> Self {
         let output_gain: Arc<dyn OutputGain> = Arc::new(BackendOutputGain::new(backend.clone()));
-        Self::with_output_gain(config, backend, output_gain)
+        let output_router: Arc<dyn OutputRouter> = Arc::new(ExternalOutputRouter::new(
+            backend.clone(),
+            config.audio.music_sink.clone(),
+            config.audio.alert_sink.clone(),
+        ));
+        Self::with_components(config, backend, output_gain, output_router)
     }
 
     pub fn with_output_gain(
@@ -32,10 +39,25 @@ impl AudioEngine {
         backend: Arc<dyn AudioBackend>,
         output_gain: Arc<dyn OutputGain>,
     ) -> Self {
+        let output_router: Arc<dyn OutputRouter> = Arc::new(ExternalOutputRouter::new(
+            backend.clone(),
+            config.audio.music_sink.clone(),
+            config.audio.alert_sink.clone(),
+        ));
+        Self::with_components(config, backend, output_gain, output_router)
+    }
+
+    pub fn with_components(
+        config: Arc<AppConfig>,
+        backend: Arc<dyn AudioBackend>,
+        output_gain: Arc<dyn OutputGain>,
+        output_router: Arc<dyn OutputRouter>,
+    ) -> Self {
         Self {
             config,
             backend,
             output_gain,
+            output_router,
         }
     }
 
@@ -55,8 +77,16 @@ impl AudioEngine {
         self.output_gain.backend_name()
     }
 
+    pub fn output_router_name(&self) -> &'static str {
+        self.output_router.backend_name()
+    }
+
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.backend.subscribe_changes()
+    }
+
+    pub fn subscribe_output_changes(&self) -> watch::Receiver<u64> {
+        self.output_router.subscribe_changes()
     }
 
     pub async fn sink_state(&self, sink: &str) -> Result<SinkState> {
@@ -65,6 +95,18 @@ impl AudioEngine {
 
     pub async fn list_sinks(&self) -> Result<Vec<SinkDescriptor>> {
         self.backend.list_sinks().await
+    }
+
+    pub async fn list_outputs(&self) -> Result<Vec<OutputDescriptor>> {
+        self.output_router.list_outputs().await
+    }
+
+    pub async fn active_output(&self) -> Result<OutputDescriptor> {
+        self.output_router.active_output().await
+    }
+
+    pub async fn select_output(&self, id: &str) -> Result<OutputDescriptor> {
+        self.output_router.select_output(id).await
     }
 
     pub async fn list_sink_inputs(&self) -> Result<Vec<StreamState>> {
