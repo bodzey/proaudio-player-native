@@ -1,6 +1,8 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
 use tokio::sync::{watch, Mutex};
@@ -11,6 +13,7 @@ use crate::audio_backend::{AudioBackend, BackendFuture, SinkDescriptor};
 pub const DEFAULT_MASTER_SINK: &str = "proaudio_player_master";
 const DEFAULT_OUTPUT_FILE: &str = "/var/lib/proaudio-player-alert/audio-output.env";
 const DEFAULT_STATE_FILE: &str = "/run/proaudio-player/proaudio-player-bus-modules";
+static OUTPUT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default)]
 pub struct OutputCapabilities {
@@ -134,14 +137,41 @@ impl ExternalOutputRouter {
         Self::read_key(&self.state_file, "PHYSICAL=").await
     }
 
+    fn temporary_output_file(&self) -> PathBuf {
+        let sequence = OUTPUT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        self.output_file.with_extension(format!(
+            "env.{}.{}.{}.tmp",
+            std::process::id(),
+            timestamp,
+            sequence
+        ))
+    }
+
     async fn write_configured_output(&self, output: Option<&str>) -> Result<()> {
         if let Some(output) = output {
             if let Some(parent) = self.output_file.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            let temporary = self.output_file.with_extension("env.tmp");
-            tokio::fs::write(&temporary, format!("PHYSICAL_SINK={output}\n")).await?;
-            tokio::fs::rename(&temporary, &self.output_file).await?;
+            let temporary = self.temporary_output_file();
+            let result = async {
+                tokio::fs::write(&temporary, format!("PHYSICAL_SINK={output}\n")).await?;
+                tokio::fs::set_permissions(
+                    &temporary,
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .await?;
+                tokio::fs::rename(&temporary, &self.output_file).await?;
+                Ok::<(), std::io::Error>(())
+            }
+            .await;
+            if result.is_err() {
+                let _ = tokio::fs::remove_file(&temporary).await;
+            }
+            result?;
         } else if tokio::fs::try_exists(&self.output_file).await.unwrap_or(false) {
             tokio::fs::remove_file(&self.output_file).await?;
         }
