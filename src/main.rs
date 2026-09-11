@@ -94,8 +94,31 @@ fn runtime(
     Ok((store, state, audio, provider))
 }
 
+async fn restore_mixer_when_ready(audio: &AudioEngine) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 1..=30 {
+        match audio.restore_user_mixer().await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt < 30 {
+                    sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("не вдалося відновити mixer state")))
+}
+
 async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     let (store, state, audio, provider) = runtime(config.clone())?;
+
+    // Logical buses are systemd-owned and start before the daemon, but the Pulse
+    // client can race their registration by a few hundred milliseconds. Restore
+    // persisted user gain only after all three logical sinks are addressable.
+    restore_mixer_when_ready(&audio).await?;
+    let _mixer_state_writer = audio.start_mixer_state_writer();
+
     let alert_controller = AlertController::new(
         config.clone(),
         provider,
