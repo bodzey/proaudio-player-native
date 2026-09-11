@@ -176,9 +176,10 @@ impl SourceArbiter {
             }
         }
 
-        // Receiver processes are transport endpoints. Terminating AirPlay/DLNA
-        // disconnects the losing sender; systemd immediately starts a clean receiver.
-        if matches!(key, "airplay" | "dlna") {
+        // Network receivers are transport endpoints. Once another source wins,
+        // terminate the losing receiver so stale transport state cannot become
+        // audible again later. systemd immediately starts a clean receiver.
+        if matches!(key, "spotify" | "airplay" | "dlna") {
             for stream in streams {
                 let pid = stream.property("application.process.id");
                 if !pid.is_empty() && pid.chars().all(|character| character.is_ascii_digit()) {
