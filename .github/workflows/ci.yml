@@ -26,6 +26,13 @@ jobs:
           grep -Eq 'replay_gain_handler[[:space:]]+"none"' config/mpd.conf
           grep -Eq '^volume_controller[[:space:]]*=[[:space:]]*"none"' config/spotifyd.conf
           grep -Eq 'ignore_volume_control[[:space:]]*=[[:space:]]*"yes"' config/shairport-sync.conf
+      - name: Check processing-rate authority
+        run: |
+          grep -Eq '^SAMPLE_RATE=[0-9]+$' config/audio.env.example
+          if grep -Eq '^[[:space:]]+(sample_rate_mode|sample_rate|allowed_sample_rates):' config/config.yaml.example; then
+            echo 'audio.env must remain the single processing-rate authority' >&2
+            exit 1
+          fi
       - name: Install PulseAudio client development files
         run: |
           sudo apt-get update
