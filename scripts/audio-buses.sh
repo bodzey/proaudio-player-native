@@ -28,6 +28,13 @@ acquire_lock() {
     trap 'rmdir "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT INT TERM
 }
 
+require_pulse_server() {
+    if ! pactl info >/dev/null 2>&1; then
+        echo "PipeWire-Pulse недоступний; запуск аудіографа припинено" >&2
+        return 1
+    fi
+}
+
 physical_candidates() {
     pactl list short sinks |
         awk -v music="$MUSIC_SINK" -v alert="$ALERT_SINK" -v master="$MASTER_SINK" '
@@ -53,6 +60,8 @@ find_physical_sink() {
 }
 
 wait_for_physical_sink() {
+    require_pulse_server
+
     local deadline=$((SECONDS + SINK_WAIT_SECONDS))
     local physical=""
     while ((SECONDS <= deadline)); do
@@ -262,17 +271,22 @@ sink_input_for_module() {
 set_loopback_gain_db() {
     local module="$1" db="$2" label="$3"
     local input=""
-    local attempt
 
-    for attempt in $(seq 1 50); do
+    # pactl load-module returns only after the loopback module is instantiated, so
+    # the corresponding sink-input should already exist. Allow one short delayed
+    # retry for PipeWire scheduling, but never spin up dozens of short-lived Pulse
+    # clients: that can exhaust pipewire-pulse file descriptors on embedded builds.
+    input="$(sink_input_for_module "$module" || true)"
+    if ! [[ "$input" =~ ^[0-9]+$ ]]; then
+        sleep 0.1
         input="$(sink_input_for_module "$module" || true)"
-        if [[ "$input" =~ ^[0-9]+$ ]]; then
-            pactl set-sink-input-volume "$input" "${db}dB"
-            echo "$label gain = ${db} dB (sink-input $input)"
-            return 0
-        fi
-        sleep 0.05
-    done
+    fi
+
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        pactl set-sink-input-volume "$input" "${db}dB"
+        echo "$label gain = ${db} dB (sink-input $input)"
+        return 0
+    fi
 
     echo "Не вдалося знайти sink-input для $label module $module" >&2
     return 1
@@ -329,22 +343,33 @@ start_buses() {
         "$physical" "$master_bus" "$music_bus" "$alert_bus" \
         "$music_loop" "$alert_loop" "$output_loop"
 
-    set_loopback_gain_db "$alert_loop" "$ALERT_MIX_HEADROOM_DB" "ALERT->MASTER"
-    set_loopback_gain_db "$output_loop" "$OUTPUT_HEADROOM_DB" "MASTER->OUTPUT"
+    if ! set_loopback_gain_db "$alert_loop" "$ALERT_MIX_HEADROOM_DB" "ALERT->MASTER"; then
+        unload_saved_modules
+        return 1
+    fi
+    if ! set_loopback_gain_db "$output_loop" "$OUTPUT_HEADROOM_DB" "MASTER->OUTPUT"; then
+        unload_saved_modules
+        return 1
+    fi
 
-    pactl set-default-sink "$MUSIC_SINK"
-    pactl set-sink-volume "$MUSIC_SINK" 100%
-    pactl set-sink-volume "$ALERT_SINK" 100%
-    pactl set-sink-volume "$MASTER_SINK" 100%
-    pactl set-sink-mute "$MUSIC_SINK" 0
-    pactl set-sink-mute "$ALERT_SINK" 0
-    pactl set-sink-mute "$MASTER_SINK" 0
+    if ! pactl set-default-sink "$MUSIC_SINK" \
+        || ! pactl set-sink-volume "$MUSIC_SINK" 100% \
+        || ! pactl set-sink-volume "$ALERT_SINK" 100% \
+        || ! pactl set-sink-volume "$MASTER_SINK" 100% \
+        || ! pactl set-sink-mute "$MUSIC_SINK" 0 \
+        || ! pactl set-sink-mute "$ALERT_SINK" 0 \
+        || ! pactl set-sink-mute "$MASTER_SINK" 0; then
+        echo "Не вдалося завершити ініціалізацію аудіографа; створені модулі видаляються" >&2
+        unload_saved_modules
+        return 1
+    fi
 
     echo "MUSIC + ALERT -> $MASTER_SINK -> $physical (PipeWire/Pulse graph)"
 }
 
 switch_output() {
     validate_audio_bus_config
+    require_pulse_server
 
     local physical old_physical old_output_loop new_output_loop
     local master_bus music_bus alert_bus music_loop alert_loop master_mute
