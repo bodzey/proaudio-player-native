@@ -219,7 +219,7 @@ impl OutputRouter for ExternalOutputRouter {
         Box::pin(async move {
             let _guard = self.control_lock.lock().await;
             let id = id.trim();
-            if id.is_empty() || id.contains(['\n', '\r', '\0']) {
+            if id.is_empty() || id.chars().any(|value| matches!(value, '\n' | '\r' | '\0')) {
                 bail!("Некоректний ідентифікатор аудіовиходу");
             }
 
