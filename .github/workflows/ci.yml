@@ -46,7 +46,7 @@ jobs:
           sudo apt-get install -y busybox libpulse-dev pkg-config
       - name: Check BusyBox awk loopback lookup
         run: |
-          result="$(printf 'Sink Input #123\n\tOwner Module: 456\n' | busybox awk -v wanted=456 '
+          result="$(busybox awk -v wanted=456 '
             /^Sink Input #[0-9]+/ {
               input_index=$3
               sub(/^#/, "", input_index)
@@ -55,8 +55,15 @@ jobs:
             /^[[:space:]]*Owner Module:/ && $3 == wanted {
               print input_index
               exit
-            }')"
+            }' tests/fixtures/pulse-sink-inputs.txt)"
           test "$result" = 123
+      - name: Check bounded Pulse setup polling
+        run: |
+          if grep -Eq 'seq[[:space:]]+1[[:space:]]+[1-9][0-9]+' scripts/audio-buses.sh; then
+            echo 'audio setup must not create high-rate pactl retry storms' >&2
+            exit 1
+          fi
+          grep -Fq 'PipeWire-Pulse недоступний; запуск аудіографа припинено' scripts/audio-buses.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
