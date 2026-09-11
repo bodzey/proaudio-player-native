@@ -18,9 +18,6 @@ audio:
   alert_volume_percent: 100
   default_restore_volume_percent: 100
   alert_repeat_interval_minutes: 0
-  sample_rate_mode: "fixed"
-  sample_rate: 48000
-  allowed_sample_rates: [44100, 48000]
   duck_only_during_announcement: false
   start_file: "/usr/share/proaudio-player/announcements/alarm_start.mp3"
   end_file: "/usr/share/proaudio-player/announcements/alarm_end.mp3"
