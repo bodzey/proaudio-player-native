@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::f32::consts::PI;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,9 @@ use pa::volume::{ChannelVolumes, Volume};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_SLEEP: Duration = Duration::from_millis(1);
 const MAX_CHANNELS: usize = 8;
+const FIR_TAPS: usize = 32;
+const FIR_TARGET_INDEX: usize = FIR_TAPS / 2 - 1;
+const DETECTOR_DELAY_FRAMES: usize = FIR_TAPS - 1 - FIR_TARGET_INDEX;
 type Frame = [f32; MAX_CHANNELS];
 
 #[derive(Debug, Parser)]
@@ -54,7 +58,7 @@ struct Args {
     #[arg(long, default_value_t = 100.0)]
     release_ms: f32,
 
-    /// Intersample peak estimator resolution. Supported: 1, 2, 4, 8.
+    /// FIR intersample peak estimator resolution. Supported: 1, 2, 4, 8.
     #[arg(long, default_value_t = 4)]
     oversample: usize,
 }
@@ -65,14 +69,57 @@ struct BufferedFrame {
     sequence: u64,
 }
 
+struct PeakEstimator {
+    channels: usize,
+    phases: Vec<[f32; FIR_TAPS]>,
+    history: VecDeque<Frame>,
+}
+
+impl PeakEstimator {
+    fn new(channels: usize, oversample: usize) -> Self {
+        let phases = (0..oversample)
+            .map(|phase| interpolation_kernel(phase, oversample))
+            .collect();
+        let mut history = VecDeque::with_capacity(FIR_TAPS);
+        for _ in 0..FIR_TAPS - 1 {
+            history.push_back([0.0; MAX_CHANNELS]);
+        }
+        Self {
+            channels,
+            phases,
+            history,
+        }
+    }
+
+    fn push(&mut self, frame: Frame) -> f32 {
+        self.history.push_back(frame);
+        if self.history.len() > FIR_TAPS {
+            self.history.pop_front();
+        }
+        debug_assert_eq!(self.history.len(), FIR_TAPS);
+
+        let mut peak = 0.0_f32;
+        for kernel in &self.phases {
+            for channel in 0..self.channels {
+                let mut value = 0.0_f32;
+                for (tap, coefficients) in kernel.iter().enumerate() {
+                    value += self.history[tap][channel] * coefficients;
+                }
+                peak = peak.max(value.abs());
+            }
+        }
+        peak
+    }
+}
+
 struct SafetyLimiter {
     enabled: bool,
     channels: usize,
     ceiling: f32,
     lookahead_frames: usize,
+    total_delay_frames: usize,
     release_decay: f32,
-    oversample: usize,
-    history: [Frame; 4],
+    estimator: PeakEstimator,
     delayed: VecDeque<BufferedFrame>,
     peak_window: VecDeque<(u64, f32)>,
     next_sequence: u64,
@@ -104,16 +151,18 @@ impl SafetyLimiter {
             .max(1);
         let release_frames = args.rate as f32 * args.release_ms / 1_000.0;
         let release_decay = (-1.0 / release_frames.max(1.0)).exp();
+        let channels = args.channels as usize;
+        let total_delay_frames = lookahead_frames + DETECTOR_DELAY_FRAMES;
 
         Ok(Self {
             enabled: args.enabled,
-            channels: args.channels as usize,
+            channels,
             ceiling: 10.0_f32.powf(args.ceiling_db / 20.0),
             lookahead_frames,
+            total_delay_frames,
             release_decay,
-            oversample: args.oversample,
-            history: [[0.0; MAX_CHANNELS]; 4],
-            delayed: VecDeque::with_capacity(lookahead_frames + 8),
+            estimator: PeakEstimator::new(channels, args.oversample),
+            delayed: VecDeque::with_capacity(total_delay_frames + 8),
             peak_window: VecDeque::with_capacity(lookahead_frames + 8),
             next_sequence: 0,
             gain: 1.0,
@@ -150,40 +199,38 @@ impl SafetyLimiter {
     }
 
     fn push_frame(&mut self, frame: Frame) -> Option<Frame> {
-        self.history[0] = self.history[1];
-        self.history[1] = self.history[2];
-        self.history[2] = self.history[3];
-        self.history[3] = frame;
-
-        let peak = intersample_peak(
-            &self.history[0],
-            &self.history[1],
-            &self.history[2],
-            &self.history[3],
-            self.channels,
-            self.oversample,
-        );
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.delayed.push_back(BufferedFrame {
-            samples: self.history[1],
-            sequence,
-        });
+        self.delayed.push_back(BufferedFrame { samples: frame, sequence });
 
-        // Monotonic deque: the largest peak in the complete lookahead window is
-        // always at the front, so processing remains O(1) per PCM frame even at
-        // high sample rates and long lookahead settings.
+        // A 32-tap, phase-normalized windowed-sinc interpolator estimates the
+        // continuous-time peak between PCM samples. Its fixed group delay is
+        // absorbed into the limiter delay, so gain reduction still arrives before
+        // the corresponding audio frame reaches the physical output.
+        let peak = self.estimator.push(frame);
+        if sequence >= DETECTOR_DELAY_FRAMES as u64 {
+            let peak_sequence = sequence - DETECTOR_DELAY_FRAMES as u64;
+            while self
+                .peak_window
+                .back()
+                .is_some_and(|(_, buffered_peak)| *buffered_peak <= peak)
+            {
+                self.peak_window.pop_back();
+            }
+            self.peak_window.push_back((peak_sequence, peak));
+        }
+
+        if self.delayed.len() <= self.total_delay_frames {
+            return None;
+        }
+
+        let buffered = *self.delayed.front()?;
         while self
             .peak_window
-            .back()
-            .is_some_and(|(_, buffered_peak)| *buffered_peak <= peak)
+            .front()
+            .is_some_and(|(peak_sequence, _)| *peak_sequence < buffered.sequence)
         {
-            self.peak_window.pop_back();
-        }
-        self.peak_window.push_back((sequence, peak));
-
-        if self.delayed.len() <= self.lookahead_frames {
-            return None;
+            self.peak_window.pop_front();
         }
 
         let future_peak = self
@@ -197,60 +244,53 @@ impl SafetyLimiter {
             1.0
         };
 
-        // Linked limiter: every channel receives exactly the same attenuation.
-        // Attack is instantaneous because lookahead sees the future peak. Release
-        // approaches unity exponentially and can never cross into positive gain.
+        // Linked limiter: every channel receives the same attenuation. Attack is
+        // instantaneous through lookahead. During release, gain may approach the
+        // currently safe target but never cross it and never exceed unity.
         if target < self.gain {
             self.gain = target;
         } else {
-            self.gain = 1.0 - (1.0 - self.gain) * self.release_decay;
-            self.gain = self.gain.min(1.0);
+            let released = 1.0 - (1.0 - self.gain) * self.release_decay;
+            self.gain = released.min(target).min(1.0);
         }
 
         let buffered = self.delayed.pop_front()?;
-        if self
-            .peak_window
-            .front()
-            .is_some_and(|(sequence, _)| *sequence == buffered.sequence)
-        {
-            self.peak_window.pop_front();
-        }
-
         let mut output = buffered.samples;
         for sample in output.iter_mut().take(self.channels) {
-            // The final clamp is a fail-safe for interpolation/rounding error. It
-            // should be inactive during normal lookahead limiting.
+            // Sample clamp is only a final numerical fail-safe; normal protection
+            // comes from the linked FIR/lookahead gain envelope above.
             *sample = (*sample * self.gain).clamp(-self.ceiling, self.ceiling);
         }
         Some(output)
     }
 }
 
-fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    0.5 * ((2.0 * p1)
-        + (-p0 + p2) * t
-        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
-}
+fn interpolation_kernel(phase: usize, oversample: usize) -> [f32; FIR_TAPS] {
+    let fraction = phase as f32 / oversample as f32;
+    let mut kernel = [0.0_f32; FIR_TAPS];
+    let mut sum = 0.0_f32;
 
-fn intersample_peak(
-    p0: &Frame,
-    p1: &Frame,
-    p2: &Frame,
-    p3: &Frame,
-    channels: usize,
-    oversample: usize,
-) -> f32 {
-    let mut peak = 0.0_f32;
-    for channel in 0..channels {
-        for step in 0..=oversample {
-            let t = step as f32 / oversample as f32;
-            peak = peak.max(catmull_rom(p0[channel], p1[channel], p2[channel], p3[channel], t).abs());
+    for (tap, coefficient) in kernel.iter_mut().enumerate() {
+        let offset = tap as isize - FIR_TARGET_INDEX as isize;
+        let x = offset as f32 - fraction;
+        let sinc = if x.abs() < 1.0e-7 {
+            1.0
+        } else {
+            (PI * x).sin() / (PI * x)
+        };
+        let position = tap as f32 / (FIR_TAPS - 1) as f32;
+        let window = 0.42 - 0.5 * (2.0 * PI * position).cos()
+            + 0.08 * (4.0 * PI * position).cos();
+        *coefficient = sinc * window;
+        sum += *coefficient;
+    }
+
+    if sum.abs() > 1.0e-12 {
+        for coefficient in &mut kernel {
+            *coefficient /= sum;
         }
     }
-    peak
+    kernel
 }
 
 fn iterate_once(mainloop: &mut Mainloop, context: &PulseContext) -> Result<()> {
@@ -402,7 +442,7 @@ fn run(args: Args) -> Result<()> {
     wait_for_streams(&mut mainloop, &context, &record, &playback)?;
 
     eprintln!(
-        "output limiter: source={} sink={} rate={} channels={} enabled={} ceiling={:.2}dB lookahead={:.2}ms release={:.1}ms intersample={}x",
+        "output limiter: source={} sink={} rate={} channels={} enabled={} ceiling={:.2}dBTP lookahead={:.2}ms release={:.1}ms FIR={}x/{}tap",
         args.source,
         args.sink,
         args.rate,
@@ -411,7 +451,8 @@ fn run(args: Args) -> Result<()> {
         args.ceiling_db,
         args.lookahead_ms,
         args.release_ms,
-        args.oversample
+        args.oversample,
+        FIR_TAPS
     );
 
     let frame_bytes = limiter.frame_bytes();
@@ -487,10 +528,19 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_kernels_preserve_dc() {
+        for phase in 0..4 {
+            let kernel = interpolation_kernel(phase, 4);
+            let sum = kernel.iter().sum::<f32>();
+            assert!((sum - 1.0).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
     fn limiter_never_amplifies() {
         let mut limiter = SafetyLimiter::new(&args()).unwrap();
         let mut maximum = 0.0_f32;
-        for _ in 0..256 {
+        for _ in 0..512 {
             if let Some(frame) = limiter.push_frame(stereo(0.25, -0.25)) {
                 maximum = maximum.max(frame[0].abs()).max(frame[1].abs());
             }
@@ -504,7 +554,7 @@ mod tests {
         let ceiling = 10.0_f32.powf(cfg.ceiling_db / 20.0);
         let mut limiter = SafetyLimiter::new(&cfg).unwrap();
         let mut seen = 0;
-        for _ in 0..512 {
+        for _ in 0..768 {
             if let Some(frame) = limiter.push_frame(stereo(1.5, -1.5)) {
                 for sample in frame.iter().take(2) {
                     assert!(sample.abs() <= ceiling + 1e-6);
@@ -519,8 +569,8 @@ mod tests {
     fn linked_channels_share_gain_reduction() {
         let mut limiter = SafetyLimiter::new(&args()).unwrap();
         let mut observed = false;
-        for index in 0..512 {
-            let hot = if index > 80 { 1.5 } else { 0.25 };
+        for index in 0..768 {
+            let hot = if index > 100 { 1.5 } else { 0.25 };
             if let Some(frame) = limiter.push_frame(stereo(hot, 0.5)) {
                 if frame[0].abs() > 0.5 {
                     assert!(frame[1].abs() < 0.5);
@@ -533,12 +583,26 @@ mod tests {
     }
 
     #[test]
+    fn sustained_peak_never_releases_above_required_gain() {
+        let cfg = args();
+        let ceiling = 10.0_f32.powf(cfg.ceiling_db / 20.0);
+        let mut limiter = SafetyLimiter::new(&cfg).unwrap();
+        for _ in 0..2_000 {
+            if let Some(frame) = limiter.push_frame(stereo(1.2, 1.2)) {
+                assert!(frame[0].abs() <= ceiling + 1e-6);
+                assert!(frame[1].abs() <= ceiling + 1e-6);
+            }
+        }
+    }
+
+    #[test]
     fn lookahead_storage_stays_bounded() {
         let mut limiter = SafetyLimiter::new(&args()).unwrap();
         for _ in 0..10_000 {
             let _ = limiter.push_frame(stereo(0.1, -0.1));
-            assert!(limiter.delayed.len() <= limiter.lookahead_frames);
+            assert!(limiter.delayed.len() <= limiter.total_delay_frames);
             assert!(limiter.peak_window.len() <= limiter.lookahead_frames + 1);
+            assert!(limiter.estimator.history.len() <= FIR_TAPS);
         }
     }
 
