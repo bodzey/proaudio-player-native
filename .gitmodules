@@ -1,4 +1,0 @@
-[submodule "webui"]
-	path = webui
-	url = ../proaudio-player-webui.git
-	branch = feature/universal-audio-backend
