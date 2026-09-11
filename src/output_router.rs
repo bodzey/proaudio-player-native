@@ -291,13 +291,16 @@ impl OutputRouter for ExternalOutputRouter {
                 return Ok(Self::describe(selected, true));
             }
 
-            let previous = self.configured_output().await.or(self.routed_output().await);
+            // Roll back the persisted selection, not the transient AUTO fallback.
+            // If AUTO was active before this request, a failed switch must keep AUTO
+            // instead of silently pinning the currently routed physical sink.
+            let previous_configured = self.configured_output().await;
             self.write_configured_output(Some(id)).await?;
             if self.wait_for_routed_output(id).await {
                 return Ok(Self::describe(selected, true));
             }
 
-            self.write_configured_output(previous.as_deref()).await?;
+            self.write_configured_output(previous_configured.as_deref()).await?;
             bail!("Не вдалося підтвердити перемикання аудіовиходу; попередній вибір відновлено")
         })
     }

@@ -13,8 +13,11 @@ load_config() {
         source "$AUDIO_ENV"
     fi
     if [[ -f "$OUTPUT_ENV" ]]; then
-        # shellcheck disable=SC1090
-        source "$OUTPUT_ENV"
+        local configured
+        configured="$(awk -F= '$1 == "PHYSICAL_SINK" { print substr($0, index($0, "=") + 1); exit }' "$OUTPUT_ENV")"
+        if [[ -n "$configured" ]]; then
+            PHYSICAL_SINK="$configured"
+        fi
     fi
     export MUSIC_SINK ALERT_SINK MASTER_SINK SAMPLE_RATE AUDIO_CHANNELS
     export LOOPBACK_LATENCY_MSEC OUTPUT_VOLUME_PERCENT HARDWARE_MIXER_MODE SINK_WAIT_SECONDS

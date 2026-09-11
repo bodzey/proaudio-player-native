@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use libpulse_binding as pa;
 use pa::context::{Context as PulseContext, FlagSet as ContextFlagSet, State as ContextState};
+use pa::def::BufferAttr;
 use pa::mainloop::standard::{IterateResult, Mainloop};
 use pa::proplist::{properties::APPLICATION_NAME, Proplist};
 use pa::sample::{Format, Spec};
@@ -19,6 +20,9 @@ const MAX_CHANNELS: usize = 8;
 const FIR_TAPS: usize = 32;
 const FIR_TARGET_INDEX: usize = FIR_TAPS / 2 - 1;
 const DETECTOR_DELAY_FRAMES: usize = FIR_TAPS - 1 - FIR_TARGET_INDEX;
+const RECORD_FRAGMENT_MS: u32 = 20;
+const PLAYBACK_TARGET_MS: u32 = 40;
+const PLAYBACK_MINREQ_MS: u32 = 10;
 type Frame = [f32; MAX_CHANNELS];
 
 #[derive(Debug, Parser)]
@@ -293,6 +297,37 @@ fn interpolation_kernel(phase: usize, oversample: usize) -> [f32; FIR_TAPS] {
     kernel
 }
 
+fn pcm_bytes_for_ms(rate: u32, channels: u8, milliseconds: u32) -> u32 {
+    let frame_bytes = u64::from(channels) * std::mem::size_of::<f32>() as u64;
+    let bytes = u64::from(rate)
+        .saturating_mul(frame_bytes)
+        .saturating_mul(u64::from(milliseconds))
+        / 1_000;
+    bytes.max(frame_bytes).min(u64::from(u32::MAX)) as u32
+}
+
+fn limiter_buffer_attrs(args: &Args) -> (BufferAttr, BufferAttr) {
+    let record_fragment = pcm_bytes_for_ms(args.rate, args.channels, RECORD_FRAGMENT_MS);
+    let playback_target = pcm_bytes_for_ms(args.rate, args.channels, PLAYBACK_TARGET_MS);
+    let playback_minreq = pcm_bytes_for_ms(args.rate, args.channels, PLAYBACK_MINREQ_MS);
+    (
+        BufferAttr {
+            maxlength: u32::MAX,
+            tlength: u32::MAX,
+            prebuf: u32::MAX,
+            minreq: u32::MAX,
+            fragsize: record_fragment,
+        },
+        BufferAttr {
+            maxlength: u32::MAX,
+            tlength: playback_target,
+            prebuf: 0,
+            minreq: playback_minreq,
+            fragsize: u32::MAX,
+        },
+    )
+}
+
 fn iterate_once(mainloop: &mut Mainloop, context: &PulseContext) -> Result<()> {
     match mainloop.iterate(false) {
         IterateResult::Success(_) => {}
@@ -420,9 +455,17 @@ fn run(args: Args) -> Result<()> {
         .context("failed to create limiter capture stream")?;
     let mut playback = Stream::new(&mut context, "limited-output", &spec, None)
         .context("failed to create limiter playback stream")?;
+    let (record_attr, playback_attr) = limiter_buffer_attrs(&args);
 
+    // PipeWire-Pulse defaults unspecified Pulse buffers to very large media-player
+    // values (typically seconds). The limiter is part of the realtime signal path,
+    // so request bounded latency explicitly instead of inheriting those defaults.
     record
-        .connect_record(Some(&args.source), None, StreamFlagSet::NOFLAGS)
+        .connect_record(
+            Some(&args.source),
+            Some(&record_attr),
+            StreamFlagSet::ADJUST_LATENCY,
+        )
         .with_context(|| format!("failed to connect limiter to source {}", args.source))?;
 
     // The limiter is an internal transport, not a user gain stage. Pin its
@@ -433,8 +476,8 @@ fn run(args: Args) -> Result<()> {
     playback
         .connect_playback(
             Some(&args.sink),
-            None,
-            StreamFlagSet::NOFLAGS,
+            Some(&playback_attr),
+            StreamFlagSet::ADJUST_LATENCY,
             Some(&unity),
             None,
         )
@@ -442,7 +485,7 @@ fn run(args: Args) -> Result<()> {
     wait_for_streams(&mut mainloop, &context, &record, &playback)?;
 
     eprintln!(
-        "output limiter: source={} sink={} rate={} channels={} enabled={} ceiling={:.2}dBTP lookahead={:.2}ms/{}f release={:.1}ms FIR={}x/{}tap",
+        "output limiter: source={} sink={} rate={} channels={} enabled={} ceiling={:.2}dBTP lookahead={:.2}ms/{}f release={:.1}ms FIR={}x/{}tap pulse-buffer={}ms-record/{}ms-playback",
         args.source,
         args.sink,
         args.rate,
@@ -453,7 +496,9 @@ fn run(args: Args) -> Result<()> {
         limiter.lookahead_frames,
         args.release_ms,
         args.oversample,
-        FIR_TAPS
+        FIR_TAPS,
+        RECORD_FRAGMENT_MS,
+        PLAYBACK_TARGET_MS
     );
 
     let frame_bytes = limiter.frame_bytes();
@@ -605,6 +650,25 @@ mod tests {
             assert!(limiter.peak_window.len() <= limiter.lookahead_frames + 1);
             assert!(limiter.estimator.history.len() <= FIR_TAPS);
         }
+    }
+
+    #[test]
+    fn pulse_buffer_request_is_low_latency_and_frame_aligned() {
+        let cfg = args();
+        let frame_bytes = u32::from(cfg.channels) * std::mem::size_of::<f32>() as u32;
+        let (record, playback) = limiter_buffer_attrs(&cfg);
+        assert_eq!(record.fragsize % frame_bytes, 0);
+        assert_eq!(playback.tlength % frame_bytes, 0);
+        assert_eq!(playback.minreq % frame_bytes, 0);
+        assert_eq!(
+            record.fragsize,
+            pcm_bytes_for_ms(cfg.rate, cfg.channels, RECORD_FRAGMENT_MS)
+        );
+        assert_eq!(
+            playback.tlength,
+            pcm_bytes_for_ms(cfg.rate, cfg.channels, PLAYBACK_TARGET_MS)
+        );
+        assert_eq!(playback.prebuf, 0);
     }
 
     #[test]

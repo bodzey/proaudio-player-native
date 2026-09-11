@@ -13,23 +13,50 @@ source_services=(
     proaudio-player-spotifyd.service
 )
 
-existing_sources=()
-for service in "${source_services[@]}"; do
-    [[ -f "/usr/lib/systemd/system/$service" ]] && existing_sources+=("$service")
-done
+support_services=(
+    proaudio-player-limiter.service
+    proaudio-player-output-watch.service
+    proaudio-player-audio-output.path
+    proaudio-player-limiter.path
+)
+
+existing_units() {
+    local unit
+    for unit in "$@"; do
+        [[ -f "/usr/lib/systemd/system/$unit" ]] && printf '%s\n' "$unit"
+    done
+}
+
+mapfile -t existing_sources < <(existing_units "${source_services[@]}")
+mapfile -t existing_support < <(existing_units "${support_services[@]}")
+
+start_units() {
+    (($# == 0)) || systemctl start "$@"
+}
+
+stop_units() {
+    (($# == 0)) || systemctl stop "$@"
+}
 
 case "${1:-}" in
     start)
-        systemctl start proaudio-player-buses.service "${existing_sources[@]}" "$NATIVE_SERVICE"
+        systemctl start proaudio-player-buses.service
+        start_units "${existing_support[@]}"
+        start_units "${existing_sources[@]}"
+        systemctl start "$NATIVE_SERVICE"
         ;;
     stop)
-        systemctl stop "$NATIVE_SERVICE" "${existing_sources[@]}" proaudio-player-buses.service
+        systemctl stop "$NATIVE_SERVICE"
+        stop_units "${existing_sources[@]}"
+        stop_units "${existing_support[@]}"
+        systemctl stop proaudio-player-buses.service
         ;;
     restart)
-        systemctl restart proaudio-player-buses.service "${existing_sources[@]}" "$NATIVE_SERVICE"
+        "$0" stop
+        "$0" start
         ;;
     services)
-        systemctl --no-pager status proaudio-player-buses.service "${existing_sources[@]}" "$NATIVE_SERVICE"
+        systemctl --no-pager status proaudio-player-buses.service "${existing_support[@]}" "${existing_sources[@]}" "$NATIVE_SERVICE"
         ;;
     status)
         /usr/bin/proaudio-player-native --config "$CONFIG" status
