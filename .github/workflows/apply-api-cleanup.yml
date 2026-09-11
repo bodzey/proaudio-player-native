@@ -1,0 +1,115 @@
+name: Apply API cleanup
+
+on:
+  push:
+    branches:
+      - feature/universal-audio-backend
+    paths:
+      - .github/workflows/apply-api-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/universal-audio-backend
+
+      - name: Apply exact API cleanup
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/api/backend.rs')
+          text = path.read_text()
+
+          dead = '''    pub async fn primary_hardware_mixer(&self) -> Result<Value> {
+              let mixers = self.hardware_mixers().await?;
+              let selected_card = self.audio_outputs().await.ok().and_then(|outputs| {
+                  outputs
+                      .into_iter()
+                      .find(|item| item.get("selected").and_then(Value::as_bool) == Some(true))
+                      .and_then(|item| item.get("alsa_card").and_then(Value::as_u64))
+              });
+              let candidates = mixers
+                  .iter()
+                  .filter(|item| {
+                      selected_card.is_none() || item.get("card").and_then(Value::as_u64) == selected_card
+                  })
+                  .collect::<Vec<_>>();
+              ["Master", "Headphone", "PCM", "Speaker"]
+                  .iter()
+                  .find_map(|preferred| {
+                      candidates
+                          .iter()
+                          .find(|item| item.get("control").and_then(Value::as_str) == Some(*preferred))
+                          .copied()
+                  })
+                  .or_else(|| candidates.first().copied())
+                  .cloned()
+                  .ok_or_else(|| {
+                      if let Some(card) = selected_card {
+                          anyhow!(
+                              "Вибраний ALSA-пристрій card {card} не має апаратного регулятора гучності"
+                          )
+                      } else {
+                          anyhow!("Апаратний ALSA-регулятор не знайдено")
+                      }
+                  })
+          }
+
+'''
+          if dead not in text:
+              raise SystemExit('primary_hardware_mixer block not found')
+          text = text.replace(dead, '', 1)
+
+          old_player = '''async fn player(
+              State(controller): State<WebController>,
+              Json(body): Json<PlayerBody>,
+          ) -> ApiResult {
+              if !PLAYER_ACTIONS.contains(&body.action.as_str()) {
+                  return Err(api_error(StatusCode::BAD_REQUEST, "Невідома дія"));
+              }
+              controller
+                  .control_active_player(&body.action)
+                  .await
+                  .map(Json)
+                  .map_err(map_conflict)
+          }
+'''
+          new_player = '''async fn player(
+              State(controller): State<WebController>,
+              Json(body): Json<PlayerBody>,
+          ) -> ApiResult {
+              if !PLAYER_ACTIONS.contains(&body.action.as_str()) {
+                  return Err(api_error(StatusCode::BAD_REQUEST, "Невідома дія"));
+              }
+              controller
+                  .ensure_controls_available()
+                  .await
+                  .map_err(map_conflict)?;
+              controller
+                  .control_active_player(&body.action)
+                  .await
+                  .map(Json)
+                  .map_err(map_internal)
+          }
+'''
+          if old_player not in text:
+              raise SystemExit('player handler block not found')
+          text = text.replace(old_player, new_player, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Commit cleanup
+        run: |
+          git config user.name "Bohdan Cherniak"
+          git config user.email "70845142+bodzey@users.noreply.github.com"
+          git add src/api/backend.rs
+          git diff --cached --check
+          git commit -m "fix(api): separate client conflicts from backend failures"
+          git push origin HEAD:feature/universal-audio-backend
