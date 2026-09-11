@@ -8,8 +8,6 @@ use tokio::sync::Mutex;
 use url::Url;
 
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
-const AVTRANSPORT_PORT: u16 = 49494;
-const AVTRANSPORT_PATH: &str = "/upnp/control/rendertransport1";
 const AVTRANSPORT_ENDPOINT: &str = "http://127.0.0.1:49494/upnp/control/rendertransport1";
 
 static CLIENT: OnceLock<DlnaClient> = OnceLock::new();
