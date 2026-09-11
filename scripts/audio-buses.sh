@@ -119,6 +119,10 @@ playback_db_values() {
     sed -n 's/.*Playback.*\[\([+-]\{0,1\}[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\)dB\].*/\1/p'
 }
 
+playback_raw_values() {
+    sed -n 's/.*Playback \(-\{0,1\}[0-9][0-9]*\) \[[0-9][0-9]*%\].*/\1/p' | paste -sd, -
+}
+
 max_db_value() {
     awk 'NR == 1 { max=$1 } $1 > max { max=$1 } END { if (NR) print max }'
 }
@@ -132,7 +136,7 @@ prepare_hardware_mixer() {
     fi
     command -v amixer >/dev/null 2>&1 || return 0
 
-    local card control details after max_db target applied=0
+    local card control details after max_db target original_raw applied=0
     card="$(alsa_card_for_sink "$physical" || true)"
     [[ "$card" =~ ^[0-9]+$ ]] || return 0
 
@@ -142,17 +146,23 @@ prepare_hardware_mixer() {
         details="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
         printf '%s\n' "$details" | grep -Eq 'Capabilities:.*[[:space:]]pvolume([[:space:]]|$)' || continue
         printf '%s\n' "$details" | playback_db_values | grep -q . || continue
+        original_raw="$(printf '%s\n' "$details" | playback_raw_values)"
 
         # The physical sink is muted by prepare_physical_sink while this probe runs.
         # Ask ALSA for 0 dB, then verify the actual quantized hardware value. If a
-        # coarse control rounded above unity, step the request below zero and verify
-        # again. Positive hardware gain is never left active.
+        # coarse control rounded above unity, request a negative value and verify
+        # again. Any failed probe is rolled back to the exact raw value we found.
         if ! amixer -q -c "$card" sset "$control" 0dB >/dev/null 2>&1; then
             continue
         fi
         after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
         max_db="$(printf '%s\n' "$after" | playback_db_values | max_db_value)"
-        [[ -n "$max_db" ]] || continue
+        [[ -n "$max_db" ]] || {
+            if [[ -n "$original_raw" ]]; then
+                amixer -q -c "$card" sset "$control" "$original_raw" >/dev/null 2>&1 || true
+            fi
+            continue
+        }
 
         if awk -v value="$max_db" 'BEGIN { exit !(value > 0.0) }'; then
             target="$(awk -v value="$max_db" 'BEGIN { printf "%.2fdB", -(value + 0.10) }')"
@@ -164,8 +174,14 @@ prepare_hardware_mixer() {
         if [[ -n "$max_db" ]] && awk -v value="$max_db" 'BEGIN { exit !(value <= 0.0001) }'; then
             echo "ALSA card $card: '$control' hardware level = ${max_db} dB (safe unity ceiling)"
             applied=1
+            continue
+        fi
+
+        if [[ -n "$original_raw" ]] && amixer -q -c "$card" sset "$control" "$original_raw" >/dev/null 2>&1; then
+            echo "ALSA card $card: '$control' не має надійного <= 0 dB unity; початковий raw-рівень відновлено" >&2
         else
-            echo "ALSA card $card: '$control' не вдалося безпечно обмежити до <= 0 dB; control пропущено" >&2
+            echo "ALSA card $card: '$control' не вдалося безпечно нормалізувати або відновити" >&2
+            return 1
         fi
     done < <(
         amixer -c "$card" scontrols 2>/dev/null |
