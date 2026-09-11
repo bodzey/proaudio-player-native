@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::pin::Pin;
@@ -32,6 +31,7 @@ use crate::config::{
 };
 use crate::dlna;
 use crate::fourstream;
+use crate::output_router::{OutputDescriptor, DEFAULT_MASTER_SINK};
 use crate::source_arbiter::SharedSourceState;
 
 use super::webui;
@@ -40,8 +40,6 @@ const API_VERSION: &str = "1";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const PLAYER_ACTIONS: &[&str] = &["play", "pause", "stop", "next", "prev"];
-const AUDIO_OUTPUT_FILE: &str = "/var/lib/proaudio-player-alert/audio-output.env";
-const AUDIO_BUS_STATE_FILE: &str = "/run/proaudio-player/proaudio-player-bus-modules";
 
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult = std::result::Result<Json<Value>, ApiError>;
@@ -131,6 +129,27 @@ fn clock_to_seconds(value: Option<&str>) -> Option<f64> {
         [hours, minutes, seconds] => Some((hours * 3600 + minutes * 60 + seconds) as f64),
         _ => None,
     }
+}
+
+fn output_value(output: &OutputDescriptor) -> Value {
+    json!({
+        "id": output.id,
+        "name": output.name,
+        "state": output.state,
+        "device_class": output.device_class,
+        "alsa_card": output.alsa_card,
+        "selected": output.selected,
+        "available": output.available,
+        "capabilities": {
+            "sample_format": output.capabilities.sample_format,
+            "sample_rate": output.capabilities.sample_rate,
+            "channels": output.capabilities.channels,
+            "channel_map": output.capabilities.channel_map,
+            "alsa_device": output.capabilities.alsa_device,
+            "device_api": output.capabilities.device_api,
+            "device_bus": output.capabilities.device_bus,
+        }
+    })
 }
 
 #[derive(Clone)]
@@ -366,164 +385,27 @@ impl WebController {
     }
 
     pub async fn physical_sink(&self) -> Result<String> {
-        let mut candidates = self
-            .audio
-            .list_sinks()
-            .await?
-            .into_iter()
-            .filter(|sink| {
-                let name = sink.state.name.as_str();
-                name != self.config.audio.music_sink
-                    && name != self.config.audio.alert_sink
-                    && name != "auto_null"
-                    && !name.starts_with("proaudio_player_")
-            })
-            .collect::<Vec<_>>();
-
-        if candidates.is_empty() {
-            bail!("Фізичний аудіовихід не знайдено");
-        }
-
-        // Firmware routing state is authoritative after hotplug. The native core
-        // intentionally does not prefer USB, I2S, PCI or any other hardware bus.
-        if let Ok(state) = fs::read_to_string(AUDIO_BUS_STATE_FILE) {
-            if let Some(active) = state
-                .lines()
-                .find_map(|line| line.strip_prefix("PHYSICAL="))
-                .map(str::trim)
-            {
-                if let Some(position) = candidates.iter().position(|sink| sink.state.name == active)
-                {
-                    return Ok(candidates.remove(position).state.name);
-                }
-            }
-        }
-
-        if let Some(configured) = Self::configured_output() {
-            if let Some(position) = candidates
-                .iter()
-                .position(|sink| sink.state.name == configured)
-            {
-                return Ok(candidates.remove(position).state.name);
-            }
-        }
-
-        // With no explicit platform policy, prefer the sink that is actually
-        // running. If there is still ambiguity, use a deterministic name order.
-        if let Some(position) = candidates
-            .iter()
-            .position(|sink| sink.state_name.eq_ignore_ascii_case("running"))
-        {
-            return Ok(candidates.remove(position).state.name);
-        }
-
-        candidates.sort_by(|left, right| left.state.name.cmp(&right.state.name));
-        Ok(candidates.remove(0).state.name)
-    }
-
-    fn configured_output() -> Option<String> {
-        fs::read_to_string(AUDIO_OUTPUT_FILE).ok().and_then(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix("PHYSICAL_SINK="))
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && *value != "AUTO")
-                .map(str::to_owned)
-        })
-    }
-
-    fn write_configured_output(output: Option<&str>) -> Result<()> {
-        let path = Path::new(AUDIO_OUTPUT_FILE);
-        if let Some(output) = output {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let temporary = path.with_extension("env.tmp");
-            fs::write(&temporary, format!("PHYSICAL_SINK={output}\n"))?;
-            fs::rename(&temporary, path)?;
-        } else if path.exists() {
-            fs::remove_file(path)?;
-        }
-        Ok(())
-    }
-
-    fn routed_output() -> Option<String> {
-        fs::read_to_string(AUDIO_BUS_STATE_FILE)
-            .ok()
-            .and_then(|text| {
-                text.lines()
-                    .find_map(|line| line.strip_prefix("PHYSICAL="))
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-            })
-    }
-
-    async fn wait_for_routed_output(&self, expected: &str) -> bool {
-        for _ in 0..100 {
-            if Self::routed_output().as_deref() == Some(expected) {
-                return true;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-        false
+        Ok(self.audio.active_output().await?.id)
     }
 
     pub async fn audio_outputs(&self) -> Result<Vec<Value>> {
-        let sinks = self.audio.list_sinks().await?;
-        let selected = Self::configured_output();
-        let current = self.physical_sink().await.ok();
-        let selected_name = selected.as_deref().or(current.as_deref());
-
-        Ok(sinks
-            .into_iter()
-            .filter_map(|sink| {
-                let name = sink.state.name;
-                if name == "auto_null"
-                    || name == self.config.audio.music_sink
-                    || name == self.config.audio.alert_sink
-                    || name.starts_with("proaudio_player_")
-                {
-                    return None;
-                }
-
-                Some(json!({
-                    "id": name,
-                    "name": if sink.description.is_empty() {
-                        name.clone()
-                    } else {
-                        sink.description
-                    },
-                    "state": sink.state_name,
-                    "device_class": sink.device_class,
-                    "alsa_card": sink.alsa_card,
-                    "selected": selected_name == Some(name.as_str()),
-                    "available": true,
-                }))
-            })
+        Ok(self
+            .audio
+            .list_outputs()
+            .await?
+            .iter()
+            .map(output_value)
             .collect())
     }
 
     pub async fn select_audio_output(&self, requested: &str) -> Result<Value> {
         let _guard = self.audio_control_lock.lock().await;
-        let requested = requested.trim();
-        let outputs = self.audio_outputs().await?;
-        let selected = outputs
-            .iter()
-            .find(|item| item.get("id").and_then(Value::as_str) == Some(requested))
-            .ok_or_else(|| anyhow!("Вибраний аудіовихід зараз недоступний"))?;
-        if Self::routed_output().as_deref() == Some(requested) {
-            Self::write_configured_output(Some(requested))?;
-            return Ok(json!({ "selected": selected, "applying": false, "applied": true }));
-        }
-
-        let previous = Self::configured_output().or_else(Self::routed_output);
-        Self::write_configured_output(Some(requested))?;
-        if self.wait_for_routed_output(requested).await {
-            return Ok(json!({ "selected": selected, "applying": false, "applied": true }));
-        }
-
-        Self::write_configured_output(previous.as_deref())?;
-        bail!("Не вдалося підтвердити перемикання аудіовиходу; попередній вибір відновлено")
+        let selected = self.audio.select_output(requested.trim()).await?;
+        Ok(json!({
+            "selected": output_value(&selected),
+            "applying": false,
+            "applied": true,
+        }))
     }
 
     pub async fn hardware_mixers(&self) -> Result<Vec<Value>> {
@@ -613,9 +495,6 @@ impl WebController {
                 } else {
                     (None, None)
                 };
-                // UI Master is normalized attenuation relative to safe unity.
-                // Controls crossing 0 dB are capped at physical 0 dB; positive-only
-                // USB controls use their own maximum as normalized 0 dB.
                 let db_reference = match (db_min, db_max) {
                     (Some(min), Some(max)) if min <= 0.0 && max >= 0.0 => Some(0.0),
                     (_, Some(max)) => Some(max),
@@ -684,15 +563,14 @@ impl WebController {
     pub async fn mixer_state(&self) -> Result<Value> {
         let music = self.sink_state(&self.config.audio.music_sink).await?;
         let alert = self.sink_state(&self.config.audio.alert_sink).await?;
-        let sink = self.physical_sink().await?;
-        let state = self.audio.master_state(&sink).await?;
+        let state = self.audio.master_state(DEFAULT_MASTER_SINK).await?;
         let master = json!({
             "name": state.name,
             "volume": (state.average_percent() * 10.0).round() / 10.0,
             "db": (state.average_db() * 100.0).round() / 100.0,
             "muted": state.muted,
             "card_name": "Master",
-            "control": sink,
+            "control": DEFAULT_MASTER_SINK,
             "backend": self.audio.master_backend_name(),
             "transport_backend": self.audio.backend_name(),
         });
@@ -708,11 +586,12 @@ impl WebController {
         let is_muted = muted == Some(true) || db <= -60.0;
         match target {
             "master" => {
-                let sink = self.physical_sink().await?;
                 if muted != Some(true) {
-                    self.audio.set_master_db(&sink, db).await?;
+                    self.audio.set_master_db(DEFAULT_MASTER_SINK, db).await?;
                 }
-                self.audio.set_master_mute(&sink, is_muted).await?;
+                self.audio
+                    .set_master_mute(DEFAULT_MASTER_SINK, is_muted)
+                    .await?;
             }
             "music" => {
                 if muted != Some(true) {
@@ -754,6 +633,50 @@ impl WebController {
             "sample_rate_mode": audio.sample_rate_mode,
             "sample_rate": audio.sample_rate,
             "allowed_sample_rates": audio.allowed_sample_rates,
+        }))
+    }
+
+    pub async fn audio_diagnostics(&self) -> Result<Value> {
+        let active_output = self.audio.active_output().await.ok();
+        let physical = match active_output.as_ref() {
+            Some(output) => self.sink_state(&output.id).await.ok(),
+            None => None,
+        };
+        let music = self.sink_state(&self.config.audio.music_sink).await.ok();
+        let alert = self.sink_state(&self.config.audio.alert_sink).await.ok();
+        let master = self
+            .audio
+            .master_state(DEFAULT_MASTER_SINK)
+            .await
+            .ok()
+            .map(|state| {
+                json!({
+                    "name": state.name,
+                    "volume": (state.average_percent() * 10.0).round() / 10.0,
+                    "db": (state.average_db() * 100.0).round() / 100.0,
+                    "muted": state.muted,
+                })
+            });
+        let hardware = self.hardware_mixers().await.unwrap_or_default();
+        let settings = self.audio_settings()?;
+        Ok(json!({
+            "transport_backend": self.audio.backend_name(),
+            "master_backend": self.audio.master_backend_name(),
+            "output_router_backend": self.audio.output_router_name(),
+            "processing": {
+                "master_sink": DEFAULT_MASTER_SINK,
+                "sample_rate_mode": settings.get("sample_rate_mode"),
+                "sample_rate": settings.get("sample_rate"),
+                "allowed_sample_rates": settings.get("allowed_sample_rates"),
+            },
+            "active_output": active_output.as_ref().map(output_value),
+            "logical_buses": {
+                "music": music,
+                "alert": alert,
+                "master": master,
+            },
+            "physical_sink": physical,
+            "hardware_mixers": hardware,
         }))
     }
 
@@ -1251,12 +1174,6 @@ struct MixerBody {
     muted: Option<bool>,
 }
 #[derive(Deserialize)]
-struct HardwareBody {
-    card: u32,
-    control: String,
-    percent: u32,
-}
-#[derive(Deserialize)]
 struct AudioOutputBody {
     id: String,
 }
@@ -1357,7 +1274,7 @@ async fn capabilities() -> Json<Value> {
         "api_version": API_VERSION,
         "events": "sse",
         "features": [
-            "status", "player_control", "audio_mixer", "audio_outputs",
+            "status", "player_control", "audio_mixer", "audio_outputs", "audio_diagnostics",
             "library", "playlists", "queue", "network_streams", "alert_settings"
         ]
     }))
@@ -1451,15 +1368,14 @@ async fn set_audio_level(
     }
     let sink = match body.target.as_str() {
         "master" => {
-            let sink = controller.physical_sink().await.map_err(map_internal)?;
             controller
                 .audio
-                .set_master_percent(&sink, body.percent)
+                .set_master_percent(DEFAULT_MASTER_SINK, body.percent)
                 .await
                 .map_err(map_internal)?;
             let state = controller
                 .audio
-                .master_state(&sink)
+                .master_state(DEFAULT_MASTER_SINK)
                 .await
                 .map_err(map_internal)?;
             return Ok(Json(json!({
@@ -1497,8 +1413,8 @@ async fn set_mixer(
     State(controller): State<WebController>,
     Json(body): Json<MixerBody>,
 ) -> ApiResult {
-    // Master is the final physical output safety control and must remain
-    // available even while alerts or the minute of silence own the music bus.
+    // MASTER is the final logical attenuation stage before the safety limiter and
+    // remains available even while priority audio owns the MUSIC bus.
     if body.target != "master" {
         controller
             .ensure_controls_available()
@@ -1539,45 +1455,16 @@ async fn hardware(State(controller): State<WebController>) -> ApiResult {
     controller
         .hardware_mixers()
         .await
-        .map(|items| Json(json!({ "items": items })))
+        .map(|items| Json(json!({ "items": items, "read_only": true })))
         .map_err(map_internal)
 }
 
-async fn set_hardware(
-    State(controller): State<WebController>,
-    Json(body): Json<HardwareBody>,
-) -> ApiResult {
-    if body.percent > 100 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Некоректний ALSA-регулятор",
-        ));
-    }
-    let available = controller.hardware_mixers().await.map_err(map_internal)?;
-    let exists = available.iter().any(|item| {
-        item.get("card").and_then(Value::as_u64) == Some(body.card as u64)
-            && item.get("control").and_then(Value::as_str) == Some(body.control.as_str())
-    });
-    if !exists {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "ALSA-регулятор не знайдено",
-        ));
-    }
-    let card = body.card.to_string();
-    let percent = format!("{}%", body.percent);
+async fn audio_diagnostics(State(controller): State<WebController>) -> ApiResult {
     controller
-        .run(
-            "amixer",
-            &["-c", &card, "sset", &body.control, &percent, "unmute"],
-            true,
-            8,
-        )
+        .audio_diagnostics()
         .await
-        .map_err(map_internal)?;
-    Ok(Json(
-        json!({ "card": body.card, "control": body.control, "volume": body.percent }),
-    ))
+        .map(Json)
+        .map_err(map_internal)
 }
 
 async fn get_audio_settings(State(controller): State<WebController>) -> ApiResult {
@@ -1953,7 +1840,8 @@ fn api_routes() -> Router<WebController> {
             "/audio/outputs",
             get(audio_outputs).post(select_audio_output),
         )
-        .route("/audio/hardware", get(hardware).post(set_hardware))
+        .route("/audio/hardware", get(hardware))
+        .route("/audio/diagnostics", get(audio_diagnostics))
         .route(
             "/settings/audio",
             get(get_audio_settings).put(put_audio_settings),
@@ -2004,6 +1892,21 @@ pub async fn serve(controller: WebController) -> Result<()> {
                 }
             }
             sleep(Duration::from_secs(1)).await;
+        }
+    });
+
+    // Topology notifications provide an immediate refresh on hotplug/output changes;
+    // the one-second producer remains as a low-rate metadata/status heartbeat.
+    let mut output_changes = controller.audio.subscribe_output_changes();
+    let output_event_controller = controller.clone();
+    tokio::spawn(async move {
+        while output_changes.changed().await.is_ok() {
+            if output_event_controller.events.receiver_count() == 0 {
+                continue;
+            }
+            if let Ok(status) = output_event_controller.status().await {
+                let _ = output_event_controller.events.send(status.to_string());
+            }
         }
     });
 
