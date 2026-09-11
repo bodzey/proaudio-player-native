@@ -9,6 +9,8 @@ SAMPLE_RATE="${SAMPLE_RATE:-48000}"
 AUDIO_CHANNELS="${AUDIO_CHANNELS:-2}"
 LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
+OUTPUT_HEADROOM_DB="${OUTPUT_HEADROOM_DB:--1.0}"
+ALERT_MIX_HEADROOM_DB="${ALERT_MIX_HEADROOM_DB:--3.0}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
 SINK_WAIT_SECONDS="${SINK_WAIT_SECONDS:-30}"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
@@ -243,6 +245,48 @@ load_loopback() {
         source_dont_move=true sink_dont_move=true
 }
 
+sink_input_for_module() {
+    local module="$1"
+    pactl list sink-inputs | awk -v wanted="$module" '
+        /^Sink Input #[0-9]+/ {
+            index=$3
+            sub(/^#/, "", index)
+            next
+        }
+        /^[[:space:]]*Owner Module:/ && $3 == wanted {
+            print index
+            exit
+        }'
+}
+
+set_loopback_gain_db() {
+    local module="$1" db="$2" label="$3"
+    local input=""
+    local attempt
+
+    for attempt in $(seq 1 50); do
+        input="$(sink_input_for_module "$module" || true)"
+        if [[ "$input" =~ ^[0-9]+$ ]]; then
+            pactl set-sink-input-volume "$input" "${db}dB"
+            echo "$label gain = ${db} dB (sink-input $input)"
+            return 0
+        fi
+        sleep 0.05
+    done
+
+    echo "Не вдалося знайти sink-input для $label module $module" >&2
+    return 1
+}
+
+validate_attenuation_db() {
+    local name="$1" value="$2"
+    if ! [[ "$value" =~ ^-?[0-9]+([.][0-9]+)?$ ]] \
+        || ! awk -v value="$value" 'BEGIN { exit !(value <= 0.0 && value >= -60.0) }'; then
+        echo "$name має бути в межах -60..0 dB" >&2
+        return 1
+    fi
+}
+
 validate_audio_bus_config() {
     if ! [[ "$SAMPLE_RATE" =~ ^[0-9]+$ ]] || ((10#$SAMPLE_RATE < 8000 || 10#$SAMPLE_RATE > 384000)); then
         echo "SAMPLE_RATE має бути цілим числом від 8000 до 384000" >&2
@@ -252,6 +296,8 @@ validate_audio_bus_config() {
         echo "AUDIO_CHANNELS має бути цілим числом від 1 до 8" >&2
         return 1
     fi
+    validate_attenuation_db OUTPUT_HEADROOM_DB "$OUTPUT_HEADROOM_DB"
+    validate_attenuation_db ALERT_MIX_HEADROOM_DB "$ALERT_MIX_HEADROOM_DB"
 }
 
 start_buses() {
@@ -282,6 +328,9 @@ start_buses() {
     write_state \
         "$physical" "$master_bus" "$music_bus" "$alert_bus" \
         "$music_loop" "$alert_loop" "$output_loop"
+
+    set_loopback_gain_db "$alert_loop" "$ALERT_MIX_HEADROOM_DB" "ALERT->MASTER"
+    set_loopback_gain_db "$output_loop" "$OUTPUT_HEADROOM_DB" "MASTER->OUTPUT"
 
     pactl set-default-sink "$MUSIC_SINK"
     pactl set-sink-volume "$MUSIC_SINK" 100%
@@ -321,6 +370,8 @@ switch_output() {
 
     if [[ "$old_physical" == "$physical" && "$old_output_loop" =~ ^[0-9]+$ ]]; then
         prepare_physical_sink "$physical"
+        set_loopback_gain_db "$alert_loop" "$ALERT_MIX_HEADROOM_DB" "ALERT->MASTER"
+        set_loopback_gain_db "$old_output_loop" "$OUTPUT_HEADROOM_DB" "MASTER->OUTPUT"
         return
     fi
 
@@ -337,6 +388,15 @@ switch_output() {
         return 1
     fi
 
+    if ! set_loopback_gain_db "$new_output_loop" "$OUTPUT_HEADROOM_DB" "MASTER->OUTPUT"; then
+        pactl unload-module "$new_output_loop" >/dev/null 2>&1 || true
+        if [[ "$master_mute" != "yes" ]]; then
+            pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
+        fi
+        echo "Не вдалося застосувати safety headroom до '$physical'; попередній маршрут залишено" >&2
+        return 1
+    fi
+
     if [[ "$old_output_loop" =~ ^[0-9]+$ ]]; then
         pactl unload-module "$old_output_loop" >/dev/null 2>&1 || true
     fi
@@ -344,6 +404,8 @@ switch_output() {
     write_state \
         "$physical" "$master_bus" "$music_bus" "$alert_bus" \
         "$music_loop" "$alert_loop" "$new_output_loop"
+
+    set_loopback_gain_db "$alert_loop" "$ALERT_MIX_HEADROOM_DB" "ALERT->MASTER"
 
     if [[ "$master_mute" != "yes" ]]; then
         pactl set-sink-mute "$MASTER_SINK" 0
