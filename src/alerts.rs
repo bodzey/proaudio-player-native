@@ -101,6 +101,12 @@ impl AlertController {
     }
 
     fn minute_due(&self, state: &RuntimeState) -> Result<bool> {
+        // Air-raid alerts have strictly higher priority. If an alert overlaps the
+        // scheduled minute, keep checking until the catch-up window expires; the
+        // minute may start only after the alert has cleared.
+        if state.mode == "alert" {
+            return Ok(false);
+        }
         let (_, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
         if !minute.enabled {
             return Ok(false);
