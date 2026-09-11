@@ -283,12 +283,29 @@ fn descriptor_from_info(info: &pa::context::introspect::SinkInfo<'_>) -> Result<
         .proplist
         .get_str("alsa.card")
         .and_then(|value| value.parse::<u32>().ok());
+    let alsa_device = info
+        .proplist
+        .get_str("alsa.device")
+        .and_then(|value| value.parse::<u32>().ok());
+    let channel_map = info
+        .channel_map
+        .get()
+        .iter()
+        .map(|position| position.to_string().into_owned())
+        .collect();
 
     Ok(SinkDescriptor {
         state,
         description,
         device_class,
         alsa_card,
+        alsa_device,
+        sample_format: info.sample_spec.format.to_string().into_owned(),
+        sample_rate: info.sample_spec.rate,
+        channels: info.sample_spec.channels,
+        channel_map,
+        device_api: info.proplist.get_str("device.api").unwrap_or_default(),
+        device_bus: info.proplist.get_str("device.bus").unwrap_or_default(),
         state_name: format!("{:?}", info.state).to_ascii_lowercase(),
     })
 }
