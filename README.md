@@ -28,7 +28,7 @@ No Python runtime is required by this project. The first parity implementation i
 
 The player control plane does not depend on a browser frontend. HTTP API startup, alerts, source arbitration, audio control and compatibility protocols work whether a Web UI is installed or not.
 
-The browser frontend lives in the separate `bodzey/proaudio-player-webui` repository and is referenced here only as the `webui/` git submodule. It is not compiled into the Rust binary. Firmware may package the checked-out frontend independently under `/usr/share/proaudio-player/webui`; if present, the daemon can serve it on `/`, `/static/*`, `/manifest.webmanifest` and `/sw.js`. If it is absent, those frontend routes return 404 without affecting the player API.
+The browser frontend lives in the separate `bodzey/proaudio-player-webui` repository. It is not a submodule of this repository and is not compiled into the Rust binary. `proaudio-player-firmware` is the composition layer: it pins native and WebUI revisions independently and packages the built frontend under `/usr/share/proaudio-player/webui`. If a frontend is present there, the daemon can serve it on `/`, `/static/*`, `/manifest.webmanifest` and `/sw.js`. If it is absent, those frontend routes return 404 without affecting the player API.
 
 New frontend work should use `/api/v1`. See `docs/api.md` for the API contract. `PROAUDIO_WEBUI_DIR` can override the optional runtime frontend directory or disable frontend delivery explicitly.
 
@@ -38,11 +38,7 @@ New frontend work should use `/api/v1`. See `docs/api.md` for the API contract. 
 cargo build --release
 ```
 
-The native binary does not require the Web UI submodule to be initialized. To also work with the current frontend locally, initialize it explicitly:
-
-```bash
-git submodule update --init webui
-```
+The native binary has no WebUI checkout or Node.js build dependency.
 
 The minimum supported Rust toolchain is 1.88 because the locked dependency graph includes ICU 2.3 in addition to stable Cargo Edition 2024 manifests.
 
@@ -60,10 +56,10 @@ For the development appliance image, use the `dev` branch of `bodzey/proaudio-pl
 proaudio-player-native --config /etc/proaudio-player-alert/config.yaml run
 ```
 
-For local frontend development against the checked-out Web UI submodule:
+For local frontend development, build `bodzey/proaudio-player-webui` separately and point the daemon at its generated `dist` directory:
 
 ```bash
-PROAUDIO_WEBUI_DIR="$PWD/webui" \
+PROAUDIO_WEBUI_DIR="/path/to/proaudio-player-webui/dist" \
   cargo run -- --config config/config.yaml.example run
 ```
 
@@ -102,7 +98,7 @@ http://192.168.88.122/v1/iot/active_air_raid_alerts/{uid}.json
 
 The repository first targets functional parity. After hardware validation, command adapters (`pactl`, `amixer`, `mpc`, `busctl`) can be replaced incrementally by direct PipeWire, ALSA, MPD protocol and D-Bus integrations without changing the state machine or HTTP/4STREAM contracts.
 
-The Web UI is intentionally outside that core contract. It is developed and versioned in its own repository while continuing to consume the versioned native API.
+The Web UI is intentionally outside that core contract. It is developed and versioned in its own repository while continuing to consume the versioned native API. Firmware is the only repository that composes the native control plane and WebUI into an appliance image.
 
 ## Factory announcement media
 
