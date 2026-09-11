@@ -2,9 +2,15 @@ use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
+use tracing::error;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -61,6 +67,7 @@ impl StateStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
+
     pub fn load(&self) -> RuntimeState {
         let Ok(text) = fs::read_to_string(&self.path) else {
             return RuntimeState::default();
@@ -76,30 +83,196 @@ impl StateStore {
     }
 
     pub fn save(&self, state: &RuntimeState) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+        atomic_json_write(&self.path, state)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct MixerState {
+    pub music_percent: Option<f64>,
+    pub music_muted: Option<bool>,
+    pub master_percent: Option<f64>,
+    pub master_muted: Option<bool>,
+    pub alert_percent: Option<f64>,
+    pub alert_muted: Option<bool>,
+}
+
+impl MixerState {
+    fn sanitize(mut self) -> Self {
+        self.music_percent = valid_percent(self.music_percent);
+        self.master_percent = valid_percent(self.master_percent);
+        self.alert_percent = valid_percent(self.alert_percent);
+        self
+    }
+}
+
+fn valid_percent(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+}
+
+#[derive(Clone)]
+pub struct MixerStateStore {
+    path: PathBuf,
+}
+
+impl MixerStateStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn load(&self) -> MixerState {
+        let Ok(text) = fs::read_to_string(&self.path) else {
+            return MixerState::default();
+        };
+        serde_json::from_str::<MixerState>(&text)
+            .unwrap_or_default()
+            .sanitize()
+    }
+
+    pub fn save(&self, state: &MixerState) -> Result<()> {
+        atomic_json_write(&self.path, state)
+    }
+}
+
+#[derive(Clone)]
+pub struct MixerStateRuntime {
+    store: MixerStateStore,
+    state: Arc<Mutex<MixerState>>,
+    changes: watch::Sender<u64>,
+}
+
+impl MixerStateRuntime {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        let store = MixerStateStore::new(path);
+        let state = Arc::new(Mutex::new(store.load()));
+        let (changes, _) = watch::channel(0_u64);
+        Self {
+            store,
+            state,
+            changes,
         }
-        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let tmp = self
-            .path
-            .with_extension(format!("json.{}.{}.tmp", std::process::id(), sequence));
-        let payload = serde_json::to_vec_pretty(state)?;
-        let result = (|| -> Result<()> {
-            use std::io::Write;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            file.write_all(&payload)?;
-            file.sync_all()?;
-            fs::rename(&tmp, &self.path)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
+    }
+
+    pub fn snapshot(&self) -> MixerState {
+        self.state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default()
+    }
+
+    fn update(&self, mutate: impl FnOnce(&mut MixerState)) {
+        let changed = if let Ok(mut state) = self.state.lock() {
+            let before = state.clone();
+            mutate(&mut state);
+            *state != before
+        } else {
+            false
+        };
+        if changed {
+            self.changes
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
         }
-        result?;
+    }
+
+    pub fn set_music_percent(&self, value: f64) {
+        self.update(|state| state.music_percent = valid_percent(Some(value)));
+    }
+
+    pub fn set_music_muted(&self, value: bool) {
+        self.update(|state| state.music_muted = Some(value));
+    }
+
+    pub fn set_master_percent(&self, value: f64) {
+        self.update(|state| state.master_percent = valid_percent(Some(value)));
+    }
+
+    pub fn set_master_muted(&self, value: bool) {
+        self.update(|state| state.master_muted = Some(value));
+    }
+
+    pub fn set_alert_percent(&self, value: f64) {
+        self.update(|state| state.alert_percent = valid_percent(Some(value)));
+    }
+
+    pub fn set_alert_muted(&self, value: bool) {
+        self.update(|state| state.alert_muted = Some(value));
+    }
+
+    pub fn start_writer(&self) -> JoinHandle<()> {
+        let state = self.state.clone();
+        let store = self.store.clone();
+        let mut changes = self.changes.subscribe();
+        tokio::spawn(async move {
+            loop {
+                if changes.changed().await.is_err() {
+                    return;
+                }
+
+                // Browser faders can emit ~30 updates/second. Coalesce them to one
+                // durable write after the control settles so flash/eMMC is not
+                // hammered by UI traffic.
+                sleep(Duration::from_millis(750)).await;
+                while changes.has_changed().unwrap_or(false) {
+                    let _ = changes.borrow_and_update();
+                    sleep(Duration::from_millis(100)).await;
+                }
+
+                let snapshot = state
+                    .lock()
+                    .map(|value| value.clone())
+                    .unwrap_or_default();
+                let writer = store.clone();
+                match tokio::task::spawn_blocking(move || writer.save(&snapshot)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => error!("Не вдалося зберегти mixer state: {err:#}"),
+                    Err(err) => error!("Mixer state writer завершився з помилкою: {err}"),
+                }
+            }
+        })
+    }
+}
+
+fn atomic_json_write<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), sequence));
+    let payload = serde_json::to_vec_pretty(value)?;
+    let result = (|| -> Result<()> {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(&payload)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
         Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixer_state_sanitizes_invalid_percentages() {
+        let state = MixerState {
+            music_percent: Some(f64::NAN),
+            master_percent: Some(101.0),
+            alert_percent: Some(25.0),
+            ..MixerState::default()
+        }
+        .sanitize();
+        assert_eq!(state.music_percent, None);
+        assert_eq!(state.master_percent, None);
+        assert_eq!(state.alert_percent, Some(25.0));
     }
 }
