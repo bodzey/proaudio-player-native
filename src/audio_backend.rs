@@ -32,6 +32,13 @@ pub struct SinkDescriptor {
     pub description: String,
     pub device_class: String,
     pub alsa_card: Option<u32>,
+    pub alsa_device: Option<u32>,
+    pub sample_format: String,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub channel_map: Vec<String>,
+    pub device_api: String,
+    pub device_bus: String,
     pub state_name: String,
 }
 
