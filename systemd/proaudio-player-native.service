@@ -1,7 +1,9 @@
 [Unit]
 Description=ProAudio Player Native control plane
 After=dbus.service network-online.target proaudio-player-buses.service proaudio-player-mpd.service
-Wants=dbus.service network-online.target proaudio-player-buses.service proaudio-player-mpd.service
+Requires=proaudio-player-buses.service
+Wants=dbus.service network-online.target proaudio-player-mpd.service
+PartOf=proaudio-player-buses.service
 ConditionPathExists=/usr/bin/proaudio-player-native
 
 [Service]
