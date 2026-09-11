@@ -193,12 +193,18 @@ impl SafetyLimiter {
                 let value = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 frame[channel] = if value.is_finite() { value } else { 0.0 };
             }
-            if let Some(processed) = self.push_frame(frame) {
-                for sample in processed.iter().take(self.channels) {
-                    output.extend_from_slice(&sample.to_ne_bytes());
-                }
+
+            // Keep the transport clock sample-for-sample continuous while the
+            // lookahead/FIR delay line warms up. Dropping these initial frames
+            // shortens the first Pulse fragment and can immediately underrun a
+            // low-latency playback stream. Silence represents the real limiter
+            // latency without changing the number of frames written downstream.
+            let processed = self.push_frame(frame).unwrap_or([0.0; MAX_CHANNELS]);
+            for sample in processed.iter().take(self.channels) {
+                output.extend_from_slice(&sample.to_ne_bytes());
             }
         }
+        debug_assert_eq!(output.len(), input.len());
         Ok(output)
     }
 
@@ -321,7 +327,7 @@ fn limiter_buffer_attrs(args: &Args) -> (BufferAttr, BufferAttr) {
         BufferAttr {
             maxlength: u32::MAX,
             tlength: playback_target,
-            prebuf: 0,
+            prebuf: playback_minreq,
             minreq: playback_minreq,
             fragsize: u32::MAX,
         },
@@ -653,6 +659,16 @@ mod tests {
     }
 
     #[test]
+    fn enabled_mode_preserves_fragment_length_during_warmup() {
+        let mut limiter = SafetyLimiter::new(&args()).unwrap();
+        let frame_bytes = limiter.frame_bytes();
+        let input = vec![0_u8; frame_bytes * (limiter.total_delay_frames / 2).max(1)];
+        let output = limiter.process_bytes(&input).unwrap();
+        assert_eq!(output.len(), input.len());
+        assert!(output.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
     fn pulse_buffer_request_is_low_latency_and_frame_aligned() {
         let cfg = args();
         let frame_bytes = u32::from(cfg.channels) * std::mem::size_of::<f32>() as u32;
@@ -668,7 +684,7 @@ mod tests {
             playback.tlength,
             pcm_bytes_for_ms(cfg.rate, cfg.channels, PLAYBACK_TARGET_MS)
         );
-        assert_eq!(playback.prebuf, 0);
+        assert_eq!(playback.prebuf, playback.minreq);
     }
 
     #[test]
