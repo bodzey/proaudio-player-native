@@ -62,7 +62,6 @@ struct Args {
 #[derive(Clone, Copy)]
 struct BufferedFrame {
     samples: Frame,
-    peak: f32,
     sequence: u64,
 }
 
@@ -168,7 +167,6 @@ impl SafetyLimiter {
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.delayed.push_back(BufferedFrame {
             samples: self.history[1],
-            peak,
             sequence,
         });
 
