@@ -3,13 +3,27 @@ set -euo pipefail
 
 MUSIC_SINK="${MUSIC_SINK:-proaudio_player_music}"
 ALERT_SINK="${ALERT_SINK:-proaudio_player_alert}"
+MASTER_SINK="${MASTER_SINK:-proaudio_player_master}"
 PHYSICAL_SINK="${PHYSICAL_SINK:-AUTO}"
 SAMPLE_RATE="${SAMPLE_RATE:-48000}"
+AUDIO_CHANNELS="${AUDIO_CHANNELS:-2}"
 LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
 SINK_WAIT_SECONDS="${SINK_WAIT_SECONDS:-30}"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
+
+physical_candidates() {
+    pactl list short sinks |
+        awk -v music="$MUSIC_SINK" -v alert="$ALERT_SINK" -v master="$MASTER_SINK" '
+            $2 != music && $2 != alert && $2 != master && $2 != "auto_null" &&
+            $2 !~ /^proaudio_player_/ {
+                priority = ($NF == "RUNNING" ? 0 : 1)
+                print priority "\t" $2
+            }' |
+        sort -k1,1n -k2,2 |
+        cut -f2-
+}
 
 find_physical_sink() {
     if [[ "$PHYSICAL_SINK" != "AUTO" ]]; then
@@ -19,18 +33,11 @@ find_physical_sink() {
         fi
         return 1
     fi
-    pactl list short sinks | awk -v music="$MUSIC_SINK" -v alert="$ALERT_SINK" '
-        $2 != music && $2 != alert && $2 != "auto_null" &&
-        $2 !~ /^proaudio_player_/ {
-            if ($2 ~ /^alsa_output\.usb-/ && usb == "") usb=$2
-            else if ($2 ~ /^alsa_output\./ && alsa == "") alsa=$2
-            else if (other == "") other=$2
-        }
-        END {
-            if (usb != "") print usb
-            else if (alsa != "") print alsa
-            else if (other != "") print other
-        }'
+
+    # AUTO is intentionally bus-neutral. Prefer an already RUNNING physical sink;
+    # otherwise use a deterministic name-sorted fallback. Device-specific priority
+    # belongs to a firmware profile, never to the generic player core.
+    physical_candidates | head -n 1
 }
 
 wait_for_physical_sink() {
@@ -55,10 +62,12 @@ state_value() {
 }
 
 write_state() {
-    local physical="$1" music_bus="$2" alert_bus="$3" music_loop="$4" alert_loop="$5"
+    local physical="$1" master_bus="$2" music_bus="$3" alert_bus="$4" music_loop="$5" alert_loop="$6"
     local temporary="${STATE_FILE}.tmp"
     {
         printf 'PHYSICAL=%s\n' "$physical"
+        printf 'MASTER_SINK=%s\n' "$MASTER_SINK"
+        printf 'MASTER_BUS_MODULE=%s\n' "$master_bus"
         printf 'MUSIC_BUS_MODULE=%s\n' "$music_bus"
         printf 'ALERT_BUS_MODULE=%s\n' "$alert_bus"
         printf 'MUSIC_LOOP_MODULE=%s\n' "$music_loop"
@@ -106,6 +115,14 @@ safe_playback_control() {
     return 0
 }
 
+playback_db_values() {
+    sed -n 's/.*Playback.*\[\([+-]\{0,1\}[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\)dB\].*/\1/p'
+}
+
+max_db_value() {
+    awk 'NR == 1 { max=$1 } $1 > max { max=$1 } END { if (NR) print max }'
+}
+
 prepare_hardware_mixer() {
     local physical="$1"
     [[ "$HARDWARE_MIXER_MODE" == "off" ]] && return 0
@@ -115,7 +132,7 @@ prepare_hardware_mixer() {
     fi
     command -v amixer >/dev/null 2>&1 || return 0
 
-    local card control details after applied=0
+    local card control details after max_db target applied=0
     card="$(alsa_card_for_sink "$physical" || true)"
     [[ "$card" =~ ^[0-9]+$ ]] || return 0
 
@@ -124,16 +141,31 @@ prepare_hardware_mixer() {
         safe_playback_control "$control" || continue
         details="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
         printf '%s\n' "$details" | grep -Eq 'Capabilities:.*[[:space:]]pvolume([[:space:]]|$)' || continue
-        printf '%s\n' "$details" | grep -Eq 'Playback.*\[[+-]?[0-9]+([.][0-9]+)?dB\]' || continue
+        printf '%s\n' "$details" | playback_db_values | grep -q . || continue
 
-        if amixer -q -c "$card" sset "$control" 0dB >/dev/null 2>&1; then
+        # The physical sink is muted by prepare_physical_sink while this probe runs.
+        # Ask ALSA for 0 dB, then verify the actual quantized hardware value. If a
+        # coarse control rounded above unity, step the request below zero and verify
+        # again. Positive hardware gain is never left active.
+        if ! amixer -q -c "$card" sset "$control" 0dB >/dev/null 2>&1; then
+            continue
+        fi
+        after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
+        max_db="$(printf '%s\n' "$after" | playback_db_values | max_db_value)"
+        [[ -n "$max_db" ]] || continue
+
+        if awk -v value="$max_db" 'BEGIN { exit !(value > 0.0) }'; then
+            target="$(awk -v value="$max_db" 'BEGIN { printf "%.2fdB", -(value + 0.10) }')"
+            amixer -q -c "$card" sset "$control" "$target" >/dev/null 2>&1 || true
             after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
-            if printf '%s\n' "$after" | grep -Eq 'Playback.*\[[+-]?0+([.]0+)?dB\]'; then
-                echo "ALSA card $card: '$control' встановлено на hardware unity 0 dB"
-                applied=1
-            else
-                echo "ALSA card $card: '$control' не має точного 0 dB; залишено найближче значення драйвера" >&2
-            fi
+            max_db="$(printf '%s\n' "$after" | playback_db_values | max_db_value)"
+        fi
+
+        if [[ -n "$max_db" ]] && awk -v value="$max_db" 'BEGIN { exit !(value <= 0.0001) }'; then
+            echo "ALSA card $card: '$control' hardware level = ${max_db} dB (safe unity ceiling)"
+            applied=1
+        else
+            echo "ALSA card $card: '$control' не вдалося безпечно обмежити до <= 0 dB; control пропущено" >&2
         fi
     done < <(
         amixer -c "$card" scontrols 2>/dev/null |
@@ -141,7 +173,7 @@ prepare_hardware_mixer() {
     )
 
     if ((applied == 0)); then
-        echo "ALSA card $card: безпечного playback-контролу з 0 dB не знайдено; hardware mixer не вгадується"
+        echo "ALSA card $card: безпечного playback-контролу з dB-шкалою не знайдено; hardware mixer не вгадується"
     fi
 }
 
@@ -151,60 +183,84 @@ prepare_physical_sink() {
         echo "OUTPUT_VOLUME_PERCENT має бути цілим числом від 0 до 100" >&2
         return 1
     fi
+
+    # Mute while hardware gain is normalized so a coarse ALSA control can never
+    # produce an audible positive-gain transient during probing.
+    pactl set-sink-mute "$physical" 1
     prepare_hardware_mixer "$physical"
     pactl set-sink-volume "$physical" "${OUTPUT_VOLUME_PERCENT}%"
     pactl set-sink-mute "$physical" 0
 }
 
 load_loopback() {
-    local source="$1" physical="$2"
+    local source="$1" target="$2"
     pactl load-module module-loopback \
-        source="$source.monitor" sink="$physical" \
+        source="$source.monitor" sink="$target" \
         latency_msec="$LOOPBACK_LATENCY_MSEC" \
         source_dont_move=true sink_dont_move=true
 }
 
-start_buses() {
-    unload_saved_modules
-    local physical music_bus alert_bus music_loop alert_loop
+validate_audio_bus_config() {
     if ! [[ "$SAMPLE_RATE" =~ ^[0-9]+$ ]] || ((10#$SAMPLE_RATE < 8000 || 10#$SAMPLE_RATE > 384000)); then
         echo "SAMPLE_RATE має бути цілим числом від 8000 до 384000" >&2
         return 1
     fi
+    if ! [[ "$AUDIO_CHANNELS" =~ ^[0-9]+$ ]] || ((10#$AUDIO_CHANNELS < 1 || 10#$AUDIO_CHANNELS > 8)); then
+        echo "AUDIO_CHANNELS має бути цілим числом від 1 до 8" >&2
+        return 1
+    fi
+}
+
+start_buses() {
+    unload_saved_modules
+    validate_audio_bus_config
+
+    local physical master_bus music_bus alert_bus music_loop alert_loop
     physical="$(wait_for_physical_sink)"
     prepare_physical_sink "$physical"
 
+    master_bus="$(pactl load-module module-null-sink \
+        sink_name="$MASTER_SINK" \
+        sink_properties="device.description=ProAudio_Player_Final_Mix" \
+        rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
     music_bus="$(pactl load-module module-null-sink \
         sink_name="$MUSIC_SINK" \
-        sink_properties="device.description=proaudio_player_music_Bus" \
-        rate="$SAMPLE_RATE" channels=2)"
+        sink_properties="device.description=ProAudio_Player_Music_Bus" \
+        rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
     alert_bus="$(pactl load-module module-null-sink \
         sink_name="$ALERT_SINK" \
-        sink_properties="device.description=proaudio_player_alert_Bus" \
-        rate="$SAMPLE_RATE" channels=2)"
-    music_loop="$(load_loopback "$MUSIC_SINK" "$physical")"
-    alert_loop="$(load_loopback "$ALERT_SINK" "$physical")"
-    write_state "$physical" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
+        sink_properties="device.description=ProAudio_Player_Alert_Bus" \
+        rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
+
+    # MUSIC and ALERT are mixed in float by PipeWire/Pulse into one final bus.
+    # The safety limiter is the only path from MASTER.monitor to the physical sink.
+    music_loop="$(load_loopback "$MUSIC_SINK" "$MASTER_SINK")"
+    alert_loop="$(load_loopback "$ALERT_SINK" "$MASTER_SINK")"
+    write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
 
     pactl set-default-sink "$MUSIC_SINK"
     pactl set-sink-volume "$MUSIC_SINK" 100%
     pactl set-sink-volume "$ALERT_SINK" 100%
+    pactl set-sink-volume "$MASTER_SINK" 100%
     pactl set-sink-mute "$MUSIC_SINK" 0
     pactl set-sink-mute "$ALERT_SINK" 0
-    echo "Музична й службова шини підключені до $physical; програмний вихід ${OUTPUT_VOLUME_PERCENT}%"
+    pactl set-sink-mute "$MASTER_SINK" 0
+    echo "MUSIC + ALERT -> $MASTER_SINK -> safety limiter -> $physical"
 }
 
 switch_output() {
-    local physical music_bus alert_bus old_music_loop old_alert_loop new_music_loop new_alert_loop
+    validate_audio_bus_config
+    local physical master_bus music_bus alert_bus music_loop alert_loop
     physical="$(wait_for_physical_sink)"
-    prepare_physical_sink "$physical"
 
+    master_bus="$(state_value MASTER_BUS_MODULE)"
     music_bus="$(state_value MUSIC_BUS_MODULE)"
     alert_bus="$(state_value ALERT_BUS_MODULE)"
-    old_music_loop="$(state_value MUSIC_LOOP_MODULE)"
-    old_alert_loop="$(state_value ALERT_LOOP_MODULE)"
+    music_loop="$(state_value MUSIC_LOOP_MODULE)"
+    alert_loop="$(state_value ALERT_LOOP_MODULE)"
 
-    if [[ -z "$music_bus" || -z "$alert_bus" ]] \
+    if [[ -z "$master_bus" || -z "$music_bus" || -z "$alert_bus" ]] \
+        || ! pactl get-sink-volume "$MASTER_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$MUSIC_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$ALERT_SINK" >/dev/null 2>&1; then
         echo "Стан постійних шин відсутній; виконується повне відновлення" >&2
@@ -212,16 +268,11 @@ switch_output() {
         return
     fi
 
-    new_music_loop="$(load_loopback "$MUSIC_SINK" "$physical")"
-    if ! new_alert_loop="$(load_loopback "$ALERT_SINK" "$physical")"; then
-        pactl unload-module "$new_music_loop" >/dev/null 2>&1 || true
-        return 1
-    fi
-
-    [[ "$old_music_loop" =~ ^[0-9]+$ ]] && pactl unload-module "$old_music_loop" >/dev/null 2>&1 || true
-    [[ "$old_alert_loop" =~ ^[0-9]+$ ]] && pactl unload-module "$old_alert_loop" >/dev/null 2>&1 || true
-    write_state "$physical" "$music_bus" "$alert_bus" "$new_music_loop" "$new_alert_loop"
-    echo "Вихід постійних шин безрозривно перемкнено на $physical"
+    prepare_physical_sink "$physical"
+    # Atomic state replacement is watched by systemd; the limiter restarts against
+    # the new physical sink while the logical MUSIC/ALERT topology remains intact.
+    write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
+    echo "Фінальний вихід перемкнено на $physical"
 }
 
 stop_buses() {
