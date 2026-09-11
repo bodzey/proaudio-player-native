@@ -10,6 +10,7 @@ use pa::mainloop::standard::{IterateResult, Mainloop};
 use pa::proplist::{properties::APPLICATION_NAME, Proplist};
 use pa::sample::{Format, Spec};
 use pa::stream::{FlagSet as StreamFlagSet, PeekResult, SeekMode, State as StreamState, Stream};
+use pa::volume::{ChannelVolumes, Volume};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_SLEEP: Duration = Duration::from_millis(1);
@@ -352,12 +353,18 @@ fn run(args: Args) -> Result<()> {
     record
         .connect_record(Some(&args.source), None, StreamFlagSet::NOFLAGS)
         .with_context(|| format!("failed to connect limiter to source {}", args.source))?;
+
+    // The limiter is an internal transport, not a user gain stage. Pin its
+    // playback stream to unity so server stream-restore state cannot silently
+    // attenuate or amplify the already-limited final mix.
+    let mut unity = ChannelVolumes::default();
+    unity.set(args.channels, Volume::NORMAL);
     playback
         .connect_playback(
             Some(&args.sink),
             None,
             StreamFlagSet::NOFLAGS,
-            None,
+            Some(&unity),
             None,
         )
         .with_context(|| format!("failed to connect limiter to sink {}", args.sink))?;
