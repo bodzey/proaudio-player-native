@@ -9,6 +9,7 @@ mod config;
 mod dlna;
 mod fourstream;
 mod output_gain;
+mod output_router;
 mod provider;
 mod pulse;
 mod source_arbiter;
