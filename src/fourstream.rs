@@ -507,7 +507,7 @@ async fn soap_control(
                 .await
                 .map_err(service_error)?;
             let unit = soap_value(body, "Unit");
-            if unit.to_ascii_uppercase() != "REL_TIME" {
+            if !unit.eq_ignore_ascii_case("REL_TIME") {
                 return Err(bad_request("Only REL_TIME seek is supported"));
             }
             dlna::client()
@@ -525,11 +525,11 @@ async fn soap_control(
             .map_err(service_error)?,
         "Play" | "Pause" | "Stop" | "Next" | "Previous" => {
             let transport_action = if action == "Previous" {
-                "prev"
+                "prev".to_owned()
             } else {
-                &action.to_ascii_lowercase()
+                action.to_ascii_lowercase()
             };
-            dlna_transport(&controller, transport_action)
+            dlna_transport(&controller, &transport_action)
                 .await
                 .map_err(service_error)?;
         }
