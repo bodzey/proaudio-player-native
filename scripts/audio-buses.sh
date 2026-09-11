@@ -7,6 +7,7 @@ PHYSICAL_SINK="${PHYSICAL_SINK:-AUTO}"
 SAMPLE_RATE="${SAMPLE_RATE:-48000}"
 LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
+HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
 SINK_WAIT_SECONDS="${SINK_WAIT_SECONDS:-30}"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
 
@@ -81,19 +82,86 @@ unload_saved_modules() {
     rm -f -- "$STATE_FILE"
 }
 
+alsa_card_for_sink() {
+    local physical="$1"
+    pactl list sinks | awk -v wanted="$physical" '
+        /^Sink #[0-9]+/ { active=0; next }
+        /^[[:space:]]*Name:/ { active=($2 == wanted); next }
+        active && ($1 == "alsa.card" || $1 == "api.alsa.card") && $2 == "=" {
+            gsub(/"/, "", $3)
+            if ($3 ~ /^[0-9]+$/) {
+                print $3
+                exit
+            }
+        }'
+}
+
+safe_playback_control() {
+    local name="${1,,}"
+    case "$name" in
+        *capture*|*mic*|*boost*|*gain*|*input*|*adc*|*loopback*|*monitor*|*tone*|*bass*|*treble*)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+prepare_hardware_mixer() {
+    local physical="$1"
+    [[ "$HARDWARE_MIXER_MODE" == "off" ]] && return 0
+    if [[ "$HARDWARE_MIXER_MODE" != "unity" ]]; then
+        echo "HARDWARE_MIXER_MODE має бути 'unity' або 'off'" >&2
+        return 1
+    fi
+    command -v amixer >/dev/null 2>&1 || return 0
+
+    local card control details after applied=0
+    card="$(alsa_card_for_sink "$physical" || true)"
+    [[ "$card" =~ ^[0-9]+$ ]] || return 0
+
+    while IFS= read -r control; do
+        [[ -n "$control" ]] || continue
+        safe_playback_control "$control" || continue
+        details="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
+        printf '%s\n' "$details" | grep -Eq 'Capabilities:.*[[:space:]]pvolume([[:space:]]|$)' || continue
+        printf '%s\n' "$details" | grep -Eq 'Playback.*\[[+-]?[0-9]+([.][0-9]+)?dB\]' || continue
+
+        if amixer -q -c "$card" sset "$control" 0dB >/dev/null 2>&1; then
+            after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
+            if printf '%s\n' "$after" | grep -Eq 'Playback.*\[[+-]?0+([.]0+)?dB\]'; then
+                echo "ALSA card $card: '$control' встановлено на hardware unity 0 dB"
+                applied=1
+            else
+                echo "ALSA card $card: '$control' не має точного 0 dB; залишено найближче значення драйвера" >&2
+            fi
+        fi
+    done < <(
+        amixer -c "$card" scontrols 2>/dev/null |
+            sed -n "s/^Simple mixer control '\(.*\)',[0-9][0-9]*$/\1/p"
+    )
+
+    if ((applied == 0)); then
+        echo "ALSA card $card: безпечного playback-контролу з 0 dB не знайдено; hardware mixer не вгадується"
+    fi
+}
+
 prepare_physical_sink() {
     local physical="$1"
     if ! [[ "$OUTPUT_VOLUME_PERCENT" =~ ^[0-9]+$ ]] || ((10#$OUTPUT_VOLUME_PERCENT > 100)); then
         echo "OUTPUT_VOLUME_PERCENT має бути цілим числом від 0 до 100" >&2
         return 1
     fi
+    prepare_hardware_mixer "$physical"
     pactl set-sink-volume "$physical" "${OUTPUT_VOLUME_PERCENT}%"
     pactl set-sink-mute "$physical" 0
 }
 
 load_loopback() {
     local source="$1" physical="$2"
-    pactl load-module module-loopback         source="$source.monitor" sink="$physical"         latency_msec="$LOOPBACK_LATENCY_MSEC"         source_dont_move=true sink_dont_move=true
+    pactl load-module module-loopback \
+        source="$source.monitor" sink="$physical" \
+        latency_msec="$LOOPBACK_LATENCY_MSEC" \
+        source_dont_move=true sink_dont_move=true
 }
 
 start_buses() {
@@ -106,8 +174,14 @@ start_buses() {
     physical="$(wait_for_physical_sink)"
     prepare_physical_sink "$physical"
 
-    music_bus="$(pactl load-module module-null-sink         sink_name="$MUSIC_SINK"         sink_properties="device.description=proaudio_player_music_Bus"         rate="$SAMPLE_RATE" channels=2)"
-    alert_bus="$(pactl load-module module-null-sink         sink_name="$ALERT_SINK"         sink_properties="device.description=proaudio_player_alert_Bus"         rate="$SAMPLE_RATE" channels=2)"
+    music_bus="$(pactl load-module module-null-sink \
+        sink_name="$MUSIC_SINK" \
+        sink_properties="device.description=proaudio_player_music_Bus" \
+        rate="$SAMPLE_RATE" channels=2)"
+    alert_bus="$(pactl load-module module-null-sink \
+        sink_name="$ALERT_SINK" \
+        sink_properties="device.description=proaudio_player_alert_Bus" \
+        rate="$SAMPLE_RATE" channels=2)"
     music_loop="$(load_loopback "$MUSIC_SINK" "$physical")"
     alert_loop="$(load_loopback "$ALERT_SINK" "$physical")"
     write_state "$physical" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
@@ -130,7 +204,9 @@ switch_output() {
     old_music_loop="$(state_value MUSIC_LOOP_MODULE)"
     old_alert_loop="$(state_value ALERT_LOOP_MODULE)"
 
-    if [[ -z "$music_bus" || -z "$alert_bus" ]]         || ! pactl get-sink-volume "$MUSIC_SINK" >/dev/null 2>&1         || ! pactl get-sink-volume "$ALERT_SINK" >/dev/null 2>&1; then
+    if [[ -z "$music_bus" || -z "$alert_bus" ]] \
+        || ! pactl get-sink-volume "$MUSIC_SINK" >/dev/null 2>&1 \
+        || ! pactl get-sink-volume "$ALERT_SINK" >/dev/null 2>&1; then
         echo "Стан постійних шин відсутній; виконується повне відновлення" >&2
         start_buses
         return
