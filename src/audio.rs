@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 
 use crate::audio_backend::{
-    linear_to_percent, percent_to_linear, AudioBackend, SinkDescriptor, SinkState, StreamState,
+    linear_to_percent, percent_to_linear, AudioBackend, SinkState, StreamState,
 };
 use crate::config::{effective_audio, AppConfig};
 use crate::output_gain::{BackendOutputGain, OutputGain};
@@ -26,19 +26,6 @@ pub struct AudioEngine {
 impl AudioEngine {
     pub fn new(config: Arc<AppConfig>, backend: Arc<dyn AudioBackend>) -> Self {
         let output_gain: Arc<dyn OutputGain> = Arc::new(BackendOutputGain::new(backend.clone()));
-        let output_router: Arc<dyn OutputRouter> = Arc::new(ExternalOutputRouter::new(
-            backend.clone(),
-            config.audio.music_sink.clone(),
-            config.audio.alert_sink.clone(),
-        ));
-        Self::with_components(config, backend, output_gain, output_router)
-    }
-
-    pub fn with_output_gain(
-        config: Arc<AppConfig>,
-        backend: Arc<dyn AudioBackend>,
-        output_gain: Arc<dyn OutputGain>,
-    ) -> Self {
         let output_router: Arc<dyn OutputRouter> = Arc::new(ExternalOutputRouter::new(
             backend.clone(),
             config.audio.music_sink.clone(),
@@ -91,10 +78,6 @@ impl AudioEngine {
 
     pub async fn sink_state(&self, sink: &str) -> Result<SinkState> {
         self.backend.sink_state(sink).await
-    }
-
-    pub async fn list_sinks(&self) -> Result<Vec<SinkDescriptor>> {
-        self.backend.list_sinks().await
     }
 
     pub async fn list_outputs(&self) -> Result<Vec<OutputDescriptor>> {
