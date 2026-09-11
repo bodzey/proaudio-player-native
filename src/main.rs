@@ -3,11 +3,14 @@
 mod alerts;
 mod api;
 mod audio;
+mod audio_backend;
 mod command;
 mod config;
 mod dlna;
 mod fourstream;
+mod output_gain;
 mod provider;
+mod pulse;
 mod source_arbiter;
 mod state;
 
@@ -26,8 +29,10 @@ use tracing_subscriber::EnvFilter;
 use alerts::{AlertController, SharedRuntimeState};
 use api::ApiController;
 use audio::AudioEngine;
+use audio_backend::AudioBackend;
 use config::{load_config, AppConfig};
 use provider::AlertsProvider;
+use pulse::PulseControl;
 use source_arbiter::SourceArbiter;
 use state::StateStore;
 
@@ -73,23 +78,33 @@ fn init_logging(config: &AppConfig) {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
+fn audio_engine(config: Arc<AppConfig>) -> Result<AudioEngine> {
+    let backend: Arc<dyn AudioBackend> = Arc::new(PulseControl::new()?);
+    Ok(AudioEngine::new(config, backend))
+}
+
 fn runtime(
     config: Arc<AppConfig>,
 ) -> Result<(StateStore, SharedRuntimeState, AudioEngine, AlertsProvider)> {
     let store = StateStore::new(config.state_file.clone());
     let state = Arc::new(Mutex::new(store.load()));
-    let audio = AudioEngine::new(config.clone());
+    let audio = audio_engine(config.clone())?;
     let provider = AlertsProvider::new(config)?;
     Ok((store, state, audio, provider))
 }
 
 async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     let (store, state, audio, provider) = runtime(config.clone())?;
-    let alert_controller =
-        AlertController::new(config.clone(), provider, audio, store, state.clone());
+    let alert_controller = AlertController::new(
+        config.clone(),
+        provider,
+        audio.clone(),
+        store,
+        state.clone(),
+    );
     let source_state = Arc::new(RwLock::new(None));
-    let arbiter = SourceArbiter::new(config.clone(), source_state.clone());
-    let api_controller = ApiController::new(config.clone(), state, source_state);
+    let arbiter = SourceArbiter::new(config.clone(), audio.clone(), source_state.clone());
+    let api_controller = ApiController::new(config.clone(), audio, state, source_state);
 
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
     tasks.spawn(async move { alert_controller.run_forever().await });
@@ -129,7 +144,7 @@ async fn run_once(config: Arc<AppConfig>) -> Result<()> {
 }
 
 async fn test_alert(config: Arc<AppConfig>, start: bool, end: bool, hold: f64) -> Result<()> {
-    let audio = AudioEngine::new(config);
+    let audio = audio_engine(config)?;
     let snapshot = audio.snapshot().await?;
     let result = async {
         audio.enter_alert(&snapshot).await?;
@@ -152,7 +167,7 @@ async fn test_alert(config: Arc<AppConfig>, start: bool, end: bool, hold: f64) -
 }
 
 async fn test_silence(config: Arc<AppConfig>) -> Result<()> {
-    let audio = AudioEngine::new(config);
+    let audio = audio_engine(config)?;
     let snapshot = audio.snapshot().await?;
     let result = async {
         let minute = audio.minute_config()?;

@@ -146,12 +146,13 @@ pub struct WebController {
 impl WebController {
     pub fn new(
         config: Arc<AppConfig>,
+        audio: AudioEngine,
         state: SharedRuntimeState,
         source_state: SharedSourceState,
     ) -> Self {
         let (events, _) = broadcast::channel(8);
         Self {
-            audio: AudioEngine::new(config.clone()),
+            audio,
             config,
             state,
             source_state,
@@ -284,50 +285,25 @@ impl WebController {
     }
 
     pub async fn active_sources(&self) -> Result<Vec<Value>> {
-        let sinks = self
-            .run("pactl", &["-f", "json", "list", "sinks"], false, 8)
-            .await?;
-        let inputs = self
-            .run("pactl", &["-f", "json", "list", "sink-inputs"], false, 8)
-            .await?;
-        let sinks: Value = serde_json::from_str(&sinks.stdout).unwrap_or_else(|_| json!([]));
-        let inputs: Value = serde_json::from_str(&inputs.stdout).unwrap_or_else(|_| json!([]));
-        let music_index = sinks.as_array().and_then(|items| {
-            items
-                .iter()
-                .find(|sink| {
-                    sink.get("name").and_then(Value::as_str)
-                        == Some(self.config.audio.music_sink.as_str())
-                })
-                .and_then(|sink| sink.get("index"))
-                .and_then(Value::as_i64)
-        });
+        let music_index = self
+            .audio
+            .sink_state(&self.config.audio.music_sink)
+            .await?
+            .index;
         let winner = self.source_state.read().await.clone();
         let mut result = Vec::new();
-        for item in inputs.as_array().cloned().unwrap_or_default() {
-            if music_index.is_some() && item.get("sink").and_then(Value::as_i64) != music_index {
+
+        for item in self.audio.list_sink_inputs().await? {
+            if item.sink != music_index || item.corked {
                 continue;
             }
-            if item.get("corked").and_then(Value::as_bool) == Some(true) {
-                continue;
-            }
-            let properties = item
-                .get("properties")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let property = |name: &str| {
-                properties
-                    .get(name)
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned()
-            };
+
+            let property = |name: &str| item.property(name).to_owned();
             let binary = property("application.process.binary");
             let application = {
-                let v = property("application.name");
-                if !v.is_empty() {
-                    v
+                let value = property("application.name");
+                if !value.is_empty() {
+                    value
                 } else if !binary.is_empty() {
                     binary.clone()
                 } else {
@@ -341,27 +317,33 @@ impl WebController {
                 } else {
                     let name = property("media.name");
                     if name.is_empty() {
-                        "Аудіопотік".into()
+                        if item.name.is_empty() {
+                            "Аудіопотік".into()
+                        } else {
+                            item.name.clone()
+                        }
                     } else {
                         name
                     }
                 }
             };
+
             let identity = format!("{application} {binary}").to_ascii_lowercase();
             let (source_key, source_type) = if identity.contains("spotify") {
-                ("spotify".to_owned(), "Spotify Connect")
+                ("spotify".to_owned(), "Spotify Connect".to_owned())
             } else if identity.contains("shairport") || identity.contains("airplay") {
-                ("airplay".to_owned(), "AirPlay")
+                ("airplay".to_owned(), "AirPlay".to_owned())
             } else if identity.contains("gmediarender")
                 || identity.contains("gstreamer")
                 || identity.contains("dlna")
             {
-                ("dlna".to_owned(), "DLNA / UPnP")
+                ("dlna".to_owned(), "DLNA / UPnP".to_owned())
             } else if identity.contains("mpd") {
-                ("mpd".to_owned(), "Локальна бібліотека")
+                ("mpd".to_owned(), "Локальна бібліотека".to_owned())
             } else {
-                (format!("other:{binary}"), application.as_str())
+                (format!("other:{binary}"), application.clone())
             };
+
             result.push(json!({
                 "key": source_key,
                 "active": winner.as_deref() == Some(source_key.as_str()),
@@ -374,90 +356,69 @@ impl WebController {
     }
 
     pub async fn sink_state(&self, sink: &str) -> Result<Value> {
-        let volume = self
-            .run("pactl", &["get-sink-volume", sink], true, 8)
-            .await?;
-        let mute = self.run("pactl", &["get-sink-mute", sink], true, 8).await?;
-        let re = Regex::new(r"(\d+(?:\.\d+)?)%")?;
-        let db_re = Regex::new(r"(-?\d+(?:\.\d+)?)\s*dB")?;
-        let first = volume.stdout.lines().next().unwrap_or_default();
-        let values = re
-            .captures_iter(first)
-            .filter_map(|c| c.get(1))
-            .filter_map(|m| m.as_str().parse::<f64>().ok())
-            .collect::<Vec<_>>();
-        let average = if values.is_empty() {
-            0.0
-        } else {
-            values.iter().sum::<f64>() / values.len() as f64
-        };
-        let db_values = db_re
-            .captures_iter(first)
-            .filter_map(|c| c.get(1))
-            .filter_map(|m| m.as_str().parse::<f64>().ok())
-            .collect::<Vec<_>>();
-        let db = if db_values.is_empty() {
-            if average <= 0.0 {
-                -60.0
-            } else {
-                20.0 * (average / 100.0).log10()
-            }
-        } else {
-            db_values.iter().sum::<f64>() / db_values.len() as f64
-        };
+        let state = self.audio.sink_state(sink).await?;
         Ok(json!({
             "name": sink,
-            "volume": (average * 10.0).round() / 10.0,
-            "db": (db * 100.0).round() / 100.0,
-            "muted": mute.stdout.to_ascii_lowercase().ends_with("yes"),
+            "volume": (state.average_percent() * 10.0).round() / 10.0,
+            "db": (state.average_db() * 100.0).round() / 100.0,
+            "muted": state.muted,
         }))
     }
 
     pub async fn physical_sink(&self) -> Result<String> {
-        let output = self
-            .run("pactl", &["list", "short", "sinks"], true, 8)
-            .await?;
-        let mut candidates = output
-            .stdout
-            .lines()
-            .filter_map(|line| line.split_whitespace().nth(1))
-            .filter(|name| {
-                *name != self.config.audio.music_sink
-                    && *name != self.config.audio.alert_sink
-                    && *name != "auto_null"
+        let mut candidates = self
+            .audio
+            .list_sinks()
+            .await?
+            .into_iter()
+            .filter(|sink| {
+                let name = sink.state.name.as_str();
+                name != self.config.audio.music_sink
+                    && name != self.config.audio.alert_sink
+                    && name != "auto_null"
                     && !name.starts_with("proaudio_player_")
             })
-            .map(str::to_owned)
             .collect::<Vec<_>>();
+
         if candidates.is_empty() {
             bail!("Фізичний аудіовихід не знайдено");
         }
 
-        // The bus state is authoritative: it identifies the sink that actually
-        // receives both loopbacks. Do not guess from USB priority after hotplug.
+        // Firmware routing state is authoritative after hotplug. The native core
+        // intentionally does not prefer USB, I2S, PCI or any other hardware bus.
         if let Ok(state) = fs::read_to_string(AUDIO_BUS_STATE_FILE) {
             if let Some(active) = state
                 .lines()
                 .find_map(|line| line.strip_prefix("PHYSICAL="))
                 .map(str::trim)
             {
-                if let Some(position) = candidates.iter().position(|name| name == active) {
-                    return Ok(candidates.remove(position));
+                if let Some(position) = candidates.iter().position(|sink| sink.state.name == active)
+                {
+                    return Ok(candidates.remove(position).state.name);
                 }
             }
         }
+
         if let Some(configured) = Self::configured_output() {
-            if let Some(position) = candidates.iter().position(|name| name == &configured) {
-                return Ok(candidates.remove(position));
+            if let Some(position) = candidates
+                .iter()
+                .position(|sink| sink.state.name == configured)
+            {
+                return Ok(candidates.remove(position).state.name);
             }
         }
+
+        // With no explicit platform policy, prefer the sink that is actually
+        // running. If there is still ambiguity, use a deterministic name order.
         if let Some(position) = candidates
             .iter()
-            .position(|name| name.starts_with("alsa_output.usb-"))
+            .position(|sink| sink.state_name.eq_ignore_ascii_case("running"))
         {
-            return Ok(candidates.remove(position));
+            return Ok(candidates.remove(position).state.name);
         }
-        Ok(candidates.remove(0))
+
+        candidates.sort_by(|left, right| left.state.name.cmp(&right.state.name));
+        Ok(candidates.remove(0).state.name)
     }
 
     fn configured_output() -> Option<String> {
@@ -508,36 +469,38 @@ impl WebController {
     }
 
     pub async fn audio_outputs(&self) -> Result<Vec<Value>> {
-        let output = self
-            .run("pactl", &["-f", "json", "list", "sinks"], true, 8)
-            .await?;
-        let sinks: Value =
-            serde_json::from_str(&output.stdout).context("Некоректна відповідь PipeWire")?;
+        let sinks = self.audio.list_sinks().await?;
         let selected = Self::configured_output();
         let current = self.physical_sink().await.ok();
-        Ok(sinks.as_array().into_iter().flatten().filter_map(|sink| {
-            let name = sink.get("name")?.as_str()?;
-            if name == "auto_null" || name == self.config.audio.music_sink
-                || name == self.config.audio.alert_sink || name.starts_with("proaudio_player_") {
-                return None;
-            }
-            let properties = sink.get("properties").and_then(Value::as_object);
-            let description = properties.and_then(|p| p.get("device.description"))
-                .and_then(Value::as_str).filter(|v| !v.is_empty()).unwrap_or(name);
-            let device_class = properties.and_then(|p| p.get("device.class"))
-                .and_then(Value::as_str).unwrap_or("");
-            let alsa_card = properties.and_then(|p| p.get("alsa.card"))
-                .and_then(Value::as_str).and_then(|value| value.parse::<u32>().ok());
-            Some(json!({
-                "id": name,
-                "name": description,
-                "state": sink.get("state").and_then(Value::as_str).unwrap_or("UNKNOWN").to_ascii_lowercase(),
-                "device_class": device_class,
-                "alsa_card": alsa_card,
-                "selected": selected.as_deref().or(current.as_deref()) == Some(name),
-                "available": true
-            }))
-        }).collect())
+        let selected_name = selected.as_deref().or(current.as_deref());
+
+        Ok(sinks
+            .into_iter()
+            .filter_map(|sink| {
+                let name = sink.state.name;
+                if name == "auto_null"
+                    || name == self.config.audio.music_sink
+                    || name == self.config.audio.alert_sink
+                    || name.starts_with("proaudio_player_")
+                {
+                    return None;
+                }
+
+                Some(json!({
+                    "id": name,
+                    "name": if sink.description.is_empty() {
+                        name.clone()
+                    } else {
+                        sink.description
+                    },
+                    "state": sink.state_name,
+                    "device_class": sink.device_class,
+                    "alsa_card": sink.alsa_card,
+                    "selected": selected_name == Some(name.as_str()),
+                    "available": true,
+                }))
+            })
+            .collect())
     }
 
     pub async fn select_audio_output(&self, requested: &str) -> Result<Value> {
@@ -721,22 +684,18 @@ impl WebController {
     pub async fn mixer_state(&self) -> Result<Value> {
         let music = self.sink_state(&self.config.audio.music_sink).await?;
         let alert = self.sink_state(&self.config.audio.alert_sink).await?;
-        let master = match self.primary_hardware_mixer().await {
-            Ok(master) => master,
-            Err(_) => {
-                let sink = self.physical_sink().await?;
-                let mut master = self.sink_state(&sink).await?;
-                if let Some(object) = master.as_object_mut() {
-                    object.insert(
-                        "card_name".into(),
-                        Value::String("Програмний Master".into()),
-                    );
-                    object.insert("control".into(), Value::String(sink));
-                    object.insert("backend".into(), Value::String("pipewire".into()));
-                }
-                master
-            }
-        };
+        let sink = self.physical_sink().await?;
+        let state = self.audio.master_state(&sink).await?;
+        let master = json!({
+            "name": state.name,
+            "volume": (state.average_percent() * 10.0).round() / 10.0,
+            "db": (state.average_db() * 100.0).round() / 100.0,
+            "muted": state.muted,
+            "card_name": "Master",
+            "control": sink,
+            "backend": self.audio.master_backend_name(),
+            "transport_backend": self.audio.backend_name(),
+        });
         Ok(json!({ "music": music, "alert": alert, "master": master }))
     }
 
@@ -745,81 +704,39 @@ impl WebController {
         if !(-60.0..=0.0).contains(&db) {
             bail!("Рівень має бути в межах -60..0 dB");
         }
-        if target == "master" {
-            if let Ok(mixer) = self.primary_hardware_mixer().await {
-                let card = mixer
-                    .get("card")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| anyhow!("Некоректна ALSA-карта"))?
-                    .to_string();
-                let control = mixer
-                    .get("control")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("Некоректний ALSA-регулятор"))?;
-                if muted == Some(true) || db <= -60.0 {
-                    self.run("amixer", &["-c", &card, "sset", control, "mute"], true, 8)
-                        .await?;
-                } else if let Some(reference) = mixer.get("db_reference").and_then(Value::as_f64) {
-                    let minimum = mixer
-                        .get("db_min")
-                        .and_then(Value::as_f64)
-                        .unwrap_or(reference - 60.0);
-                    let hardware_db = (reference + db).max(minimum);
-                    let value = format!("{hardware_db:.2}dB");
-                    self.run(
-                        "amixer",
-                        &["-c", &card, "sset", control, "--", &value, "unmute"],
-                        true,
-                        8,
-                    )
-                    .await?;
-                } else {
-                    let percent = (10.0_f64.powf(db / 20.0) * 100.0).clamp(1.0, 100.0);
-                    let value = format!("{percent:.0}%");
-                    self.run(
-                        "amixer",
-                        &["-c", &card, "sset", control, &value, "unmute"],
-                        true,
-                        8,
-                    )
-                    .await?;
-                }
-            } else {
+
+        let is_muted = muted == Some(true) || db <= -60.0;
+        match target {
+            "master" => {
                 let sink = self.physical_sink().await?;
-                let is_muted = muted == Some(true) || db <= -60.0;
-                if !is_muted {
-                    let value = format!("{db:.1}dB");
-                    self.run("pactl", &["set-sink-volume", &sink, &value], true, 8)
+                if muted != Some(true) {
+                    self.audio.set_master_db(&sink, db).await?;
+                }
+                self.audio.set_master_mute(&sink, is_muted).await?;
+            }
+            "music" => {
+                if muted != Some(true) {
+                    self.audio
+                        .set_sink_db(&self.config.audio.music_sink, db)
                         .await?;
                 }
-                self.run(
-                    "pactl",
-                    &["set-sink-mute", &sink, if is_muted { "1" } else { "0" }],
-                    true,
-                    8,
-                )
-                .await?;
-            }
-        } else {
-            let sink = match target {
-                "music" => self.config.audio.music_sink.as_str(),
-                "alert" => self.config.audio.alert_sink.as_str(),
-                _ => bail!("Невідомий канал мікшера"),
-            };
-            let is_muted = muted == Some(true) || db <= -60.0;
-            if !is_muted {
-                let value = format!("{db:.1}dB");
-                self.run("pactl", &["set-sink-volume", sink, &value], true, 8)
+                self.audio
+                    .set_sink_mute(&self.config.audio.music_sink, is_muted)
                     .await?;
             }
-            self.run(
-                "pactl",
-                &["set-sink-mute", sink, if is_muted { "1" } else { "0" }],
-                true,
-                8,
-            )
-            .await?;
+            "alert" => {
+                if muted != Some(true) {
+                    self.audio
+                        .set_sink_db(&self.config.audio.alert_sink, db)
+                        .await?;
+                }
+                self.audio
+                    .set_sink_mute(&self.config.audio.alert_sink, is_muted)
+                    .await?;
+            }
+            _ => bail!("Невідомий канал мікшера"),
         }
+
         self.mixer_state().await
     }
 
@@ -1533,7 +1450,25 @@ async fn set_audio_level(
         ));
     }
     let sink = match body.target.as_str() {
-        "master" => controller.physical_sink().await.map_err(map_internal)?,
+        "master" => {
+            let sink = controller.physical_sink().await.map_err(map_internal)?;
+            controller
+                .audio
+                .set_master_percent(&sink, body.percent)
+                .await
+                .map_err(map_internal)?;
+            let state = controller
+                .audio
+                .master_state(&sink)
+                .await
+                .map_err(map_internal)?;
+            return Ok(Json(json!({
+                "name": state.name,
+                "volume": (state.average_percent() * 10.0).round() / 10.0,
+                "db": (state.average_db() * 100.0).round() / 100.0,
+                "muted": state.muted,
+            })));
+        }
         "music" => controller.config.audio.music_sink.clone(),
         "alert" => controller.config.audio.alert_sink.clone(),
         _ => return Err(api_error(StatusCode::BAD_REQUEST, "Невідомий аудіорівень")),
@@ -2059,7 +1994,7 @@ pub async fn serve(controller: WebController) -> Result<()> {
     info!(%address, api_version = API_VERSION, "Native control API started");
 
     // One shared status producer serves every browser. This avoids each client
-    // spawning its own pactl/mpc/busctl polling workload.
+    // duplicating its own status/mpc/busctl polling workload.
     let event_controller = controller.clone();
     tokio::spawn(async move {
         loop {

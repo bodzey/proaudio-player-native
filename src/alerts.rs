@@ -428,7 +428,15 @@ impl AlertController {
     }
 
     pub async fn run_forever(mut self) -> Result<()> {
-        self.recover().await?;
+        loop {
+            match self.recover().await {
+                Ok(()) => break,
+                Err(err) => {
+                    error!("Не вдалося відновити audio state: {err:#}; повторна спроба");
+                    sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
         let mut next_poll = Instant::now();
         loop {
             if let Err(err) = self.maybe_start_minute_silence().await {

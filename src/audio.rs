@@ -3,90 +3,175 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use regex::Regex;
 use tokio::process::Command;
+use tokio::sync::watch;
 use tokio::time::sleep;
 
-use crate::command;
+use crate::audio_backend::{
+    linear_to_percent, percent_to_linear, AudioBackend, SinkDescriptor, SinkState, StreamState,
+};
 use crate::config::{effective_audio, AppConfig};
+use crate::output_gain::{BackendOutputGain, OutputGain};
 use crate::state::AudioSnapshot;
 
 #[derive(Clone)]
 pub struct AudioEngine {
     config: Arc<AppConfig>,
+    backend: Arc<dyn AudioBackend>,
+    output_gain: Arc<dyn OutputGain>,
 }
 
 impl AudioEngine {
-    pub fn new(config: Arc<AppConfig>) -> Self {
-        Self { config }
+    pub fn new(config: Arc<AppConfig>, backend: Arc<dyn AudioBackend>) -> Self {
+        let output_gain: Arc<dyn OutputGain> = Arc::new(BackendOutputGain::new(backend.clone()));
+        Self::with_output_gain(config, backend, output_gain)
     }
+
+    pub fn with_output_gain(
+        config: Arc<AppConfig>,
+        backend: Arc<dyn AudioBackend>,
+        output_gain: Arc<dyn OutputGain>,
+    ) -> Self {
+        Self {
+            config,
+            backend,
+            output_gain,
+        }
+    }
+
     pub fn config(&self) -> Result<crate::config::AudioConfig> {
         Ok(effective_audio(&self.config.audio, &self.config.minute_silence)?.0)
     }
+
     pub fn minute_config(&self) -> Result<crate::config::MinuteSilenceConfig> {
         Ok(effective_audio(&self.config.audio, &self.config.minute_silence)?.1)
     }
 
-    pub async fn snapshot(&self) -> Result<AudioSnapshot> {
-        let cfg = self.config()?;
-        let volume = command::run("pactl", &["get-sink-volume", &cfg.music_sink], true, 8).await?;
-        let first = volume.stdout.lines().next().unwrap_or_default();
-        let re = Regex::new(r"(\d+(?:\.\d+)?)%")?;
-        let volumes_percent = re
-            .captures_iter(first)
-            .filter_map(|c| c.get(1)?.as_str().parse::<f64>().ok())
-            .collect::<Vec<_>>();
-        if volumes_percent.is_empty() {
-            bail!("не вдалося прочитати гучність {}", cfg.music_sink);
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.backend_name()
+    }
+
+    pub fn master_backend_name(&self) -> &'static str {
+        self.output_gain.backend_name()
+    }
+
+    pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
+        self.backend.subscribe_changes()
+    }
+
+    pub async fn sink_state(&self, sink: &str) -> Result<SinkState> {
+        self.backend.sink_state(sink).await
+    }
+
+    pub async fn list_sinks(&self) -> Result<Vec<SinkDescriptor>> {
+        self.backend.list_sinks().await
+    }
+
+    pub async fn list_sink_inputs(&self) -> Result<Vec<StreamState>> {
+        self.backend.list_sink_inputs().await
+    }
+
+    pub async fn set_sink_input_percent(&self, index: u32, percent: f64) -> Result<()> {
+        if !(0.0..=100.0).contains(&percent) {
+            bail!("гучність має бути 0..100");
         }
-        let mute = command::run("pactl", &["get-sink-mute", &cfg.music_sink], true, 8).await?;
+        self.backend.set_sink_input_percent(index, percent).await?;
+        Ok(())
+    }
+
+    pub async fn set_sink_input_mute(&self, index: u32, muted: bool) -> Result<()> {
+        self.backend.set_sink_input_mute(index, muted).await?;
+        Ok(())
+    }
+
+    pub async fn master_state(&self, sink: &str) -> Result<SinkState> {
+        self.output_gain.state(sink).await
+    }
+
+    pub async fn set_master_percent(&self, sink: &str, percent: f64) -> Result<()> {
+        if !(0.0..=100.0).contains(&percent) {
+            bail!("гучність має бути 0..100");
+        }
+        self.output_gain.set_percent(sink, percent).await?;
+        self.output_gain.set_mute(sink, percent <= 0.0).await?;
+        Ok(())
+    }
+
+    pub async fn set_master_db(&self, sink: &str, db: f64) -> Result<()> {
+        if !(-60.0..=0.0).contains(&db) {
+            bail!("рівень має бути в межах -60..0 dB");
+        }
+        self.output_gain.set_db(sink, db).await?;
+        Ok(())
+    }
+
+    pub async fn set_master_mute(&self, sink: &str, muted: bool) -> Result<()> {
+        self.output_gain.set_mute(sink, muted).await?;
+        Ok(())
+    }
+
+    async fn snapshot_sink(&self, sink: &str) -> Result<AudioSnapshot> {
+        let state = self.sink_state(sink).await?;
+        if state.volumes_percent.is_empty() {
+            bail!("не вдалося прочитати гучність {sink}");
+        }
         Ok(AudioSnapshot {
-            volumes_percent,
-            muted: mute.stdout.to_ascii_lowercase().ends_with("yes"),
+            volumes_percent: state.volumes_percent,
+            muted: state.muted,
         })
     }
 
+    pub async fn snapshot(&self) -> Result<AudioSnapshot> {
+        let cfg = self.config()?;
+        self.snapshot_sink(&cfg.music_sink).await
+    }
+
     async fn set_volume(&self, sink: &str, volumes: &[f64]) -> Result<()> {
-        let safe = volumes
-            .iter()
-            .map(|v| v.clamp(0.0, 100.0))
-            .collect::<Vec<_>>();
-        let owned = safe.iter().map(|v| format!("{v:.3}%")).collect::<Vec<_>>();
-        let mut args = vec!["set-sink-volume", sink];
-        args.extend(owned.iter().map(String::as_str));
-        command::run("pactl", &args, true, 8).await?;
+        self.backend
+            .set_sink_percent_channels(sink, volumes)
+            .await?;
         Ok(())
     }
-    async fn set_mute(&self, sink: &str, muted: bool) -> Result<()> {
-        command::run(
-            "pactl",
-            &["set-sink-mute", sink, if muted { "1" } else { "0" }],
-            true,
-            8,
-        )
-        .await?;
+
+    pub async fn set_sink_mute(&self, sink: &str, muted: bool) -> Result<()> {
+        self.backend.set_sink_mute(sink, muted).await?;
         Ok(())
     }
+
+    pub async fn set_sink_db(&self, sink: &str, db: f64) -> Result<()> {
+        if !(-60.0..=0.0).contains(&db) {
+            bail!("рівень має бути в межах -60..0 dB");
+        }
+        self.backend.set_sink_db(sink, db).await?;
+        Ok(())
+    }
+
     pub async fn set_music_volume(&self, percent: f64) -> Result<()> {
         if !(0.0..=100.0).contains(&percent) {
             bail!("гучність має бути 0..100");
         }
-        let snap = self.snapshot().await?;
-        let channels = snap.volumes_percent.len().max(1);
         let cfg = self.config()?;
-        self.set_volume(&cfg.music_sink, &vec![percent; channels])
-            .await
+        let values = [percent];
+        self.backend
+            .set_sink_percent_channels(&cfg.music_sink, &values)
+            .await?;
+        Ok(())
     }
+
     pub async fn set_music_mute(&self, muted: bool) -> Result<()> {
         let cfg = self.config()?;
-        self.set_mute(&cfg.music_sink, muted).await
+        self.set_sink_mute(&cfg.music_sink, muted).await
     }
+
     pub async fn set_sink_percent(&self, sink: &str, percent: f64) -> Result<()> {
         if !(0.0..=100.0).contains(&percent) {
             bail!("гучність має бути 0..100");
         }
-        self.set_volume(sink, &[percent, percent]).await?;
-        self.set_mute(sink, percent <= 0.0).await
+        let values = [percent];
+        self.backend
+            .set_sink_percent_channels(sink, &values)
+            .await?;
+        self.set_sink_mute(sink, percent <= 0.0).await
     }
 
     async fn fade(&self, sink: &str, start: &[f64], target: &[f64], duration: f64) -> Result<()> {
@@ -98,13 +183,18 @@ impl AudioEngine {
         if duration <= 0.0 {
             return self.set_volume(sink, &target).await;
         }
+
         let steps = ((duration * 20.0).floor() as usize).max(1);
         for index in 1..=steps {
             let ratio = index as f64 / steps as f64;
             let values = start
                 .iter()
                 .zip(target.iter())
-                .map(|(a, b)| a + (b - a) * ratio)
+                .map(|(a, b)| {
+                    let start_linear = percent_to_linear(*a);
+                    let target_linear = percent_to_linear(*b);
+                    linear_to_percent(start_linear + (target_linear - start_linear) * ratio)
+                })
                 .collect::<Vec<_>>();
             self.set_volume(sink, &values).await?;
             sleep(Duration::from_secs_f64(duration / steps as f64)).await;
@@ -117,15 +207,16 @@ impl AudioEngine {
         Ok(snapshot
             .volumes_percent
             .iter()
-            .map(|v| v * factor)
+            .map(|percent| linear_to_percent(percent_to_linear(*percent) * factor))
             .collect())
     }
+
     pub async fn enter_alert(&self, snapshot: &AudioSnapshot) -> Result<()> {
         let cfg = self.config()?;
         let current = self.snapshot().await?;
         let target = self.ducked_volumes(snapshot)?;
         if !snapshot.muted {
-            self.set_mute(&cfg.music_sink, false).await?;
+            self.set_sink_mute(&cfg.music_sink, false).await?;
         }
         self.fade(
             &cfg.music_sink,
@@ -135,6 +226,7 @@ impl AudioEngine {
         )
         .await
     }
+
     pub async fn enter_silence(&self, snapshot: &AudioSnapshot, duration: f64) -> Result<()> {
         if snapshot.muted {
             return Ok(());
@@ -148,12 +240,14 @@ impl AudioEngine {
         )
         .await
     }
+
     pub async fn ensure_alert(&self, snapshot: &AudioSnapshot) -> Result<()> {
         let cfg = self.config()?;
         self.set_volume(&cfg.music_sink, &self.ducked_volumes(snapshot)?)
             .await?;
-        self.set_mute(&cfg.music_sink, snapshot.muted).await
+        self.set_sink_mute(&cfg.music_sink, snapshot.muted).await
     }
+
     pub async fn restore(&self, snapshot: Option<&AudioSnapshot>) -> Result<()> {
         let cfg = self.config()?;
         let current = self.snapshot().await?;
@@ -165,7 +259,7 @@ impl AudioEngine {
             ),
         };
         if !muted {
-            self.set_mute(&cfg.music_sink, false).await?;
+            self.set_sink_mute(&cfg.music_sink, false).await?;
         }
         self.fade(
             &cfg.music_sink,
@@ -174,7 +268,7 @@ impl AudioEngine {
             cfg.restore_fade_seconds,
         )
         .await?;
-        self.set_mute(&cfg.music_sink, muted).await
+        self.set_sink_mute(&cfg.music_sink, muted).await
     }
 
     pub async fn play(
@@ -186,9 +280,13 @@ impl AudioEngine {
             bail!("файл оповіщення відсутній: {}", media_file.display());
         }
         let cfg = self.config()?;
-        self.set_mute(&cfg.alert_sink, false).await?;
+        self.set_sink_mute(&cfg.alert_sink, false).await?;
         let volume = volume_percent.unwrap_or(cfg.alert_volume_percent);
-        self.set_volume(&cfg.alert_sink, &[volume, volume]).await?;
+        let values = [volume];
+        self.backend
+            .set_sink_percent_channels(&cfg.alert_sink, &values)
+            .await?;
+
         let output = Command::new(&cfg.player_binary)
             .args(["--no-video", "--really-quiet", "--ao=pulse", "--volume=100"])
             .arg(media_file)

@@ -2,14 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use anyhow::Result;
 use tokio::sync::RwLock;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
+use crate::audio::AudioEngine;
+use crate::audio_backend::StreamState;
 use crate::command;
 use crate::config::AppConfig;
 
@@ -18,29 +17,29 @@ pub type SharedSourceState = Arc<RwLock<Option<String>>>;
 #[derive(Clone)]
 pub struct SourceArbiter {
     config: Arc<AppConfig>,
-    active_streams: HashSet<i64>,
+    audio: AudioEngine,
+    active_streams: HashSet<u32>,
     winner: Option<String>,
     shared_winner: SharedSourceState,
 }
 
 impl SourceArbiter {
-    pub fn new(config: Arc<AppConfig>, shared_winner: SharedSourceState) -> Self {
+    pub fn new(
+        config: Arc<AppConfig>,
+        audio: AudioEngine,
+        shared_winner: SharedSourceState,
+    ) -> Self {
         Self {
             config,
+            audio,
             active_streams: HashSet::new(),
             winner: None,
             shared_winner,
         }
     }
 
-    fn source_key(stream: &Value) -> String {
-        let props = stream.get("properties").and_then(Value::as_object);
-        let get = |key: &str| {
-            props
-                .and_then(|p| p.get(key))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-        };
+    fn source_key(stream: &StreamState) -> String {
+        let get = |key: &str| stream.property(key);
         let identity = format!(
             "{} {} {}",
             get("application.name"),
@@ -65,98 +64,50 @@ impl SourceArbiter {
             return "mpd".into();
         }
 
-        let index = stream.get("index").and_then(Value::as_i64).unwrap_or(-1);
-        format!(
-            "other:{}",
-            [
-                get("application.process.binary"),
-                get("application.name"),
-                get("application.process.id"),
-            ]
+        let identity = [
+            get("application.process.binary"),
+            get("application.name"),
+            get("application.process.id"),
+        ]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| stream.index.to_string());
+        format!("other:{identity}")
+    }
+
+    async fn streams(&self) -> Result<Vec<StreamState>> {
+        let music_index = self
+            .audio
+            .sink_state(&self.config.audio.music_sink)
+            .await?
+            .index;
+        Ok(self
+            .audio
+            .list_sink_inputs()
+            .await?
             .into_iter()
-            .find(|v| !v.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| index.to_string())
-        )
-    }
-
-    fn flag(stream: &Value, key: &str) -> bool {
-        match stream.get(key) {
-            Some(Value::Bool(v)) => *v,
-            Some(Value::String(v)) => {
-                matches!(v.to_ascii_lowercase().as_str(), "yes" | "true" | "1")
-            }
-            Some(Value::Number(v)) => v.as_i64().unwrap_or_default() != 0,
-            _ => false,
-        }
-    }
-
-    fn volume_is_unity(stream: &Value) -> bool {
-        let Some(channels) = stream.get("volume").and_then(Value::as_object) else {
-            return false;
-        };
-        !channels.is_empty()
-            && channels.values().all(|channel| {
-                channel.get("value").and_then(Value::as_u64) == Some(65_536)
-                    || channel.get("value_percent").and_then(Value::as_str) == Some("100%")
-            })
-    }
-
-    async fn music_sink_index(&self) -> Result<Option<i64>> {
-        let out = command::run("pactl", &["-f", "json", "list", "sinks"], false, 8).await?;
-        if out.code != 0 {
-            return Ok(None);
-        }
-        let sinks: Value = serde_json::from_str(&out.stdout).unwrap_or(Value::Array(Vec::new()));
-        let Some(items) = sinks.as_array() else {
-            return Ok(None);
-        };
-        Ok(items
-            .iter()
-            .find(|sink| {
-                sink.get("name").and_then(Value::as_str)
-                    == Some(self.config.audio.music_sink.as_str())
-            })
-            .and_then(|sink| sink.get("index"))
-            .and_then(Value::as_i64))
-    }
-
-    async fn streams(&self) -> Result<Vec<Value>> {
-        let Some(index) = self.music_sink_index().await? else {
-            return Ok(Vec::new());
-        };
-        let out = command::run("pactl", &["-f", "json", "list", "sink-inputs"], false, 8).await?;
-        if out.code != 0 {
-            return Ok(Vec::new());
-        }
-        let value: Value = serde_json::from_str(&out.stdout).unwrap_or(Value::Array(Vec::new()));
-        Ok(value
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|stream| stream.get("sink").and_then(Value::as_i64) == Some(index))
+            .filter(|stream| stream.sink == music_index)
             .collect())
     }
 
-    fn choose_winner(&self, grouped: &HashMap<String, Vec<Value>>) -> Option<String> {
+    fn choose_winner(&self, grouped: &HashMap<String, Vec<StreamState>>) -> Option<String> {
         let newcomers = grouped.iter().filter(|(_, items)| {
-            items.iter().any(|item| {
-                item.get("index")
-                    .and_then(Value::as_i64)
-                    .is_some_and(|i| !self.active_streams.contains(&i))
-            })
+            items
+                .iter()
+                .any(|item| !self.active_streams.contains(&item.index))
         });
         let newest = newcomers.max_by_key(|(_, items)| {
             items
                 .iter()
-                .filter_map(|v| v.get("index").and_then(Value::as_i64))
+                .map(|item| item.index)
                 .max()
-                .unwrap_or(-1)
+                .unwrap_or_default()
         });
         if let Some((key, _)) = newest {
             return Some(key.clone());
         }
+
         if self
             .winner
             .as_ref()
@@ -164,19 +115,20 @@ impl SourceArbiter {
         {
             return self.winner.clone();
         }
+
         grouped
             .iter()
             .max_by_key(|(_, items)| {
                 items
                     .iter()
-                    .filter_map(|v| v.get("index").and_then(Value::as_i64))
+                    .map(|item| item.index)
                     .max()
-                    .unwrap_or(-1)
+                    .unwrap_or_default()
             })
             .map(|(key, _)| key.clone())
     }
 
-    async fn stop_source(&self, key: &str, streams: &[Value]) -> Result<()> {
+    async fn stop_source(&self, key: &str, streams: &[StreamState]) -> Result<()> {
         if key == "mpd" {
             let out = command::run("mpc", &["stop"], false, 8).await?;
             if out.code != 0 {
@@ -224,17 +176,12 @@ impl SourceArbiter {
             }
         }
 
-        // AirPlay and DLNA receivers may keep an uncorked session after Stop.
-        // Terminating their unprivileged receiver process disconnects the sender;
-        // systemd immediately starts a clean receiver instance.
+        // Receiver processes are transport endpoints. Terminating AirPlay/DLNA
+        // disconnects the losing sender; systemd immediately starts a clean receiver.
         if matches!(key, "airplay" | "dlna") {
             for stream in streams {
-                let pid = stream
-                    .get("properties")
-                    .and_then(Value::as_object)
-                    .and_then(|p| p.get("application.process.id"))
-                    .and_then(Value::as_str);
-                if let Some(pid) = pid.filter(|value| value.chars().all(|c| c.is_ascii_digit())) {
+                let pid = stream.property("application.process.id");
+                if !pid.is_empty() && pid.chars().all(|character| character.is_ascii_digit()) {
                     let out = command::run("kill", &["-TERM", pid], false, 3).await?;
                     if out.code != 0 {
                         debug!(
@@ -250,9 +197,9 @@ impl SourceArbiter {
 
     pub async fn reconcile(&mut self) -> Result<()> {
         let streams = self.streams().await?;
-        let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut grouped: HashMap<String, Vec<StreamState>> = HashMap::new();
         for stream in streams {
-            if Self::flag(&stream, "corked") {
+            if stream.corked {
                 continue;
             }
             grouped
@@ -273,50 +220,30 @@ impl SourceArbiter {
             let is_winner = Some(key) == self.winner.as_ref();
             let should_mute = !is_winner;
             for item in items {
-                let Some(index) = item.get("index").and_then(Value::as_i64) else {
-                    continue;
-                };
-                let index_text = index.to_string();
-
-                if Self::flag(item, "mute") != should_mute {
-                    let out = command::run(
-                        "pactl",
-                        &[
-                            "set-sink-input-mute",
-                            &index_text,
-                            if should_mute { "1" } else { "0" },
-                        ],
-                        false,
-                        8,
-                    )
-                    .await?;
-                    if out.code != 0 {
+                if item.muted != should_mute {
+                    if let Err(err) = self
+                        .audio
+                        .set_sink_input_mute(item.index, should_mute)
+                        .await
+                    {
                         warn!(
-                            stream = index,
+                            stream = item.index,
                             source = key,
-                            "Не вдалося змінити mute: {}",
-                            out.stderr
+                            error = %err,
+                            "Не вдалося змінити mute потоку"
                         );
                     }
                 }
 
-                // Source receivers are transport inputs, not gain stages. Keep the
-                // winning input at unity and perform user volume/ducking only on
-                // the music bus. This also repairs persisted Spotify softvol=0.
-                if is_winner && !Self::volume_is_unity(item) {
-                    let out = command::run(
-                        "pactl",
-                        &["set-sink-input-volume", &index_text, "100%"],
-                        false,
-                        8,
-                    )
-                    .await?;
-                    if out.code != 0 {
+                // Source receivers are transports, never user gain stages. Keep
+                // the winning stream at unity. MUSIC bus owns user volume and ducking.
+                if is_winner && item.has_volume && item.volume_writable && !item.volume_is_unity() {
+                    if let Err(err) = self.audio.set_sink_input_percent(item.index, 100.0).await {
                         warn!(
-                            stream = index,
+                            stream = item.index,
                             source = key,
-                            "Не вдалося встановити unity gain: {}",
-                            out.stderr
+                            error = %err,
+                            "Не вдалося встановити unity gain"
                         );
                     }
                 }
@@ -326,7 +253,13 @@ impl SourceArbiter {
         if changed && self.winner.is_some() {
             for key in grouped.keys() {
                 if Some(key) != self.winner.as_ref() {
-                    let _ = self.stop_source(key, &grouped[key]).await;
+                    if let Err(err) = self.stop_source(key, &grouped[key]).await {
+                        debug!(
+                            source = key,
+                            error = %err,
+                            "Не вдалося завершити неактивне джерело"
+                        );
+                    }
                 }
             }
         }
@@ -334,66 +267,34 @@ impl SourceArbiter {
         self.active_streams = grouped
             .values()
             .flatten()
-            .filter_map(|v| v.get("index").and_then(Value::as_i64))
+            .map(|stream| stream.index)
             .collect();
         Ok(())
     }
 
     pub async fn run_forever(mut self) -> Result<()> {
+        let mut changes = self.audio.subscribe_changes();
+
         loop {
             if let Err(err) = self.reconcile().await {
                 error!("Помилка арбітра аудіоджерел: {err:#}");
             }
 
-            let mut child = match Command::new("pactl")
-                .arg("subscribe")
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-            {
-                Ok(v) => v,
-                Err(err) => {
-                    error!("Не вдалося запустити pactl subscribe: {err}");
-                    sleep(Duration::from_secs(2)).await;
-                    continue;
+            tokio::select! {
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        warn!("Підписка audio backend завершилась; повторне підключення");
+                        changes = self.audio.subscribe_changes();
+                        sleep(Duration::from_secs(1)).await;
+                    } else {
+                        // Coalesce the burst of server events produced by one topology change.
+                        sleep(Duration::from_millis(80)).await;
+                    }
                 }
-            };
-
-            let Some(stdout) = child.stdout.take() else {
-                bail!("pactl subscribe stdout unavailable");
-            };
-            let mut lines = BufReader::new(stdout).lines();
-
-            loop {
-                match timeout(Duration::from_secs(2), lines.next_line()).await {
-                    Ok(Ok(Some(line))) => {
-                        let lower = line.to_ascii_lowercase();
-                        if lower.contains("sink-input") || lower.contains("sink ") {
-                            sleep(Duration::from_millis(80)).await;
-                            if let Err(err) = self.reconcile().await {
-                                error!("Помилка reconcile: {err:#}");
-                            }
-                        }
-                    }
-                    Ok(Ok(None)) => break,
-                    Ok(Err(err)) => {
-                        warn!("pactl subscribe read failed: {err}");
-                        break;
-                    }
-                    Err(_) => {
-                        // Heartbeat reconciliation catches missed Pulse/PipeWire events,
-                        // stalled subscriptions and externally changed stream state.
-                        if let Err(err) = self.reconcile().await {
-                            error!("Помилка heartbeat reconcile: {err:#}");
-                        }
-                    }
+                _ = sleep(Duration::from_secs(2)) => {
+                    // Heartbeat catches a backend/server restart and any missed event.
                 }
             }
-
-            let _ = child.kill().await;
-            warn!("pactl subscribe завершився; повторний запуск");
-            sleep(Duration::from_secs(2)).await;
         }
     }
 }
