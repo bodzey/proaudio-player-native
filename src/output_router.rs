@@ -1,15 +1,12 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
-use serde_json::Value;
 use tokio::sync::{watch, Mutex};
 use tokio::time::sleep;
 
 use crate::audio_backend::{AudioBackend, BackendFuture, SinkDescriptor};
-use crate::command;
 
 pub const DEFAULT_MASTER_SINK: &str = "proaudio_player_master";
 const DEFAULT_OUTPUT_FILE: &str = "/var/lib/proaudio-player-alert/audio-output.env";
@@ -169,69 +166,20 @@ impl ExternalOutputRouter {
             .map(|sink| sink.state.name.clone())
     }
 
-    async fn runtime_capabilities() -> HashMap<String, OutputCapabilities> {
-        let Ok(output) = command::run("pactl", &["-f", "json", "list", "sinks"], false, 3).await
-        else {
-            return HashMap::new();
-        };
-        if output.code != 0 || output.stdout.trim().is_empty() {
-            return HashMap::new();
+    fn capabilities(sink: &SinkDescriptor) -> OutputCapabilities {
+        OutputCapabilities {
+            sample_format: (!sink.sample_format.is_empty()).then(|| sink.sample_format.clone()),
+            sample_rate: (sink.sample_rate > 0).then_some(sink.sample_rate),
+            channels: (sink.channels > 0).then_some(u32::from(sink.channels)),
+            channel_map: sink.channel_map.clone(),
+            alsa_device: sink.alsa_device,
+            device_api: (!sink.device_api.is_empty()).then(|| sink.device_api.clone()),
+            device_bus: (!sink.device_bus.is_empty()).then(|| sink.device_bus.clone()),
         }
-        let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&output.stdout) else {
-            return HashMap::new();
-        };
-
-        let mut result = HashMap::new();
-        for item in items {
-            let Some(name) = item.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            let mut capabilities = OutputCapabilities::default();
-            if let Some(spec) = item
-                .get("sample_specification")
-                .and_then(Value::as_str)
-            {
-                let fields = spec.split_whitespace().collect::<Vec<_>>();
-                capabilities.sample_format = fields.first().map(|value| (*value).to_owned());
-                capabilities.channels = fields
-                    .iter()
-                    .find_map(|value| value.strip_suffix("ch"))
-                    .and_then(|value| value.parse::<u32>().ok());
-                capabilities.sample_rate = fields
-                    .iter()
-                    .find_map(|value| value.strip_suffix("Hz"))
-                    .and_then(|value| value.parse::<u32>().ok());
-            }
-            if let Some(map) = item.get("channel_map").and_then(Value::as_str) {
-                capabilities.channel_map = map
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-            }
-            if let Some(properties) = item.get("properties").and_then(Value::as_object) {
-                let property = |key: &str| {
-                    properties
-                        .get(key)
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                };
-                capabilities.alsa_device = property("alsa.device")
-                    .and_then(|value| value.parse::<u32>().ok());
-                capabilities.device_api = property("device.api");
-                capabilities.device_bus = property("device.bus");
-            }
-            result.insert(name.to_owned(), capabilities);
-        }
-        result
     }
 
-    fn describe(
-        sink: SinkDescriptor,
-        selected: bool,
-        capabilities: OutputCapabilities,
-    ) -> OutputDescriptor {
+    fn describe(sink: SinkDescriptor, selected: bool) -> OutputDescriptor {
+        let capabilities = Self::capabilities(&sink);
         OutputDescriptor {
             id: sink.state.name.clone(),
             name: if sink.description.is_empty() {
@@ -268,13 +216,11 @@ impl OutputRouter for ExternalOutputRouter {
         Box::pin(async move {
             let candidates = self.candidates().await?;
             let selected = self.selected_name(&candidates).await;
-            let mut capabilities = Self::runtime_capabilities().await;
             Ok(candidates
                 .into_iter()
                 .map(|sink| {
                     let is_selected = selected.as_deref() == Some(sink.state.name.as_str());
-                    let caps = capabilities.remove(&sink.state.name).unwrap_or_default();
-                    Self::describe(sink, is_selected, caps)
+                    Self::describe(sink, is_selected)
                 })
                 .collect())
         })
@@ -291,11 +237,7 @@ impl OutputRouter for ExternalOutputRouter {
                 .into_iter()
                 .find(|sink| sink.state.name == selected)
                 .ok_or_else(|| anyhow!("Активний аудіовихід зник"))?;
-            let caps = Self::runtime_capabilities()
-                .await
-                .remove(&sink.state.name)
-                .unwrap_or_default();
-            Ok(Self::describe(sink, true, caps))
+            Ok(Self::describe(sink, true))
         })
     }
 
@@ -316,21 +258,13 @@ impl OutputRouter for ExternalOutputRouter {
 
             if self.routed_output().await.as_deref() == Some(id) {
                 self.write_configured_output(Some(id)).await?;
-                let caps = Self::runtime_capabilities()
-                    .await
-                    .remove(id)
-                    .unwrap_or_default();
-                return Ok(Self::describe(selected, true, caps));
+                return Ok(Self::describe(selected, true));
             }
 
             let previous = self.configured_output().await.or(self.routed_output().await);
             self.write_configured_output(Some(id)).await?;
             if self.wait_for_routed_output(id).await {
-                let caps = Self::runtime_capabilities()
-                    .await
-                    .remove(id)
-                    .unwrap_or_default();
-                return Ok(Self::describe(selected, true, caps));
+                return Ok(Self::describe(selected, true));
             }
 
             self.write_configured_output(previous.as_deref()).await?;
