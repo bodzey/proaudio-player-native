@@ -291,7 +291,7 @@ fn descriptor_from_info(info: &pa::context::introspect::SinkInfo<'_>) -> Result<
         .channel_map
         .get()
         .iter()
-        .map(|position| position.to_string().into_owned())
+        .map(|position| format!("{position:?}").to_ascii_lowercase())
         .collect();
 
     Ok(SinkDescriptor {
@@ -300,7 +300,7 @@ fn descriptor_from_info(info: &pa::context::introspect::SinkInfo<'_>) -> Result<
         device_class,
         alsa_card,
         alsa_device,
-        sample_format: info.sample_spec.format.to_string().into_owned(),
+        sample_format: format!("{:?}", info.sample_spec.format).to_ascii_lowercase(),
         sample_rate: info.sample_spec.rate,
         channels: info.sample_spec.channels,
         channel_map,
