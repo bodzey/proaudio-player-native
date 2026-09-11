@@ -533,41 +533,6 @@ impl WebController {
         Ok(result)
     }
 
-    pub async fn primary_hardware_mixer(&self) -> Result<Value> {
-        let mixers = self.hardware_mixers().await?;
-        let selected_card = self.audio_outputs().await.ok().and_then(|outputs| {
-            outputs
-                .into_iter()
-                .find(|item| item.get("selected").and_then(Value::as_bool) == Some(true))
-                .and_then(|item| item.get("alsa_card").and_then(Value::as_u64))
-        });
-        let candidates = mixers
-            .iter()
-            .filter(|item| {
-                selected_card.is_none() || item.get("card").and_then(Value::as_u64) == selected_card
-            })
-            .collect::<Vec<_>>();
-        ["Master", "Headphone", "PCM", "Speaker"]
-            .iter()
-            .find_map(|preferred| {
-                candidates
-                    .iter()
-                    .find(|item| item.get("control").and_then(Value::as_str) == Some(*preferred))
-                    .copied()
-            })
-            .or_else(|| candidates.first().copied())
-            .cloned()
-            .ok_or_else(|| {
-                if let Some(card) = selected_card {
-                    anyhow!(
-                        "Вибраний ALSA-пристрій card {card} не має апаратного регулятора гучності"
-                    )
-                } else {
-                    anyhow!("Апаратний ALSA-регулятор не знайдено")
-                }
-            })
-    }
-
     pub async fn mixer_state(&self) -> Result<Value> {
         let music = self.sink_state(&self.config.audio.music_sink).await?;
         let alert = self.sink_state(&self.config.audio.alert_sink).await?;
@@ -1566,10 +1531,14 @@ async fn player(
         return Err(api_error(StatusCode::BAD_REQUEST, "Невідома дія"));
     }
     controller
+        .ensure_controls_available()
+        .await
+        .map_err(map_conflict)?;
+    controller
         .control_active_player(&body.action)
         .await
         .map(Json)
-        .map_err(map_conflict)
+        .map_err(map_internal)
 }
 
 async fn library(State(controller): State<WebController>) -> ApiResult {
