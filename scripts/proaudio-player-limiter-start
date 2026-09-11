@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AUDIO_ENV="${AUDIO_ENV:-/etc/proaudio-player-alert/audio.env}"
+STATE_FILE="${XDG_RUNTIME_DIR:-/run/proaudio-player}/proaudio-player-bus-modules"
+
+if [[ -f "$AUDIO_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$AUDIO_ENV"
+fi
+
+MASTER_SINK="${MASTER_SINK:-proaudio_player_master}"
+SAMPLE_RATE="${SAMPLE_RATE:-48000}"
+AUDIO_CHANNELS="${AUDIO_CHANNELS:-2}"
+LIMITER_ENABLED="${LIMITER_ENABLED:-true}"
+LIMITER_CEILING_DB="${LIMITER_CEILING_DB:--1.0}"
+LIMITER_LOOKAHEAD_MS="${LIMITER_LOOKAHEAD_MS:-5.0}"
+LIMITER_RELEASE_MS="${LIMITER_RELEASE_MS:-100.0}"
+LIMITER_OVERSAMPLE="${LIMITER_OVERSAMPLE:-4}"
+
+[[ -f "$STATE_FILE" ]] || {
+    echo "Audio bus state is not ready: $STATE_FILE" >&2
+    exit 1
+}
+
+physical="$(awk -F= '$1 == "PHYSICAL" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE")"
+[[ -n "$physical" ]] || {
+    echo "Physical sink is not present in $STATE_FILE" >&2
+    exit 1
+}
+
+case "${LIMITER_ENABLED,,}" in
+    1|true|yes|on) enabled=true ;;
+    0|false|no|off) enabled=false ;;
+    *)
+        echo "LIMITER_ENABLED must be true/false" >&2
+        exit 2
+        ;;
+esac
+
+exec /usr/bin/proaudio-player-limiter \
+    --source "${MASTER_SINK}.monitor" \
+    --sink "$physical" \
+    --rate "$SAMPLE_RATE" \
+    --channels "$AUDIO_CHANNELS" \
+    --enabled "$enabled" \
+    --ceiling-db "$LIMITER_CEILING_DB" \
+    --lookahead-ms "$LIMITER_LOOKAHEAD_MS" \
+    --release-ms "$LIMITER_RELEASE_MS" \
+    --oversample "$LIMITER_OVERSAMPLE"
