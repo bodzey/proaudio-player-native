@@ -7,11 +7,10 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use url::Url;
 
-use crate::command;
-
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const AVTRANSPORT_PORT: u16 = 49494;
 const AVTRANSPORT_PATH: &str = "/upnp/control/rendertransport1";
+const AVTRANSPORT_ENDPOINT: &str = "http://127.0.0.1:49494/upnp/control/rendertransport1";
 
 static CLIENT: OnceLock<DlnaClient> = OnceLock::new();
 
@@ -50,7 +49,7 @@ impl DlnaClient {
             .header("Content-Type", "text/xml; charset=\"utf-8\"")
             .header("SOAPACTION", format!("\"{AVTRANSPORT_SERVICE}#{action}\""))
             .body(body)
-            .timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
             .send()
             .await
             .with_context(|| format!("DLNA AVTransport {action} недоступний"))?;
@@ -71,46 +70,17 @@ impl DlnaClient {
             return Ok(cached);
         }
 
-        let mut hosts = vec!["127.0.0.1".to_owned()];
-        if let Ok(output) = command::run(
-            "ip",
-            &["-4", "-o", "addr", "show", "scope", "global"],
-            false,
-            3,
-        )
-        .await
+        // gmediarender is an implementation detail, not a second network-facing
+        // renderer. Firmware binds it to loopback, so the native daemon is the
+        // only UPnP MediaRenderer advertised on the LAN.
+        if self
+            .soap_at(AVTRANSPORT_ENDPOINT, "GetTransportInfo", "")
+            .await
+            .is_ok()
         {
-            if output.code == 0 {
-                for line in output.stdout.lines() {
-                    let mut fields = line.split_whitespace();
-                    while let Some(field) = fields.next() {
-                        if field == "inet" {
-                            if let Some(cidr) = fields.next() {
-                                if let Some(address) = cidr.split('/').next() {
-                                    if !address.is_empty() {
-                                        hosts.push(address.to_owned());
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        hosts.sort();
-        hosts.dedup();
-
-        for host in hosts {
-            let endpoint = format!("http://{host}:{AVTRANSPORT_PORT}{AVTRANSPORT_PATH}");
-            if self
-                .soap_at(&endpoint, "GetTransportInfo", "")
-                .await
-                .is_ok()
-            {
-                *self.endpoint.lock().await = Some(endpoint.clone());
-                return Ok(Some(endpoint));
-            }
+            let endpoint = AVTRANSPORT_ENDPOINT.to_owned();
+            *self.endpoint.lock().await = Some(endpoint.clone());
+            return Ok(Some(endpoint));
         }
         Ok(None)
     }
@@ -119,6 +89,23 @@ impl DlnaClient {
         let mut cached = self.endpoint.lock().await;
         if cached.as_deref() == Some(endpoint) {
             *cached = None;
+        }
+    }
+
+    async fn endpoint(&self) -> Result<String> {
+        self.discover_endpoint()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("DLNA AVTransport endpoint не знайдено"))
+    }
+
+    async fn invoke(&self, action: &str, arguments: &str) -> Result<String> {
+        let endpoint = self.endpoint().await?;
+        match self.soap_at(&endpoint, action, arguments).await {
+            Ok(payload) => Ok(payload),
+            Err(error) => {
+                self.invalidate_endpoint(&endpoint).await;
+                Err(error)
+            }
         }
     }
 
@@ -158,10 +145,41 @@ impl DlnaClient {
         }
     }
 
+    pub async fn set_uri(&self, uri: &str, metadata: &str) -> Result<()> {
+        let uri = validate_media_uri(uri)?;
+        let arguments = format!(
+            "<CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData>",
+            xml_escape(uri.as_str()),
+            xml_escape(metadata)
+        );
+        self.invoke("SetAVTransportURI", &arguments).await?;
+        Ok(())
+    }
+
+    pub async fn set_next_uri(&self, uri: &str, metadata: &str) -> Result<()> {
+        let uri = validate_media_uri(uri)?;
+        let arguments = format!(
+            "<NextURI>{}</NextURI><NextURIMetaData>{}</NextURIMetaData>",
+            xml_escape(uri.as_str()),
+            xml_escape(metadata)
+        );
+        self.invoke("SetNextAVTransportURI", &arguments).await?;
+        Ok(())
+    }
+
+    pub async fn seek_rel_time(&self, target: &str) -> Result<()> {
+        if clock_to_seconds(Some(target)).is_none() {
+            bail!("Некоректна DLNA позиція seek");
+        }
+        let arguments = format!(
+            "<Unit>REL_TIME</Unit><Target>{}</Target>",
+            xml_escape(target)
+        );
+        self.invoke("Seek", &arguments).await?;
+        Ok(())
+    }
+
     pub async fn control(&self, action: &str) -> Result<()> {
-        let Some(endpoint) = self.discover_endpoint().await? else {
-            bail!("DLNA AVTransport endpoint не знайдено");
-        };
         let (soap_action, arguments) = match action {
             "play" => ("Play", "<Speed>1</Speed>"),
             "pause" => ("Pause", ""),
@@ -170,10 +188,7 @@ impl DlnaClient {
             "prev" => ("Previous", ""),
             _ => bail!("Невідома DLNA transport-команда"),
         };
-        if let Err(error) = self.soap_at(&endpoint, soap_action, arguments).await {
-            self.invalidate_endpoint(&endpoint).await;
-            return Err(error);
-        }
+        self.invoke(soap_action, arguments).await?;
         Ok(())
     }
 }
@@ -182,6 +197,27 @@ impl Default for DlnaClient {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn validate_media_uri(value: &str) -> Result<Url> {
+    let url = Url::parse(value.trim()).context("Некоректний DLNA media URI")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        bail!("DLNA підтримує лише HTTP/HTTPS media URI без облікових даних");
+    }
+    Ok(url)
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn xml_unescape(value: &str) -> String {
@@ -216,8 +252,10 @@ fn clock_to_seconds(value: Option<&str>) -> Option<f64> {
         .collect::<std::result::Result<Vec<_>, _>>()
         .ok()?;
     match parts.as_slice() {
-        [minutes, seconds] => Some((minutes * 60 + seconds) as f64),
-        [hours, minutes, seconds] => Some((hours * 3600 + minutes * 60 + seconds) as f64),
+        [minutes, seconds] if *seconds < 60 => Some((minutes * 60 + seconds) as f64),
+        [hours, minutes, seconds] if *minutes < 60 && *seconds < 60 => {
+            Some((hours * 3600 + minutes * 60 + seconds) as f64)
+        }
         _ => None,
     }
 }
@@ -348,5 +386,19 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
+    }
+
+    #[test]
+    fn media_uri_allows_lan_http_but_rejects_credentials() {
+        assert!(validate_media_uri("http://192.168.88.10/music.flac").is_ok());
+        assert!(validate_media_uri("https://example.com/music.flac").is_ok());
+        assert!(validate_media_uri("http://user:pass@example.com/music.flac").is_err());
+        assert!(validate_media_uri("file:///tmp/music.flac").is_err());
+    }
+
+    #[test]
+    fn seek_clock_rejects_invalid_ranges() {
+        assert_eq!(clock_to_seconds(Some("01:02:03")), Some(3723.0));
+        assert_eq!(clock_to_seconds(Some("00:99:00")), None);
     }
 }
