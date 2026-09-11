@@ -14,6 +14,8 @@ use pa::volume::{ChannelVolumes, Volume};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_SLEEP: Duration = Duration::from_millis(1);
+const MAX_CHANNELS: usize = 8;
+type Frame = [f32; MAX_CHANNELS];
 
 #[derive(Debug, Parser)]
 #[command(
@@ -36,8 +38,8 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     channels: u8,
 
-    /// Enable limiting. When false, samples are relayed bit-for-bit as float PCM.
-    #[arg(long, default_value_t = true)]
+    /// Enable limiting. False keeps the float PCM relay sample-transparent.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     enabled: bool,
 
     /// Maximum output level. The limiter never applies positive gain.
@@ -57,10 +59,11 @@ struct Args {
     oversample: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct BufferedFrame {
-    samples: Vec<f32>,
+    samples: Frame,
     peak: f32,
+    sequence: u64,
 }
 
 struct SafetyLimiter {
@@ -70,8 +73,10 @@ struct SafetyLimiter {
     lookahead_frames: usize,
     release_decay: f32,
     oversample: usize,
-    history: VecDeque<Vec<f32>>,
+    history: [Frame; 4],
     delayed: VecDeque<BufferedFrame>,
+    peak_window: VecDeque<(u64, f32)>,
+    next_sequence: u64,
     gain: f32,
 }
 
@@ -80,8 +85,8 @@ impl SafetyLimiter {
         if !(8_000..=384_000).contains(&args.rate) {
             bail!("sample rate must be 8000..384000 Hz");
         }
-        if !(1..=8).contains(&args.channels) {
-            bail!("channel count must be 1..8");
+        if !(1..=MAX_CHANNELS as u8).contains(&args.channels) {
+            bail!("channel count must be 1..{MAX_CHANNELS}");
         }
         if !(-12.0..=0.0).contains(&args.ceiling_db) {
             bail!("ceiling must be -12..0 dB");
@@ -96,26 +101,22 @@ impl SafetyLimiter {
             bail!("oversample must be one of 1, 2, 4, 8");
         }
 
-        let channels = args.channels as usize;
         let lookahead_frames = ((args.rate as f32 * args.lookahead_ms / 1_000.0).round() as usize)
             .max(1);
         let release_frames = args.rate as f32 * args.release_ms / 1_000.0;
         let release_decay = (-1.0 / release_frames.max(1.0)).exp();
-        let zero = vec![0.0; channels];
-        let mut history = VecDeque::with_capacity(4);
-        history.push_back(zero.clone());
-        history.push_back(zero.clone());
-        history.push_back(zero);
 
         Ok(Self {
             enabled: args.enabled,
-            channels,
+            channels: args.channels as usize,
             ceiling: 10.0_f32.powf(args.ceiling_db / 20.0),
             lookahead_frames,
             release_decay,
             oversample: args.oversample,
-            history,
+            history: [[0.0; MAX_CHANNELS]; 4],
             delayed: VecDeque::with_capacity(lookahead_frames + 8),
+            peak_window: VecDeque::with_capacity(lookahead_frames + 8),
+            next_sequence: 0,
             gain: 1.0,
         })
     }
@@ -134,14 +135,14 @@ impl SafetyLimiter {
         }
 
         let mut output = Vec::with_capacity(input.len());
-        for frame in input.chunks_exact(frame_bytes) {
-            let mut samples = Vec::with_capacity(self.channels);
-            for bytes in frame.chunks_exact(4) {
+        for encoded in input.chunks_exact(frame_bytes) {
+            let mut frame = [0.0_f32; MAX_CHANNELS];
+            for (channel, bytes) in encoded.chunks_exact(4).enumerate() {
                 let value = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                samples.push(if value.is_finite() { value } else { 0.0 });
+                frame[channel] = if value.is_finite() { value } else { 0.0 };
             }
-            if let Some(processed) = self.push_frame(samples) {
-                for sample in processed {
+            if let Some(processed) = self.push_frame(frame) {
+                for sample in processed.iter().take(self.channels) {
                     output.extend_from_slice(&sample.to_ne_bytes());
                 }
             }
@@ -149,38 +150,58 @@ impl SafetyLimiter {
         Ok(output)
     }
 
-    fn push_frame(&mut self, frame: Vec<f32>) -> Option<Vec<f32>> {
-        self.history.push_back(frame);
-        if self.history.len() < 4 {
-            return None;
-        }
+    fn push_frame(&mut self, frame: Frame) -> Option<Frame> {
+        self.history[0] = self.history[1];
+        self.history[1] = self.history[2];
+        self.history[2] = self.history[3];
+        self.history[3] = frame;
 
         let peak = intersample_peak(
             &self.history[0],
             &self.history[1],
             &self.history[2],
             &self.history[3],
+            self.channels,
             self.oversample,
         );
-        let samples = self.history[1].clone();
-        self.history.pop_front();
-        self.delayed.push_back(BufferedFrame { samples, peak });
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.delayed.push_back(BufferedFrame {
+            samples: self.history[1],
+            peak,
+            sequence,
+        });
+
+        // Monotonic deque: the largest peak in the complete lookahead window is
+        // always at the front, so processing remains O(1) per PCM frame even at
+        // high sample rates and long lookahead settings.
+        while self
+            .peak_window
+            .back()
+            .is_some_and(|(_, buffered_peak)| *buffered_peak <= peak)
+        {
+            self.peak_window.pop_back();
+        }
+        self.peak_window.push_back((sequence, peak));
 
         if self.delayed.len() <= self.lookahead_frames {
             return None;
         }
 
         let future_peak = self
-            .delayed
-            .iter()
-            .map(|item| item.peak)
-            .fold(0.0_f32, f32::max);
+            .peak_window
+            .front()
+            .map(|(_, peak)| *peak)
+            .unwrap_or(0.0);
         let target = if future_peak > self.ceiling && future_peak > 0.0 {
             (self.ceiling / future_peak).clamp(0.0, 1.0)
         } else {
             1.0
         };
 
+        // Linked limiter: every channel receives exactly the same attenuation.
+        // Attack is instantaneous because lookahead sees the future peak. Release
+        // approaches unity exponentially and can never cross into positive gain.
         if target < self.gain {
             self.gain = target;
         } else {
@@ -188,11 +209,22 @@ impl SafetyLimiter {
             self.gain = self.gain.min(1.0);
         }
 
-        let mut frame = self.delayed.pop_front()?.samples;
-        for sample in &mut frame {
+        let buffered = self.delayed.pop_front()?;
+        if self
+            .peak_window
+            .front()
+            .is_some_and(|(sequence, _)| *sequence == buffered.sequence)
+        {
+            self.peak_window.pop_front();
+        }
+
+        let mut output = buffered.samples;
+        for sample in output.iter_mut().take(self.channels) {
+            // The final clamp is a fail-safe for interpolation/rounding error. It
+            // should be inactive during normal lookahead limiting.
             *sample = (*sample * self.gain).clamp(-self.ceiling, self.ceiling);
         }
-        Some(frame)
+        Some(output)
     }
 }
 
@@ -206,14 +238,15 @@ fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
 }
 
 fn intersample_peak(
-    p0: &[f32],
-    p1: &[f32],
-    p2: &[f32],
-    p3: &[f32],
+    p0: &Frame,
+    p1: &Frame,
+    p2: &Frame,
+    p3: &Frame,
+    channels: usize,
     oversample: usize,
 ) -> f32 {
     let mut peak = 0.0_f32;
-    for channel in 0..p1.len() {
+    for channel in 0..channels {
         for step in 0..=oversample {
             let t = step as f32 / oversample as f32;
             peak = peak.max(catmull_rom(p0[channel], p1[channel], p2[channel], p3[channel], t).abs());
@@ -355,8 +388,8 @@ fn run(args: Args) -> Result<()> {
         .with_context(|| format!("failed to connect limiter to source {}", args.source))?;
 
     // The limiter is an internal transport, not a user gain stage. Pin its
-    // playback stream to unity so server stream-restore state cannot silently
-    // attenuate or amplify the already-limited final mix.
+    // playback stream to unity so stream-restore cannot silently attenuate or
+    // amplify the already-limited final mix.
     let mut unity = ChannelVolumes::default();
     unity.set(args.channels, Volume::NORMAL);
     playback
@@ -371,7 +404,7 @@ fn run(args: Args) -> Result<()> {
     wait_for_streams(&mut mainloop, &context, &record, &playback)?;
 
     eprintln!(
-        "output limiter: source={} sink={} rate={} channels={} enabled={} ceiling={:.2}dB lookahead={:.2}ms release={:.1}ms oversample={}x",
+        "output limiter: source={} sink={} rate={} channels={} enabled={} ceiling={:.2}dB lookahead={:.2}ms release={:.1}ms intersample={}x",
         args.source,
         args.sink,
         args.rate,
@@ -448,12 +481,19 @@ mod tests {
         }
     }
 
+    fn stereo(left: f32, right: f32) -> Frame {
+        let mut frame = [0.0; MAX_CHANNELS];
+        frame[0] = left;
+        frame[1] = right;
+        frame
+    }
+
     #[test]
     fn limiter_never_amplifies() {
         let mut limiter = SafetyLimiter::new(&args()).unwrap();
         let mut maximum = 0.0_f32;
         for _ in 0..256 {
-            if let Some(frame) = limiter.push_frame(vec![0.25, -0.25]) {
+            if let Some(frame) = limiter.push_frame(stereo(0.25, -0.25)) {
                 maximum = maximum.max(frame[0].abs()).max(frame[1].abs());
             }
         }
@@ -467,8 +507,8 @@ mod tests {
         let mut limiter = SafetyLimiter::new(&cfg).unwrap();
         let mut seen = 0;
         for _ in 0..512 {
-            if let Some(frame) = limiter.push_frame(vec![1.5, -1.5]) {
-                for sample in frame {
+            if let Some(frame) = limiter.push_frame(stereo(1.5, -1.5)) {
+                for sample in frame.iter().take(2) {
                     assert!(sample.abs() <= ceiling + 1e-6);
                 }
                 seen += 1;
@@ -480,18 +520,28 @@ mod tests {
     #[test]
     fn linked_channels_share_gain_reduction() {
         let mut limiter = SafetyLimiter::new(&args()).unwrap();
-        let mut observed = None;
+        let mut observed = false;
         for index in 0..512 {
             let hot = if index > 80 { 1.5 } else { 0.25 };
-            if let Some(frame) = limiter.push_frame(vec![hot, 0.5]) {
+            if let Some(frame) = limiter.push_frame(stereo(hot, 0.5)) {
                 if frame[0].abs() > 0.5 {
-                    observed = Some(frame);
+                    assert!(frame[1].abs() < 0.5);
+                    observed = true;
                     break;
                 }
             }
         }
-        let frame = observed.expect("expected limited hot frame");
-        assert!(frame[1].abs() < 0.5);
+        assert!(observed, "expected a limited hot frame");
+    }
+
+    #[test]
+    fn lookahead_storage_stays_bounded() {
+        let mut limiter = SafetyLimiter::new(&args()).unwrap();
+        for _ in 0..10_000 {
+            let _ = limiter.push_frame(stereo(0.1, -0.1));
+            assert!(limiter.delayed.len() <= limiter.lookahead_frames);
+            assert!(limiter.peak_window.len() <= limiter.lookahead_frames + 1);
+        }
     }
 
     #[test]
