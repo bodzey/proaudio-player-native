@@ -47,9 +47,6 @@ find_physical_sink() {
         return 1
     fi
 
-    # AUTO is intentionally bus-neutral. Prefer an already RUNNING physical sink;
-    # otherwise use a deterministic name-sorted fallback. Device-specific priority
-    # belongs to a firmware profile, never to the generic player core.
     physical_candidates | head -n 1
 }
 
@@ -75,8 +72,15 @@ state_value() {
 }
 
 write_state() {
-    local physical="$1" master_bus="$2" music_bus="$3" alert_bus="$4" music_loop="$5" alert_loop="$6"
+    local physical="$1"
+    local master_bus="$2"
+    local music_bus="$3"
+    local alert_bus="$4"
+    local music_loop="$5"
+    local alert_loop="$6"
+    local output_loop="$7"
     local temporary="${STATE_FILE}.tmp"
+
     {
         printf 'PHYSICAL=%s\n' "$physical"
         printf 'MASTER_SINK=%s\n' "$MASTER_SINK"
@@ -85,6 +89,7 @@ write_state() {
         printf 'ALERT_BUS_MODULE=%s\n' "$alert_bus"
         printf 'MUSIC_LOOP_MODULE=%s\n' "$music_loop"
         printf 'ALERT_LOOP_MODULE=%s\n' "$alert_loop"
+        printf 'OUTPUT_LOOP_MODULE=%s\n' "$output_loop"
     } >"$temporary"
     mv -f -- "$temporary" "$STATE_FILE"
 }
@@ -145,11 +150,6 @@ reapply_playback_channels() {
     local raw_values
     raw_values="$(printf '%s\n' "$details" | playback_raw_values)"
     [[ -n "$raw_values" ]] || return 1
-
-    # Some multi-channel ALSA controls can report a safe cached value before every
-    # hardware channel has actually been programmed. Re-applying the verified raw
-    # per-channel list forces an explicit write. Do not alter playback switches here:
-    # the physical sink must remain muted for the whole normalization transaction.
     amixer -q -c "$card" sset "$control" "$raw_values" >/dev/null 2>&1
 }
 
@@ -229,8 +229,6 @@ prepare_physical_sink() {
         return 1
     fi
 
-    # Mute while hardware gain is normalized so a coarse ALSA control can never
-    # produce an audible positive-gain transient during probing.
     pactl set-sink-mute "$physical" 1
     prepare_hardware_mixer "$physical"
     pactl set-sink-volume "$physical" 100%
@@ -260,7 +258,7 @@ start_buses() {
     unload_saved_modules
     validate_audio_bus_config
 
-    local physical master_bus music_bus alert_bus music_loop alert_loop
+    local physical master_bus music_bus alert_bus music_loop alert_loop output_loop
     physical="$(wait_for_physical_sink)"
     prepare_physical_sink "$physical"
 
@@ -279,7 +277,11 @@ start_buses() {
 
     music_loop="$(load_loopback "$MUSIC_SINK" "$MASTER_SINK")"
     alert_loop="$(load_loopback "$ALERT_SINK" "$MASTER_SINK")"
-    write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
+    output_loop="$(load_loopback "$MASTER_SINK" "$physical")"
+
+    write_state \
+        "$physical" "$master_bus" "$music_bus" "$alert_bus" \
+        "$music_loop" "$alert_loop" "$output_loop"
 
     pactl set-default-sink "$MUSIC_SINK"
     pactl set-sink-volume "$MUSIC_SINK" 100%
@@ -288,13 +290,18 @@ start_buses() {
     pactl set-sink-mute "$MUSIC_SINK" 0
     pactl set-sink-mute "$ALERT_SINK" 0
     pactl set-sink-mute "$MASTER_SINK" 0
-    echo "MUSIC + ALERT -> $MASTER_SINK -> safety limiter -> $physical"
+
+    echo "MUSIC + ALERT -> $MASTER_SINK -> $physical (PipeWire/Pulse graph)"
 }
 
 switch_output() {
     validate_audio_bus_config
-    local physical master_bus music_bus alert_bus music_loop alert_loop
+
+    local physical old_physical old_output_loop new_output_loop
+    local master_bus music_bus alert_bus music_loop alert_loop master_mute
     physical="$(wait_for_physical_sink)"
+    old_physical="$(state_value PHYSICAL)"
+    old_output_loop="$(state_value OUTPUT_LOOP_MODULE)"
 
     master_bus="$(state_value MASTER_BUS_MODULE)"
     music_bus="$(state_value MUSIC_BUS_MODULE)"
@@ -302,7 +309,8 @@ switch_output() {
     music_loop="$(state_value MUSIC_LOOP_MODULE)"
     alert_loop="$(state_value ALERT_LOOP_MODULE)"
 
-    if [[ -z "$master_bus" || -z "$music_bus" || -z "$alert_bus" ]] \
+    if [[ -z "$master_bus" || -z "$music_bus" || -z "$alert_bus" \
+        || -z "$music_loop" || -z "$alert_loop" ]] \
         || ! pactl get-sink-volume "$MASTER_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$MUSIC_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$ALERT_SINK" >/dev/null 2>&1; then
@@ -311,9 +319,37 @@ switch_output() {
         return
     fi
 
+    if [[ "$old_physical" == "$physical" && "$old_output_loop" =~ ^[0-9]+$ ]]; then
+        prepare_physical_sink "$physical"
+        return
+    fi
+
     prepare_physical_sink "$physical"
-    write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" "$music_loop" "$alert_loop"
-    echo "Фінальний вихід перемкнено на $physical"
+
+    master_mute="$(pactl get-sink-mute "$MASTER_SINK" 2>/dev/null | awk '{print $2}')"
+    pactl set-sink-mute "$MASTER_SINK" 1
+
+    if ! new_output_loop="$(load_loopback "$MASTER_SINK" "$physical")"; then
+        if [[ "$master_mute" != "yes" ]]; then
+            pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
+        fi
+        echo "Не вдалося підключити MASTER до '$physical'; попередній маршрут залишено" >&2
+        return 1
+    fi
+
+    if [[ "$old_output_loop" =~ ^[0-9]+$ ]]; then
+        pactl unload-module "$old_output_loop" >/dev/null 2>&1 || true
+    fi
+
+    write_state \
+        "$physical" "$master_bus" "$music_bus" "$alert_bus" \
+        "$music_loop" "$alert_loop" "$new_output_loop"
+
+    if [[ "$master_mute" != "yes" ]]; then
+        pactl set-sink-mute "$MASTER_SINK" 0
+    fi
+
+    echo "Фінальний вихід перемкнено ${old_physical:-<none>} -> $physical"
 }
 
 stop_buses() {
