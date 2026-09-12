@@ -10,7 +10,7 @@ AUDIO_CHANNELS="${AUDIO_CHANNELS:-2}"
 LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 OUTPUT_HEADROOM_DB="${OUTPUT_HEADROOM_DB:--3.0}"
-ALERT_MIX_HEADROOM_DB="${ALERT_MIX_HEADROOM_DB:--9.0}"
+ALERT_MIX_GAIN_DB="${ALERT_MIX_GAIN_DB:-0.0}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
 SINK_WAIT_SECONDS="${SINK_WAIT_SECONDS:-30}"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
@@ -55,13 +55,11 @@ find_physical_sink() {
         fi
         return 1
     fi
-
     physical_candidates | head -n 1
 }
 
 wait_for_physical_sink() {
     require_pulse_server
-
     local deadline=$((SECONDS + SINK_WAIT_SECONDS))
     local physical=""
     while ((SECONDS <= deadline)); do
@@ -83,15 +81,9 @@ state_value() {
 }
 
 write_state() {
-    local physical="$1"
-    local master_bus="$2"
-    local music_bus="$3"
-    local alert_bus="$4"
-    local music_loop="$5"
-    local alert_loop="$6"
-    local output_loop="$7"
+    local physical="$1" master_bus="$2" music_bus="$3" alert_bus="$4"
+    local music_loop="$5" alert_loop="$6" output_loop="$7"
     local temporary="${STATE_FILE}.tmp"
-
     {
         printf 'PHYSICAL=%s\n' "$physical"
         printf 'MASTER_SINK=%s\n' "$MASTER_SINK"
@@ -127,19 +119,14 @@ alsa_card_for_sink() {
         /^[[:space:]]*Name:/ { active=($2 == wanted); next }
         active && ($1 == "alsa.card" || $1 == "api.alsa.card") && $2 == "=" {
             gsub(/"/, "", $3)
-            if ($3 ~ /^[0-9]+$/) {
-                print $3
-                exit
-            }
+            if ($3 ~ /^[0-9]+$/) { print $3; exit }
         }'
 }
 
 safe_playback_control() {
     local name="${1,,}"
     case "$name" in
-        *capture*|*mic*|*boost*|*gain*|*input*|*adc*|*loopback*|*monitor*|*tone*|*bass*|*treble*)
-            return 1
-            ;;
+        *capture*|*mic*|*boost*|*gain*|*input*|*adc*|*loopback*|*monitor*|*tone*|*bass*|*treble*) return 1 ;;
     esac
     return 0
 }
@@ -156,12 +143,21 @@ max_db_value() {
     awk 'NR == 1 { max=$1 } $1 > max { max=$1 } END { if (NR) print max }'
 }
 
+playback_has_zero_percent() {
+    grep -Eq 'Playback[[:space:]]+-?[0-9]+[[:space:]]+\[0%\]'
+}
+
 reapply_playback_channels() {
     local card="$1" control="$2" details="$3"
     local raw_values
     raw_values="$(printf '%s\n' "$details" | playback_raw_values)"
     [[ -n "$raw_values" ]] || return 1
     amixer -q -c "$card" sset "$control" "$raw_values" >/dev/null 2>&1
+}
+
+restore_hardware_raw() {
+    local card="$1" control="$2" raw="$3"
+    [[ -n "$raw" ]] && amixer -q -c "$card" sset "$control" "$raw" >/dev/null 2>&1
 }
 
 prepare_hardware_mixer() {
@@ -189,11 +185,19 @@ prepare_hardware_mixer() {
             continue
         fi
         after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
+
+        # Some broken USB descriptors report raw minimum as 0.00 dB. Treating
+        # that as unity mutes the device. Never accept a 0 dB probe that lands
+        # at 0%; restore the previous raw setting instead.
+        if printf '%s\n' "$after" | playback_has_zero_percent; then
+            restore_hardware_raw "$card" "$control" "$original_raw" || true
+            echo "ALSA card $card: '$control' 0 dB maps to 0%; dB map is untrusted, raw level restored" >&2
+            continue
+        fi
+
         max_db="$(printf '%s\n' "$after" | playback_db_values | max_db_value)"
         [[ -n "$max_db" ]] || {
-            if [[ -n "$original_raw" ]]; then
-                amixer -q -c "$card" sset "$control" "$original_raw" >/dev/null 2>&1 || true
-            fi
+            restore_hardware_raw "$card" "$control" "$original_raw" || true
             continue
         }
 
@@ -201,6 +205,11 @@ prepare_hardware_mixer() {
             target="$(awk -v value="$max_db" 'BEGIN { printf "%.2fdB", -(value + 0.10) }')"
             amixer -q -c "$card" sset "$control" "$target" >/dev/null 2>&1 || true
             after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
+            if printf '%s\n' "$after" | playback_has_zero_percent; then
+                restore_hardware_raw "$card" "$control" "$original_raw" || true
+                echo "ALSA card $card: '$control' safe dB probe maps to 0%; raw level restored" >&2
+                continue
+            fi
             max_db="$(printf '%s\n' "$after" | playback_db_values | max_db_value)"
         fi
 
@@ -210,14 +219,15 @@ prepare_hardware_mixer() {
             fi
             after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
             max_db="$(printf '%s\n' "$after" | playback_db_values | max_db_value)"
-            if [[ -n "$max_db" ]] && awk -v value="$max_db" 'BEGIN { exit !(value <= 0.0001) }'; then
+            if [[ -n "$max_db" ]] && ! printf '%s\n' "$after" | playback_has_zero_percent \
+                && awk -v value="$max_db" 'BEGIN { exit !(value <= 0.0001) }'; then
                 echo "ALSA card $card: '$control' hardware level = ${max_db} dB (safe unity ceiling)"
                 applied=1
                 continue
             fi
         fi
 
-        if [[ -n "$original_raw" ]] && amixer -q -c "$card" sset "$control" "$original_raw" >/dev/null 2>&1; then
+        if restore_hardware_raw "$card" "$control" "$original_raw"; then
             echo "ALSA card $card: '$control' не має надійного <= 0 dB unity; початковий raw-рівень відновлено" >&2
         else
             echo "ALSA card $card: '$control' не вдалося безпечно нормалізувати або відновити" >&2
@@ -229,7 +239,7 @@ prepare_hardware_mixer() {
     )
 
     if ((applied == 0)); then
-        echo "ALSA card $card: безпечного playback-контролу з dB-шкалою не знайдено; hardware mixer не вгадується"
+        echo "ALSA card $card: безпечного playback-контролу з достовірною dB-шкалою не знайдено; hardware mixer не вгадується"
     fi
 }
 
@@ -239,7 +249,6 @@ prepare_physical_sink() {
         echo "OUTPUT_VOLUME_PERCENT має бути 100: фізичний software sink є фіксованим unity stage" >&2
         return 1
     fi
-
     pactl set-sink-mute "$physical" 1
     prepare_hardware_mixer "$physical"
     pactl set-sink-volume "$physical" 100%
@@ -262,32 +271,35 @@ sink_input_for_module() {
             sub(/^#/, "", input_index)
             next
         }
-        /^[[:space:]]*Owner Module:/ && $3 == wanted {
-            print input_index
-            exit
-        }'
+        /^[[:space:]]*Owner Module:/ && $3 == wanted { print input_index; exit }'
+}
+
+pulse_raw_from_db() {
+    local db="$1"
+    awk -v db="$db" 'BEGIN {
+        raw = 65536.0 * exp(log(10.0) * db / 60.0)
+        if (raw < 0.0) raw = 0.0
+        if (raw > 65536.0) raw = 65536.0
+        printf "%.0f\n", raw
+    }'
 }
 
 set_loopback_gain_db() {
     local module="$1" db="$2" label="$3"
-    local input=""
-
-    # pactl load-module returns only after the loopback module is instantiated, so
-    # the corresponding sink-input should already exist. Allow one short delayed
-    # retry for PipeWire scheduling, but never spin up dozens of short-lived Pulse
-    # clients: that can exhaust pipewire-pulse file descriptors on embedded builds.
+    local input="" raw=""
     input="$(sink_input_for_module "$module" || true)"
     if ! [[ "$input" =~ ^[0-9]+$ ]]; then
         sleep 0.1
         input="$(sink_input_for_module "$module" || true)"
     fi
-
     if [[ "$input" =~ ^[0-9]+$ ]]; then
-        pactl set-sink-input-volume "$input" "${db}dB"
-        echo "$label gain = ${db} dB (sink-input $input)"
+        raw="$(pulse_raw_from_db "$db")"
+        # Raw Pulse volume is absolute. A signed "-XdB" string is relative in
+        # pactl and would accumulate attenuation every time routing is reconciled.
+        pactl set-sink-input-volume "$input" "$raw"
+        echo "$label gain = ${db} dB (absolute raw $raw, sink-input $input)"
         return 0
     fi
-
     echo "Не вдалося знайти sink-input для $label module $module" >&2
     return 1
 }
@@ -311,12 +323,13 @@ validate_audio_bus_config() {
         return 1
     fi
     validate_attenuation_db OUTPUT_HEADROOM_DB "$OUTPUT_HEADROOM_DB"
-    validate_attenuation_db ALERT_MIX_HEADROOM_DB "$ALERT_MIX_HEADROOM_DB"
+    validate_attenuation_db ALERT_MIX_GAIN_DB "$ALERT_MIX_GAIN_DB"
 }
 
 start_buses() {
     unload_saved_modules
     validate_audio_bus_config
+    require_pulse_server
 
     local physical master_bus music_bus alert_bus music_loop alert_loop output_loop
     physical="$(wait_for_physical_sink)"
@@ -339,11 +352,10 @@ start_buses() {
     alert_loop="$(load_loopback "$ALERT_SINK" "$MASTER_SINK")"
     output_loop="$(load_loopback "$MASTER_SINK" "$physical")"
 
-    write_state \
-        "$physical" "$master_bus" "$music_bus" "$alert_bus" \
+    write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" \
         "$music_loop" "$alert_loop" "$output_loop"
 
-    if ! set_loopback_gain_db "$alert_loop" "$ALERT_MIX_HEADROOM_DB" "ALERT->MASTER"; then
+    if ! set_loopback_gain_db "$alert_loop" "$ALERT_MIX_GAIN_DB" "ALERT->MASTER"; then
         unload_saved_modules
         return 1
     fi
@@ -376,7 +388,6 @@ switch_output() {
     physical="$(wait_for_physical_sink)"
     old_physical="$(state_value PHYSICAL)"
     old_output_loop="$(state_value OUTPUT_LOOP_MODULE)"
-
     master_bus="$(state_value MASTER_BUS_MODULE)"
     music_bus="$(state_value MUSIC_BUS_MODULE)"
     alert_bus="$(state_value ALERT_BUS_MODULE)"
@@ -395,29 +406,24 @@ switch_output() {
 
     if [[ "$old_physical" == "$physical" && "$old_output_loop" =~ ^[0-9]+$ ]]; then
         prepare_physical_sink "$physical"
-        set_loopback_gain_db "$alert_loop" "$ALERT_MIX_HEADROOM_DB" "ALERT->MASTER"
+        set_loopback_gain_db "$alert_loop" "$ALERT_MIX_GAIN_DB" "ALERT->MASTER"
         set_loopback_gain_db "$old_output_loop" "$OUTPUT_HEADROOM_DB" "MASTER->OUTPUT"
         return
     fi
 
     prepare_physical_sink "$physical"
-
     master_mute="$(pactl get-sink-mute "$MASTER_SINK" 2>/dev/null | awk '{print $2}')"
     pactl set-sink-mute "$MASTER_SINK" 1
 
     if ! new_output_loop="$(load_loopback "$MASTER_SINK" "$physical")"; then
-        if [[ "$master_mute" != "yes" ]]; then
-            pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        fi
+        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
         echo "Не вдалося підключити MASTER до '$physical'; попередній маршрут залишено" >&2
         return 1
     fi
 
     if ! set_loopback_gain_db "$new_output_loop" "$OUTPUT_HEADROOM_DB" "MASTER->OUTPUT"; then
         pactl unload-module "$new_output_loop" >/dev/null 2>&1 || true
-        if [[ "$master_mute" != "yes" ]]; then
-            pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        fi
+        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
         echo "Не вдалося застосувати safety headroom до '$physical'; попередній маршрут залишено" >&2
         return 1
     fi
@@ -426,16 +432,10 @@ switch_output() {
         pactl unload-module "$old_output_loop" >/dev/null 2>&1 || true
     fi
 
-    write_state \
-        "$physical" "$master_bus" "$music_bus" "$alert_bus" \
+    write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" \
         "$music_loop" "$alert_loop" "$new_output_loop"
-
-    set_loopback_gain_db "$alert_loop" "$ALERT_MIX_HEADROOM_DB" "ALERT->MASTER"
-
-    if [[ "$master_mute" != "yes" ]]; then
-        pactl set-sink-mute "$MASTER_SINK" 0
-    fi
-
+    set_loopback_gain_db "$alert_loop" "$ALERT_MIX_GAIN_DB" "ALERT->MASTER"
+    [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0
     echo "Фінальний вихід перемкнено ${old_physical:-<none>} -> $physical"
 }
 
@@ -449,9 +449,7 @@ stop_buses() {
 }
 
 case "${1:-}" in
-    start|switch|stop|restart)
-        acquire_lock
-        ;;
+    start|switch|stop|restart) acquire_lock ;;
     *)
         echo "Використання: $0 {start|switch|stop|restart}" >&2
         exit 2
