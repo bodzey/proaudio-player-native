@@ -33,6 +33,19 @@ jobs:
             echo 'the physical output path must not depend on the retired userspace PCM limiter' >&2
             exit 1
           fi
+      - name: Check absolute graph gain policy
+        run: |
+          grep -Eq '^OUTPUT_HEADROOM_DB=-3\.0$' config/audio.env.example
+          grep -Eq '^ALERT_MIX_GAIN_DB=0\.0$' config/audio.env.example
+          grep -Fq 'pulse_raw_from_db' scripts/audio-buses.sh
+          grep -Fq 'pactl set-sink-input-volume "$input" "$raw"' scripts/audio-buses.sh
+          grep -Fq 'playback_has_zero_percent' scripts/audio-buses.sh
+          if grep -Fq 'set-sink-input-volume "$input" "${db}dB"' scripts/audio-buses.sh; then
+            echo 'signed dB strings are relative in pactl and must never set fixed graph gains' >&2
+            exit 1
+          fi
+          test "$(awk 'BEGIN { printf "%.0f", 65536.0 * exp(log(10.0) * -3.0 / 60.0) }')" = 58409
+          test "$(awk 'BEGIN { printf "%.0f", 65536.0 * exp(log(10.0) * 0.0 / 60.0) }')" = 65536
       - name: Check processing-rate authority
         run: |
           grep -Eq '^SAMPLE_RATE=[0-9]+$' config/audio.env.example
