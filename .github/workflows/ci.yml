@@ -35,7 +35,7 @@ jobs:
           fi
       - name: Check absolute graph gain policy
         run: |
-          grep -Eq '^OUTPUT_HEADROOM_DB=-3\.0$' config/audio.env.example
+          grep -Eq '^OUTPUT_HEADROOM_DB=-1\.0$' config/audio.env.example
           grep -Eq '^ALERT_MIX_GAIN_DB=0\.0$' config/audio.env.example
           grep -Fq 'pulse_raw_from_db' scripts/audio-buses.sh
           grep -Fq 'pactl set-sink-input-volume "$input" "$raw"' scripts/audio-buses.sh
@@ -44,7 +44,7 @@ jobs:
             echo 'signed dB strings are relative in pactl and must never set fixed graph gains' >&2
             exit 1
           fi
-          test "$(awk 'BEGIN { printf "%.0f", 65536.0 * exp(log(10.0) * -3.0 / 60.0) }')" = 58409
+          test "$(awk 'BEGIN { printf "%.0f", 65536.0 * exp(log(10.0) * -1.0 / 60.0) }')" = 63069
           test "$(awk 'BEGIN { printf "%.0f", 65536.0 * exp(log(10.0) * 0.0 / 60.0) }')" = 65536
       - name: Check processing-rate authority
         run: |
