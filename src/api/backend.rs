@@ -1422,8 +1422,8 @@ async fn set_mixer(
             "Рівень має бути в межах -60..0 dB",
         ));
     }
-    // MASTER is the final logical attenuation stage before the safety limiter and
-    // remains available even while priority audio owns the MUSIC bus.
+    // MASTER is the final logical user attenuation stage and remains available
+    // even while priority audio owns the MUSIC bus.
     if body.target != "master" {
         controller
             .ensure_controls_available()

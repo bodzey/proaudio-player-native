@@ -2,16 +2,16 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::process::Command;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::audio_backend::{
-    linear_to_percent, percent_to_linear, AudioBackend, SinkState, StreamState,
+    AudioBackend, SinkState, StreamState, linear_to_percent, percent_to_linear,
 };
-use crate::config::{effective_audio, AppConfig};
+use crate::config::{AppConfig, effective_audio};
 use crate::output_gain::{BackendOutputGain, OutputGain};
 use crate::output_router::{ExternalOutputRouter, OutputDescriptor, OutputRouter};
 use crate::state::{AudioSnapshot, MixerStateRuntime};
@@ -25,6 +25,7 @@ pub struct AudioEngine {
     output_gain: Arc<dyn OutputGain>,
     output_router: Arc<dyn OutputRouter>,
     mixer_state: MixerStateRuntime,
+    alert_playback_lock: Arc<Mutex<()>>,
 }
 
 impl AudioEngine {
@@ -50,6 +51,7 @@ impl AudioEngine {
             output_gain,
             output_router,
             mixer_state: MixerStateRuntime::new(MIXER_STATE_FILE),
+            alert_playback_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -308,6 +310,27 @@ impl AudioEngine {
             .collect())
     }
 
+    fn mix_safe_alert_volumes(requested: &[f64], music: &AudioSnapshot) -> Vec<f64> {
+        let fallback_music = music.volumes_percent.first().copied().unwrap_or(0.0);
+        requested
+            .iter()
+            .enumerate()
+            .map(|(channel, requested_percent)| {
+                let music_percent = if music.muted {
+                    0.0
+                } else {
+                    music
+                        .volumes_percent
+                        .get(channel)
+                        .copied()
+                        .unwrap_or(fallback_music)
+                };
+                let available = (1.0 - percent_to_linear(music_percent)).max(0.0);
+                linear_to_percent(percent_to_linear(*requested_percent).min(available))
+            })
+            .collect()
+    }
+
     pub async fn enter_alert(&self, snapshot: &AudioSnapshot) -> Result<()> {
         let cfg = self.config()?;
         let current = self.snapshot().await?;
@@ -382,22 +405,58 @@ impl AudioEngine {
         }
         let cfg = self.config()?;
 
-        // Normal alert playback respects the persisted ALERT fader. A temporary
-        // override (used by minute silence) is applied only for this file and is
-        // restored even if mpv fails.
-        let override_snapshot = if let Some(volume) = volume_percent {
+        // Only one announcement may own ALERT at a time. Apart from preventing
+        // overlapping messages, this makes the temporary mix-safe gain and its
+        // restoration atomic from the point of view of every caller.
+        let _playback_guard = self.alert_playback_lock.lock().await;
+
+        if let Some(volume) = volume_percent {
             if !(0.0..=100.0).contains(&volume) {
                 bail!("гучність має бути 0..100");
             }
-            let snapshot = self.snapshot_sink(&cfg.alert_sink).await?;
-            self.backend
-                .set_sink_percent_channels(&cfg.alert_sink, &[volume])
-                .await?;
-            self.backend.set_sink_mute(&cfg.alert_sink, false).await?;
-            Some(snapshot)
-        } else {
-            None
+        }
+
+        let alert_snapshot = self.snapshot_sink(&cfg.alert_sink).await?;
+        let music_snapshot = self.snapshot_sink(&cfg.music_sink).await?;
+        let requested = match volume_percent {
+            Some(volume) => vec![volume; alert_snapshot.volumes_percent.len()],
+            None => alert_snapshot.volumes_percent.clone(),
         };
+        let playback_volumes = Self::mix_safe_alert_volumes(&requested, &music_snapshot);
+        let temporary_gain = volume_percent.is_some()
+            || playback_volumes
+                .iter()
+                .zip(&alert_snapshot.volumes_percent)
+                .any(|(left, right)| (left - right).abs() > 0.000_001);
+
+        // ALERT remains a user fader, but during actual playback its effective
+        // gain is capped to the linear headroom left by the already-ducked MUSIC
+        // bus. This guarantees |music + alert| <= 1 for full-scale input samples
+        // without permanently attenuating normal playback or adding a nonlinear
+        // limiter/another clock domain. The persisted fader is always restored.
+        let apply = async {
+            self.backend
+                .set_sink_percent_channels(&cfg.alert_sink, &playback_volumes)
+                .await?;
+            if volume_percent.is_some() {
+                self.backend.set_sink_mute(&cfg.alert_sink, false).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if let Err(error) = apply {
+            if temporary_gain {
+                let _ = self
+                    .set_volume(&cfg.alert_sink, &alert_snapshot.volumes_percent)
+                    .await;
+                let _ = self
+                    .backend
+                    .set_sink_mute(&cfg.alert_sink, alert_snapshot.muted)
+                    .await;
+            }
+            return Err(error);
+        }
 
         let playback = async {
             let output = Command::new(&cfg.player_binary)
@@ -424,11 +483,11 @@ impl AudioEngine {
         .await;
 
         let restore = async {
-            if let Some(snapshot) = override_snapshot.as_ref() {
-                self.set_volume(&cfg.alert_sink, &snapshot.volumes_percent)
+            if temporary_gain {
+                self.set_volume(&cfg.alert_sink, &alert_snapshot.volumes_percent)
                     .await?;
                 self.backend
-                    .set_sink_mute(&cfg.alert_sink, snapshot.muted)
+                    .set_sink_mute(&cfg.alert_sink, alert_snapshot.muted)
                     .await?;
             }
             Ok::<(), anyhow::Error>(())
@@ -441,11 +500,7 @@ impl AudioEngine {
 }
 
 fn db_to_percent(db: f64) -> f64 {
-    if db <= -60.0 {
-        0.0
-    } else {
-        (100.0 * 10f64.powf(db / 60.0)).clamp(0.0, 100.0)
-    }
+    (100.0 * 10f64.powf(db / 60.0)).clamp(0.0, 100.0)
 }
 
 #[cfg(test)]
@@ -456,6 +511,60 @@ mod tests {
     fn pulse_db_percent_conversion_matches_cubic_volume_scale() {
         assert!((db_to_percent(0.0) - 100.0).abs() < 1.0e-9);
         assert!((db_to_percent(-6.0) - 79.432_823_472_428_14).abs() < 1.0e-9);
-        assert_eq!(db_to_percent(-60.0), 0.0);
+        assert!((db_to_percent(-60.0) - 10.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn alert_mix_uses_only_the_linear_headroom_left_by_music() {
+        let music = AudioSnapshot {
+            volumes_percent: vec![linear_to_percent(10f64.powf(-12.0 / 20.0)); 2],
+            muted: false,
+        };
+        let alert = AudioEngine::mix_safe_alert_volumes(&[100.0, 100.0], &music);
+
+        for (music_percent, alert_percent) in music.volumes_percent.iter().zip(alert) {
+            let sum = percent_to_linear(*music_percent) + percent_to_linear(alert_percent);
+            assert!((sum - 1.0).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn alert_mix_preserves_unity_when_music_is_muted() {
+        let music = AudioSnapshot {
+            volumes_percent: vec![100.0, 100.0],
+            muted: true,
+        };
+        assert_eq!(
+            AudioEngine::mix_safe_alert_volumes(&[100.0, 80.0], &music),
+            vec![100.0, 80.0]
+        );
+    }
+
+    #[test]
+    fn alert_mix_does_not_raise_the_requested_alert_level() {
+        let music = AudioSnapshot {
+            volumes_percent: vec![50.0],
+            muted: false,
+        };
+        let alert = AudioEngine::mix_safe_alert_volumes(&[60.0, 40.0], &music);
+        assert!((alert[0] - 60.0).abs() < 1.0e-12);
+        assert!((alert[1] - 40.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn alert_mix_never_exceeds_unity_across_the_full_control_range() {
+        for music_percent in (0..=100).map(f64::from) {
+            for requested_percent in (0..=100).map(f64::from) {
+                let music = AudioSnapshot {
+                    volumes_percent: vec![music_percent],
+                    muted: false,
+                };
+                let effective =
+                    AudioEngine::mix_safe_alert_volumes(&[requested_percent], &music)[0];
+                let sum = percent_to_linear(music_percent) + percent_to_linear(effective);
+                assert!(sum <= 1.0 + 1.0e-12);
+                assert!(effective <= requested_percent + 1.0e-12);
+            }
+        }
     }
 }

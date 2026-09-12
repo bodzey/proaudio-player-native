@@ -128,6 +128,10 @@ impl SourceArbiter {
             .map(|(key, _)| key.clone())
     }
 
+    fn audible_stream_index(streams: &[StreamState]) -> Option<u32> {
+        streams.iter().map(|stream| stream.index).max()
+    }
+
     async fn stop_source(&self, key: &str, streams: &[StreamState]) -> Result<()> {
         if key == "mpd" {
             let out = command::run("mpc", &["stop"], false, 8).await?;
@@ -217,10 +221,21 @@ impl SourceArbiter {
             info!(winner = ?self.winner, "Активне джерело змінено");
         }
 
+        let audible_stream = self
+            .winner
+            .as_ref()
+            .and_then(|winner| grouped.get(winner))
+            .and_then(|streams| Self::audible_stream_index(streams));
+
         for (key, items) in &grouped {
             let is_winner = Some(key) == self.winner.as_ref();
-            let should_mute = !is_winner;
             for item in items {
+                // A receiver normally owns one stereo sink-input, but reconnects
+                // can briefly leave duplicates behind. Exactly one programme
+                // stream is allowed through the MUSIC bus so duplicate streams
+                // cannot sum above unity.
+                let is_audible = is_winner && Some(item.index) == audible_stream;
+                let should_mute = !is_audible;
                 if item.muted != should_mute {
                     if let Err(err) = self
                         .audio
@@ -238,7 +253,8 @@ impl SourceArbiter {
 
                 // Source receivers are transports, never user gain stages. Keep
                 // the winning stream at unity. MUSIC bus owns user volume and ducking.
-                if is_winner && item.has_volume && item.volume_writable && !item.volume_is_unity() {
+                if is_audible && item.has_volume && item.volume_writable && !item.volume_is_unity()
+                {
                     if let Err(err) = self.audio.set_sink_input_percent(item.index, 100.0).await {
                         warn!(
                             stream = item.index,
@@ -297,5 +313,33 @@ impl SourceArbiter {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream(index: u32) -> StreamState {
+        StreamState {
+            index,
+            sink: 1,
+            name: String::new(),
+            properties: HashMap::new(),
+            volumes_percent: vec![100.0, 100.0],
+            muted: false,
+            corked: false,
+            has_volume: true,
+            volume_writable: true,
+        }
+    }
+
+    #[test]
+    fn newest_stream_is_the_only_audible_stream_for_a_source() {
+        assert_eq!(
+            SourceArbiter::audible_stream_index(&[stream(7), stream(12), stream(9)]),
+            Some(12)
+        );
+        assert_eq!(SourceArbiter::audible_stream_index(&[]), None);
     }
 }

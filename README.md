@@ -16,7 +16,7 @@ The native daemon keeps the existing runtime contract so it can be introduced in
 - explicit local-source switching: selecting MPD/local content may replace an active external music source while priority alerts still block music controls;
 - a unified frontend-facing player model and transport controls for MPD, Spotify/MPRIS, AirPlay/MPRIS and DLNA/AVTransport;
 - MPD library, playlists, queue and HTTP(S) stream URL playback;
-- 0..150% software gain, physical output/alert-bus controls and ALSA hardware mixer diagnostics;
+- 0..100% unity-bounded MUSIC/ALERT/MASTER gain, physical output controls and ALSA hardware mixer diagnostics;
 - a versioned hardware-neutral HTTP control API at `/api/v1`, with `/api` retained as a migration alias;
 - LinkPlay/4STREAM compatibility API (`/httpapi.asp`), metadata/status commands and `_linkplay._tcp` discovery descriptor;
 - UPnP MediaRenderer description, SSDP M-SEARCH/alive discovery and core SOAP AVTransport/RenderingControl actions;

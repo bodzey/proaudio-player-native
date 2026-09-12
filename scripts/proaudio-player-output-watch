@@ -21,7 +21,6 @@ load_config() {
     fi
     export MUSIC_SINK ALERT_SINK MASTER_SINK SAMPLE_RATE AUDIO_CHANNELS
     export LOOPBACK_LATENCY_MSEC OUTPUT_VOLUME_PERCENT HARDWARE_MIXER_MODE SINK_WAIT_SECONDS
-    export OUTPUT_HEADROOM_DB ALERT_MIX_GAIN_DB
 }
 
 physical_candidates() {
@@ -48,6 +47,51 @@ current_output() {
     awk -F= '$1 == "PHYSICAL" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE"
 }
 
+state_value() {
+    local wanted="$1"
+    [[ -f "$STATE_FILE" ]] || return 0
+    awk -F= -v wanted="$wanted" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE"
+}
+
+loopback_exists() {
+    local module="$1"
+    [[ "$module" =~ ^[0-9]+$ ]] || return 1
+    pactl list sink-inputs 2>/dev/null | awk -v wanted="$module" '
+        /^[[:space:]]*Owner Module:/ && $3 == wanted { found=1; exit }
+        END { exit !found }'
+}
+
+physical_sink_is_unity() {
+    local sink="$1"
+    [[ "$(pactl get-sink-mute "$sink" 2>/dev/null | awk '{print $2}')" == "no" ]] || return 1
+    pactl get-sink-volume "$sink" 2>/dev/null |
+        tr '/,' '\n' |
+        awk '
+            BEGIN { valid=1 }
+            /^[[:space:]]*[0-9]+%[[:space:]]*$/ {
+                value=$1
+                found=1
+                if (value != "100%") valid=0
+            }
+            END { exit !(found && valid) }'
+}
+
+graph_healthy() {
+    local physical="$1"
+    local music_loop alert_loop output_loop
+    music_loop="$(state_value MUSIC_LOOP_MODULE)"
+    alert_loop="$(state_value ALERT_LOOP_MODULE)"
+    output_loop="$(state_value OUTPUT_LOOP_MODULE)"
+
+    sink_available "${MUSIC_SINK:-proaudio_player_music}" \
+        && sink_available "${ALERT_SINK:-proaudio_player_alert}" \
+        && sink_available "${MASTER_SINK:-proaudio_player_master}" \
+        && physical_sink_is_unity "$physical" \
+        && loopback_exists "$music_loop" \
+        && loopback_exists "$alert_loop" \
+        && loopback_exists "$output_loop"
+}
+
 reconcile_output() {
     load_config
 
@@ -62,12 +106,14 @@ reconcile_output() {
     fi
 
     [[ -n "$desired" ]] || return 0
-    [[ "$current" == "$desired" ]] && return 0
+    if [[ "$current" == "$desired" ]] && graph_healthy "$desired"; then
+        return 0
+    fi
 
     # Preserve an explicitly configured output while it is temporarily absent.
     # Only the environment of this switch operation falls back to AUTO.
     export PHYSICAL_SINK="$desired"
-    echo "Audio hotplug: switching final output ${current:-<none>} -> $desired" >&2
+    echo "Audio routing: reconciling ${current:-<none>} -> $desired" >&2
     "$BUS_SCRIPT" switch
 }
 

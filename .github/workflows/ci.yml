@@ -35,8 +35,14 @@ jobs:
           fi
       - name: Check absolute graph gain policy
         run: |
-          grep -Eq '^OUTPUT_HEADROOM_DB=-1\.0$' config/audio.env.example
-          grep -Eq '^ALERT_MIX_GAIN_DB=0\.0$' config/audio.env.example
+          if grep -Eq '^(OUTPUT_HEADROOM_DB|ALERT_MIX_GAIN_DB)=' config/audio.env.example; then
+            echo 'fixed hidden attenuation is forbidden in the unity graph' >&2
+            exit 1
+          fi
+          grep -Fq 'GRAPH_UNITY_DB="0.0"' scripts/audio-buses.sh
+          grep -Eq 'set_loopback_gain_db "\$music_loop" "\$GRAPH_UNITY_DB" "MUSIC->MASTER"' scripts/audio-buses.sh
+          grep -Eq 'set_loopback_gain_db "\$alert_loop" "\$GRAPH_UNITY_DB" "ALERT->MASTER"' scripts/audio-buses.sh
+          grep -Eq 'set_loopback_gain_db "\$output_loop" "\$GRAPH_UNITY_DB" "MASTER->OUTPUT"' scripts/audio-buses.sh
           grep -Fq 'pulse_raw_from_db' scripts/audio-buses.sh
           grep -Fq 'pactl set-sink-input-volume "$input" "$raw"' scripts/audio-buses.sh
           grep -Fq 'playback_has_zero_percent' scripts/audio-buses.sh
@@ -44,7 +50,6 @@ jobs:
             echo 'signed dB strings are relative in pactl and must never set fixed graph gains' >&2
             exit 1
           fi
-          test "$(awk 'BEGIN { printf "%.0f", 65536.0 * exp(log(10.0) * -1.0 / 60.0) }')" = 63069
           test "$(awk 'BEGIN { printf "%.0f", 65536.0 * exp(log(10.0) * 0.0 / 60.0) }')" = 65536
       - name: Check processing-rate authority
         run: |
@@ -77,6 +82,11 @@ jobs:
             exit 1
           fi
           grep -Fq 'PipeWire-Pulse недоступний; запуск аудіографа припинено' scripts/audio-buses.sh
+      - name: Check output watcher health reconciliation
+        run: |
+          grep -Fq 'graph_healthy "$desired"' scripts/proaudio-player-output-watch
+          grep -Fq 'physical_sink_is_unity' scripts/proaudio-player-output-watch
+          grep -Fq 'loopback_exists "$output_loop"' scripts/proaudio-player-output-watch
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"

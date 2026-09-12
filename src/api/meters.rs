@@ -1,30 +1,29 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
-use axum::extract::State;
-use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
-use axum::routing::get;
+use anyhow::{Result, anyhow};
 use axum::Router;
+use axum::extract::State;
+use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::routing::get;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, sleep, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval, sleep};
 use tracing::debug;
 
 use super::backend::WebController;
 
-const SAMPLE_RATE: u32 = 48_000;
 const METER_INTERVAL: Duration = Duration::from_millis(40);
-const METER_WINDOW_FRAMES: usize = 1_920;
+const METER_WINDOW_MILLIS: u64 = 40;
 const TOPOLOGY_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_DB: f64 = -60.0;
@@ -189,7 +188,11 @@ fn amplitude_db(value: f64) -> f64 {
     }
 }
 
-fn spawn_recorder(device: &str) -> Result<Child> {
+fn meter_window_frames(sample_rate: u32) -> usize {
+    ((u64::from(sample_rate) * METER_WINDOW_MILLIS) / 1_000).max(1) as usize
+}
+
+fn spawn_recorder(device: &str, sample_rate: u32) -> Result<Child> {
     let programs = [("parec", false), ("pacat", true)];
     let mut not_found = Vec::new();
 
@@ -201,7 +204,7 @@ fn spawn_recorder(device: &str) -> Result<Child> {
         command
             .arg("--raw")
             .arg("--format=float32le")
-            .arg(format!("--rate={SAMPLE_RATE}"))
+            .arg(format!("--rate={sample_rate}"))
             .arg("--channels=2")
             .arg("--latency-msec=40")
             .arg(format!("--device={device}"))
@@ -227,10 +230,11 @@ fn spawn_recorder(device: &str) -> Result<Child> {
 async fn capture_once(
     target: MeterTarget,
     sink: &str,
+    sample_rate: u32,
     updates: &mpsc::Sender<MeterUpdate>,
 ) -> Result<()> {
     let device = format!("{sink}.monitor");
-    let mut child = spawn_recorder(&device)?;
+    let mut child = spawn_recorder(&device, sample_rate)?;
     let mut stdout = child
         .stdout
         .take()
@@ -254,7 +258,7 @@ async fn capture_once(
             let right = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
             window.push(left, right);
 
-            if window.samples >= METER_WINDOW_FRAMES {
+            if window.samples >= meter_window_frames(sample_rate) {
                 if let Some(level) = window.take() {
                     updates
                         .send(MeterUpdate { target, level })
@@ -273,10 +277,11 @@ async fn capture_once(
 async fn monitor_forever(
     target: MeterTarget,
     sink: String,
+    sample_rate: u32,
     updates: mpsc::Sender<MeterUpdate>,
 ) {
     loop {
-        if let Err(error) = capture_once(target, &sink, &updates).await {
+        if let Err(error) = capture_once(target, &sink, sample_rate, &updates).await {
             debug!(
                 target = target.label(),
                 sink = %sink,
@@ -301,9 +306,10 @@ async fn monitor_forever(
 fn spawn_monitor(
     target: MeterTarget,
     sink: String,
+    sample_rate: u32,
     updates: mpsc::Sender<MeterUpdate>,
 ) -> JoinHandle<()> {
-    tokio::spawn(monitor_forever(target, sink, updates))
+    tokio::spawn(monitor_forever(target, sink, sample_rate, updates))
 }
 
 fn abort(task: &mut Option<JoinHandle<()>>) {
@@ -321,6 +327,7 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
     let mut alert_task: Option<JoinHandle<()>> = None;
     let mut master_task: Option<JoinHandle<()>> = None;
     let mut master_sink: Option<String> = None;
+    let sample_rate = controller.config.audio.sample_rate;
 
     let mut emit = interval(METER_INTERVAL);
     emit.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -346,6 +353,7 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
                     music_task = Some(spawn_monitor(
                         MeterTarget::Music,
                         controller.config.audio.music_sink.clone(),
+                        sample_rate,
                         updates.clone(),
                     ));
                 }
@@ -353,6 +361,7 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
                     alert_task = Some(spawn_monitor(
                         MeterTarget::Alert,
                         controller.config.audio.alert_sink.clone(),
+                        sample_rate,
                         updates.clone(),
                     ));
                 }
@@ -366,6 +375,7 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
                         master_task = Some(spawn_monitor(
                             MeterTarget::Master,
                             sink,
+                            sample_rate,
                             updates.clone(),
                         ));
                     }
@@ -375,6 +385,7 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
                         master_task = Some(spawn_monitor(
                             MeterTarget::Master,
                             sink,
+                            sample_rate,
                             updates.clone(),
                         ));
                     }
@@ -387,7 +398,7 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
                 sequence = sequence.wrapping_add(1);
                 let payload = json!({
                     "sequence": sequence,
-                    "sample_rate": SAMPLE_RATE,
+                    "sample_rate": sample_rate,
                     "interval_ms": METER_INTERVAL.as_millis(),
                     "master": frame.master.json(),
                     "music": frame.music.json(),
@@ -450,4 +461,16 @@ pub(super) fn router() -> Router<WebController> {
     Router::<WebController>::new()
         .route("/api/meters", get(meter_events))
         .route("/api/v1/meters", get(meter_events))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::meter_window_frames;
+
+    #[test]
+    fn meter_window_tracks_the_processing_rate() {
+        assert_eq!(meter_window_frames(44_100), 1_764);
+        assert_eq!(meter_window_frames(48_000), 1_920);
+        assert_eq!(meter_window_frames(96_000), 3_840);
+    }
 }

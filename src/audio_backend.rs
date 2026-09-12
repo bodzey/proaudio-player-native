@@ -119,4 +119,13 @@ mod tests {
         assert_eq!(linear_to_percent(-1.0), 0.0);
         assert_eq!(linear_to_percent(2.0), 100.0);
     }
+
+    #[test]
+    fn pulse_percentage_represents_the_requested_amplitude_db() {
+        for db in [-60.0, -18.0, -12.0, -6.0, 0.0] {
+            let percent = linear_to_percent(10f64.powf(db / 20.0));
+            let restored_db = 20.0 * percent_to_linear(percent).log10();
+            assert!((restored_db - db).abs() < 1.0e-10);
+        }
+    }
 }

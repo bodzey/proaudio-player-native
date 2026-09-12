@@ -14,10 +14,8 @@ source_services=(
 )
 
 support_services=(
-    proaudio-player-limiter.service
     proaudio-player-output-watch.service
     proaudio-player-audio-output.path
-    proaudio-player-limiter.path
 )
 
 existing_units() {

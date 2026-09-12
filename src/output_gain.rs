@@ -18,7 +18,7 @@ pub trait OutputGain: Send + Sync {
 /// but the default implementation deliberately owns one fixed logical master sink.
 /// This prevents hardware/output selection from changing the gain stage and keeps
 /// the processing order deterministic:
-/// MUSIC + ALERT -> MASTER gain -> safety limiter -> physical sink.
+/// MUSIC + ALERT -> MASTER gain -> unity graph link -> physical sink.
 pub struct BackendOutputGain {
     backend: Arc<dyn AudioBackend>,
     master_sink: String,
