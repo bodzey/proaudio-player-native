@@ -16,6 +16,8 @@ alerts -> proaudio_player_alert|
                                v
                     proaudio_player_master
                                |
+                         fixed -3 dB
+                               |
                                v
                     selected physical sink
                                |
@@ -31,15 +33,17 @@ The MUSIC, ALERT and MASTER buses and the final MASTER-to-device connection are 
 ## Gain policy
 
 - Source receivers are transports and stay at unity. They do not own user volume.
+- Source arbitration keeps only one programme source audible on MUSIC at a time.
 - MUSIC owns normal programme level and alert ducking.
+- ALERT enters MASTER at unity; its own fader controls announcement level, while priority is created by ducking MUSIC before playback.
 - MASTER is the user-facing final digital gain stage and is limited to unity or attenuation; positive digital gain is not allowed.
+- The final MASTER-to-physical graph link applies a fixed -3 dB post-mix safety margin.
+- Fixed graph gains are applied as absolute Pulse raw volumes, so repeated routing reconciliation is idempotent.
 - The selected physical PipeWire sink is fixed at 100%/unity and is not used as a user gain control.
 - WirePlumber uses a software mixer for physical ALSA devices so desktop-style sink volume cannot silently move an arbitrary hardware mixer.
-- The routing helper may normalize a trustworthy ALSA playback control to 0 dB or the nearest verified value below 0 dB. It never intentionally selects positive hardware gain. Unknown controls are not guessed.
-- Source arbitration keeps only one programme source audible on MUSIC at a time.
-- Alert playback is preceded by MUSIC ducking; alert and minute-silence media are separate from the programme path.
+- Hardware mixer normalization is accepted only when the dB mapping is trustworthy. In particular, a reported 0 dB value that resolves to 0% is rejected rather than treated as unity.
 
-This keeps normal music playback linear. Protection against overload is primarily gain staging and source exclusivity, not continuous dynamics processing.
+This keeps the permanent path linear and inside PipeWire. The current appliance does not allow arbitrary programme streams to sum: one MUSIC source is selected, and alerts are sequenced with MUSIC ducking. If a future mode permits unrestricted simultaneous sources and requires a strict ceiling, the ceiling should be a graph-scheduled PipeWire processor after MASTER.
 
 ## Sample-rate policy
 
