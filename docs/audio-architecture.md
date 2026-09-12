@@ -16,7 +16,7 @@ alerts -> proaudio_player_alert|
                                v
                     proaudio_player_master
                                |
-                         fixed -3 dB
+                         fixed -1 dB
                                |
                                v
                     selected physical sink
@@ -37,13 +37,13 @@ The MUSIC, ALERT and MASTER buses and the final MASTER-to-device connection are 
 - MUSIC owns normal programme level and alert ducking.
 - ALERT enters MASTER at unity; its own fader controls announcement level, while priority is created by ducking MUSIC before playback.
 - MASTER is the user-facing final digital gain stage and is limited to unity or attenuation; positive digital gain is not allowed.
-- The final MASTER-to-physical graph link applies a fixed -3 dB post-mix safety margin.
+- The final MASTER-to-physical graph link applies a fixed -1 dB post-mix margin.
 - Fixed graph gains are applied as absolute Pulse raw volumes, so repeated routing reconciliation is idempotent.
 - The selected physical PipeWire sink is fixed at 100%/unity and is not used as a user gain control.
 - WirePlumber uses a software mixer for physical ALSA devices so desktop-style sink volume cannot silently move an arbitrary hardware mixer.
 - Hardware mixer normalization is accepted only when the dB mapping is trustworthy. In particular, a reported 0 dB value that resolves to 0% is rejected rather than treated as unity.
 
-This keeps the permanent path linear and inside PipeWire. The current appliance does not allow arbitrary programme streams to sum: one MUSIC source is selected, and alerts are sequenced with MUSIC ducking. If a future mode permits unrestricted simultaneous sources and requires a strict ceiling, the ceiling should be a graph-scheduled PipeWire processor after MASTER.
+This keeps the permanent path linear and inside PipeWire. The current appliance does not allow arbitrary programme streams to sum: one MUSIC source is selected, and alerts are sequenced with MUSIC ducking. The -1 dB stage is a small nominal margin, not a hard ceiling for arbitrary simultaneous full-scale streams. If a future mode permits unrestricted simultaneous sources and requires a strict ceiling, the ceiling should be a graph-scheduled PipeWire processor after MASTER.
 
 ## Sample-rate policy
 
