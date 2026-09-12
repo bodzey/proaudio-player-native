@@ -8,6 +8,7 @@ BUS_SCRIPT="${BUS_SCRIPT:-/usr/libexec/proaudio-player/audio-buses.sh}"
 
 load_config() {
     PHYSICAL_SINK=AUTO
+    PARKING_SINK=proaudio_player_parking
     if [[ -f "$AUDIO_ENV" ]]; then
         # shellcheck disable=SC1090
         source "$AUDIO_ENV"
@@ -19,8 +20,8 @@ load_config() {
             PHYSICAL_SINK="$configured"
         fi
     fi
-    export MUSIC_SINK ALERT_SINK MASTER_SINK SAMPLE_RATE AUDIO_CHANNELS
-    export LOOPBACK_LATENCY_MSEC OUTPUT_VOLUME_PERCENT HARDWARE_MIXER_MODE SINK_WAIT_SECONDS
+    export MUSIC_SINK ALERT_SINK MASTER_SINK PARKING_SINK SAMPLE_RATE AUDIO_CHANNELS
+    export LOOPBACK_LATENCY_MSEC OUTPUT_VOLUME_PERCENT HARDWARE_MIXER_MODE
 }
 
 physical_candidates() {
@@ -42,9 +43,13 @@ sink_available() {
     pactl get-sink-volume "$sink" >/dev/null 2>&1
 }
 
-current_output() {
+current_output_target() {
     [[ -f "$STATE_FILE" ]] || return 0
-    awk -F= '$1 == "PHYSICAL" { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE"
+    awk -F= '
+        $1 == "OUTPUT_TARGET" { print substr($0, index($0, "=") + 1); found=1; exit }
+        $1 == "PHYSICAL" { legacy=substr($0, index($0, "=") + 1) }
+        END { if (!found) print legacy }
+    ' "$STATE_FILE"
 }
 
 state_value() {
@@ -77,7 +82,7 @@ physical_sink_is_unity() {
 }
 
 graph_healthy() {
-    local physical="$1"
+    local output_target="$1"
     local music_loop alert_loop output_loop
     music_loop="$(state_value MUSIC_LOOP_MODULE)"
     alert_loop="$(state_value ALERT_LOOP_MODULE)"
@@ -86,7 +91,8 @@ graph_healthy() {
     sink_available "${MUSIC_SINK:-proaudio_player_music}" \
         && sink_available "${ALERT_SINK:-proaudio_player_alert}" \
         && sink_available "${MASTER_SINK:-proaudio_player_master}" \
-        && physical_sink_is_unity "$physical" \
+        && { [[ "$output_target" == "${PARKING_SINK:-proaudio_player_parking}" ]] \
+            || physical_sink_is_unity "$output_target"; } \
         && loopback_exists "$music_loop" \
         && loopback_exists "$alert_loop" \
         && loopback_exists "$output_loop"
@@ -96,24 +102,26 @@ reconcile_output() {
     load_config
 
     local configured="${PHYSICAL_SINK:-AUTO}"
-    local desired=""
-    local current="$(current_output)"
+    local desired_physical=""
+    local desired_target=""
+    local current
+    current="$(current_output_target)"
 
     if [[ "$configured" != "AUTO" ]] && sink_available "$configured"; then
-        desired="$configured"
+        desired_physical="$configured"
     else
-        desired="$(physical_candidates | head -n 1)"
+        desired_physical="$(physical_candidates | head -n 1 || true)"
     fi
+    desired_target="${desired_physical:-${PARKING_SINK:-proaudio_player_parking}}"
 
-    [[ -n "$desired" ]] || return 0
-    if [[ "$current" == "$desired" ]] && graph_healthy "$desired"; then
+    if [[ "$current" == "$desired_target" ]] && graph_healthy "$desired_target"; then
         return 0
     fi
 
     # Preserve an explicitly configured output while it is temporarily absent.
     # Only the environment of this switch operation falls back to AUTO.
-    export PHYSICAL_SINK="$desired"
-    echo "Audio routing: reconciling ${current:-<none>} -> $desired" >&2
+    export PHYSICAL_SINK="${desired_physical:-AUTO}"
+    echo "Audio routing: reconciling ${current:-<none>} -> $desired_target" >&2
     "$BUS_SCRIPT" switch
 }
 

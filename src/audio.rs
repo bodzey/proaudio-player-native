@@ -25,7 +25,7 @@ pub struct AudioEngine {
     output_gain: Arc<dyn OutputGain>,
     output_router: Arc<dyn OutputRouter>,
     mixer_state: MixerStateRuntime,
-    alert_playback_lock: Arc<Mutex<()>>,
+    mix_policy_lock: Arc<Mutex<()>>,
 }
 
 impl AudioEngine {
@@ -51,7 +51,7 @@ impl AudioEngine {
             output_gain,
             output_router,
             mixer_state: MixerStateRuntime::new(MIXER_STATE_FILE),
-            alert_playback_lock: Arc::new(Mutex::new(())),
+            mix_policy_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -210,6 +210,7 @@ impl AudioEngine {
     }
 
     pub async fn set_sink_mute(&self, sink: &str, muted: bool) -> Result<()> {
+        let _policy_guard = self.mix_policy_lock.lock().await;
         self.backend.set_sink_mute(sink, muted).await?;
         let cfg = self.config()?;
         if sink == cfg.alert_sink {
@@ -222,6 +223,7 @@ impl AudioEngine {
         if !(-60.0..=0.0).contains(&db) {
             bail!("рівень має бути в межах -60..0 dB");
         }
+        let _policy_guard = self.mix_policy_lock.lock().await;
         self.backend.set_sink_db(sink, db).await?;
         let cfg = self.config()?;
         let percent = db_to_percent(db);
@@ -237,6 +239,7 @@ impl AudioEngine {
         if !(0.0..=100.0).contains(&percent) {
             bail!("гучність має бути 0..100");
         }
+        let _policy_guard = self.mix_policy_lock.lock().await;
         let cfg = self.config()?;
         self.backend
             .set_sink_percent_channels(&cfg.music_sink, &[percent])
@@ -246,6 +249,7 @@ impl AudioEngine {
     }
 
     pub async fn set_music_mute(&self, muted: bool) -> Result<()> {
+        let _policy_guard = self.mix_policy_lock.lock().await;
         let cfg = self.config()?;
         self.backend.set_sink_mute(&cfg.music_sink, muted).await?;
         self.mixer_state.set_music_muted(muted);
@@ -256,6 +260,7 @@ impl AudioEngine {
         if !(0.0..=100.0).contains(&percent) {
             bail!("гучність має бути 0..100");
         }
+        let _policy_guard = self.mix_policy_lock.lock().await;
         self.backend
             .set_sink_percent_channels(sink, &[percent])
             .await?;
@@ -400,15 +405,36 @@ impl AudioEngine {
         media_file: &std::path::Path,
         volume_percent: Option<f64>,
     ) -> Result<()> {
+        let _policy_guard = self.mix_policy_lock.lock().await;
+        self.play_with_locked_policy(media_file, volume_percent).await
+    }
+
+    pub async fn play_talkover(
+        &self,
+        media_file: &std::path::Path,
+        snapshot: &AudioSnapshot,
+    ) -> Result<()> {
+        // Duck, sample the remaining peak budget, play and restore as one policy
+        // transaction. Web/API MUSIC or ALERT changes wait until this finishes,
+        // so a concurrent fader move cannot invalidate the mix-safe cap or be
+        // overwritten by restoring the pre-announcement snapshot.
+        let _policy_guard = self.mix_policy_lock.lock().await;
+        self.enter_alert(snapshot).await?;
+        let playback = self.play_with_locked_policy(media_file, None).await;
+        let restore = self.restore(Some(snapshot)).await;
+        playback?;
+        restore
+    }
+
+    async fn play_with_locked_policy(
+        &self,
+        media_file: &std::path::Path,
+        volume_percent: Option<f64>,
+    ) -> Result<()> {
         if !media_file.is_file() {
             bail!("файл оповіщення відсутній: {}", media_file.display());
         }
         let cfg = self.config()?;
-
-        // Only one announcement may own ALERT at a time. Apart from preventing
-        // overlapping messages, this makes the temporary mix-safe gain and its
-        // restoration atomic from the point of view of every caller.
-        let _playback_guard = self.alert_playback_lock.lock().await;
 
         if let Some(volume) = volume_percent {
             if !(0.0..=100.0).contains(&volume) {

@@ -226,11 +226,7 @@ impl AlertController {
         if !talkover {
             return self.audio.play(file, None).await;
         }
-        self.audio.enter_alert(snapshot).await?;
-        let playback = self.audio.play(file, None).await;
-        let restore = self.audio.restore(Some(snapshot)).await;
-        playback?;
-        restore
+        self.audio.play_talkover(file, snapshot).await
     }
 
     async fn begin_alert(

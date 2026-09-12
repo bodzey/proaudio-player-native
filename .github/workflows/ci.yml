@@ -28,7 +28,9 @@ jobs:
       - name: Check direct output graph policy
         run: |
           grep -Eq 'OUTPUT_LOOP_MODULE' scripts/audio-buses.sh
-          grep -Eq 'load_loopback "\$MASTER_SINK" "\$physical"' scripts/audio-buses.sh
+          grep -Eq 'load_loopback_into output_loop "\$MASTER_SINK" "\$output_target"' scripts/audio-buses.sh
+          grep -Fq 'proaudio-player-final-output' scripts/audio-buses.sh
+          grep -Fq 'PARKING_SINK="${PARKING_SINK:-proaudio_player_parking}"' scripts/audio-buses.sh
           if grep -Eq '^LIMITER_' config/audio.env.example; then
             echo 'the physical output path must not depend on the retired userspace PCM limiter' >&2
             exit 1
@@ -75,6 +77,8 @@ jobs:
               exit
             }' tests/fixtures/pulse-sink-inputs.txt)"
           test "$result" = 123
+      - name: Test audio graph failure and hot-plug paths
+        run: tests/test_audio_routing.sh
       - name: Check bounded Pulse setup polling
         run: |
           if grep -Eq 'seq[[:space:]]+1[[:space:]]+[1-9][0-9]+' scripts/audio-buses.sh; then
@@ -84,9 +88,22 @@ jobs:
           grep -Fq 'PipeWire-Pulse недоступний; запуск аудіографа припинено' scripts/audio-buses.sh
       - name: Check output watcher health reconciliation
         run: |
-          grep -Fq 'graph_healthy "$desired"' scripts/proaudio-player-output-watch
+          grep -Fq 'graph_healthy "$desired_target"' scripts/proaudio-player-output-watch
           grep -Fq 'physical_sink_is_unity' scripts/proaudio-player-output-watch
           grep -Fq 'loopback_exists "$output_loop"' scripts/proaudio-player-output-watch
+          grep -Fq 'desired_target="${desired_physical:-${PARKING_SINK:-proaudio_player_parking}}"' scripts/proaudio-player-output-watch
+      - name: Check transactional graph construction
+        run: |
+          grep -Fq 'BUILD_MODULES=()' scripts/audio-buses.sh
+          grep -Fq 'cleanup_build_modules' scripts/audio-buses.sh
+          grep -Fq 'Не вдалося створити повний аудіограф; часткові модулі видаляються' scripts/audio-buses.sh
+      - name: Check control-plane fault isolation
+        run: |
+          grep -Fq 'keep_user_mixer_restored' src/main.rs
+          if grep -Eq '^(Requires|PartOf)=proaudio-player-buses.service$' systemd/proaudio-player-native.service; then
+            echo 'the control plane must survive logical graph restarts' >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"

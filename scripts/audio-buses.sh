@@ -4,16 +4,17 @@ set -euo pipefail
 MUSIC_SINK="${MUSIC_SINK:-proaudio_player_music}"
 ALERT_SINK="${ALERT_SINK:-proaudio_player_alert}"
 MASTER_SINK="${MASTER_SINK:-proaudio_player_master}"
+PARKING_SINK="${PARKING_SINK:-proaudio_player_parking}"
 PHYSICAL_SINK="${PHYSICAL_SINK:-AUTO}"
 SAMPLE_RATE="${SAMPLE_RATE:-48000}"
 AUDIO_CHANNELS="${AUDIO_CHANNELS:-2}"
 LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
-SINK_WAIT_SECONDS="${SINK_WAIT_SECONDS:-30}"
 GRAPH_UNITY_DB="0.0"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
 LOCK_DIR="${XDG_RUNTIME_DIR}/proaudio-player-audio-routing.lock"
+BUILD_MODULES=()
 
 acquire_lock() {
     local deadline=$((SECONDS + 15))
@@ -57,22 +58,6 @@ find_physical_sink() {
     physical_candidates | head -n 1
 }
 
-wait_for_physical_sink() {
-    require_pulse_server
-    local deadline=$((SECONDS + SINK_WAIT_SECONDS))
-    local physical=""
-    while ((SECONDS <= deadline)); do
-        physical="$(find_physical_sink || true)"
-        if [[ -n "$physical" ]]; then
-            printf '%s\n' "$physical"
-            return 0
-        fi
-        sleep 1
-    done
-    echo "Аудіовихід '$PHYSICAL_SINK' не з'явився протягом ${SINK_WAIT_SECONDS} с" >&2
-    return 1
-}
-
 state_value() {
     local wanted="$1"
     [[ -f "$STATE_FILE" ]] || return 0
@@ -80,11 +65,13 @@ state_value() {
 }
 
 write_state() {
-    local physical="$1" master_bus="$2" music_bus="$3" alert_bus="$4"
-    local music_loop="$5" alert_loop="$6" output_loop="$7"
+    local physical="$1" output_target="$2" parking_bus="$3" master_bus="$4"
+    local music_bus="$5" alert_bus="$6" music_loop="$7" alert_loop="$8" output_loop="$9"
     local temporary="${STATE_FILE}.tmp"
     {
         printf 'PHYSICAL=%s\n' "$physical"
+        printf 'OUTPUT_TARGET=%s\n' "$output_target"
+        printf 'PARKING_BUS_MODULE=%s\n' "$parking_bus"
         printf 'MASTER_SINK=%s\n' "$MASTER_SINK"
         printf 'MASTER_BUS_MODULE=%s\n' "$master_bus"
         printf 'MUSIC_BUS_MODULE=%s\n' "$music_bus"
@@ -94,6 +81,24 @@ write_state() {
         printf 'OUTPUT_LOOP_MODULE=%s\n' "$output_loop"
     } >"$temporary"
     mv -f -- "$temporary" "$STATE_FILE"
+}
+
+load_module_into() {
+    local destination="$1"
+    shift
+    local module
+    module="$(pactl load-module "$@")" || return 1
+    [[ "$module" =~ ^[0-9]+$ ]] || return 1
+    printf -v "$destination" '%s' "$module"
+    BUILD_MODULES+=("$module")
+}
+
+cleanup_build_modules() {
+    local index
+    for ((index=${#BUILD_MODULES[@]} - 1; index >= 0; index--)); do
+        pactl unload-module "${BUILD_MODULES[index]}" >/dev/null 2>&1 || true
+    done
+    BUILD_MODULES=()
 }
 
 unload_saved_modules() {
@@ -254,11 +259,12 @@ prepare_physical_sink() {
     pactl set-sink-mute "$physical" 0
 }
 
-load_loopback() {
-    local source="$1" target="$2"
-    pactl load-module module-loopback \
+load_loopback_into() {
+    local destination="$1" source="$2" target="$3" stream_name="$4"
+    load_module_into "$destination" module-loopback \
         source="$source.monitor" sink="$target" \
         latency_msec="$LOOPBACK_LATENCY_MSEC" \
+        sink_input_properties="media.name=$stream_name" \
         source_dont_move=true sink_dont_move=true
 }
 
@@ -319,37 +325,49 @@ start_buses() {
     validate_audio_bus_config
     require_pulse_server
 
-    local physical master_bus music_bus alert_bus music_loop alert_loop output_loop
-    physical="$(wait_for_physical_sink)"
-    prepare_physical_sink "$physical"
+    local physical output_target parking_bus master_bus music_bus alert_bus
+    local music_loop alert_loop output_loop
+    physical="$(find_physical_sink || true)"
+    output_target="${physical:-$PARKING_SINK}"
+    if [[ -n "$physical" ]] && ! prepare_physical_sink "$physical"; then
+        return 1
+    fi
 
-    master_bus="$(pactl load-module module-null-sink \
-        sink_name="$MASTER_SINK" \
-        sink_properties="device.description=ProAudio_Player_Final_Mix monitor.channel-volumes=true" \
-        rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
-    music_bus="$(pactl load-module module-null-sink \
-        sink_name="$MUSIC_SINK" \
-        sink_properties="device.description=ProAudio_Player_Music_Bus monitor.channel-volumes=true" \
-        rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
-    alert_bus="$(pactl load-module module-null-sink \
-        sink_name="$ALERT_SINK" \
-        sink_properties="device.description=ProAudio_Player_Alert_Bus monitor.channel-volumes=true" \
-        rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS")"
-
-    music_loop="$(load_loopback "$MUSIC_SINK" "$MASTER_SINK")"
-    alert_loop="$(load_loopback "$ALERT_SINK" "$MASTER_SINK")"
-    output_loop="$(load_loopback "$MASTER_SINK" "$physical")"
-
-    write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" \
-        "$music_loop" "$alert_loop" "$output_loop"
+    BUILD_MODULES=()
+    if ! load_module_into parking_bus module-null-sink \
+            sink_name="$PARKING_SINK" \
+            sink_properties="device.description=ProAudio_Player_Parking_Output monitor.channel-volumes=true" \
+            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
+        || ! load_module_into master_bus module-null-sink \
+            sink_name="$MASTER_SINK" \
+            sink_properties="device.description=ProAudio_Player_Final_Mix monitor.channel-volumes=true" \
+            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
+        || ! load_module_into music_bus module-null-sink \
+            sink_name="$MUSIC_SINK" \
+            sink_properties="device.description=ProAudio_Player_Music_Bus monitor.channel-volumes=true" \
+            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
+        || ! load_module_into alert_bus module-null-sink \
+            sink_name="$ALERT_SINK" \
+            sink_properties="device.description=ProAudio_Player_Alert_Bus monitor.channel-volumes=true" \
+            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
+        || ! load_loopback_into music_loop "$MUSIC_SINK" "$MASTER_SINK" \
+            "proaudio-player-music-to-master" \
+        || ! load_loopback_into alert_loop "$ALERT_SINK" "$MASTER_SINK" \
+            "proaudio-player-alert-to-master" \
+        || ! load_loopback_into output_loop "$MASTER_SINK" "$output_target" \
+            "proaudio-player-final-output"; then
+        echo "Не вдалося створити повний аудіограф; часткові модулі видаляються" >&2
+        cleanup_build_modules
+        return 1
+    fi
 
     if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
         || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER"; then
-        unload_saved_modules
+        cleanup_build_modules
         return 1
     fi
     if ! set_loopback_gain_db "$output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
-        unload_saved_modules
+        cleanup_build_modules
         return 1
     fi
 
@@ -361,30 +379,43 @@ start_buses() {
         || ! pactl set-sink-mute "$ALERT_SINK" 0 \
         || ! pactl set-sink-mute "$MASTER_SINK" 0; then
         echo "Не вдалося завершити ініціалізацію аудіографа; створені модулі видаляються" >&2
-        unload_saved_modules
+        cleanup_build_modules
         return 1
     fi
 
-    echo "MUSIC + ALERT -> $MASTER_SINK -> $physical (PipeWire/Pulse graph)"
+    if ! write_state "$physical" "$output_target" "$parking_bus" "$master_bus" \
+        "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$output_loop"; then
+        echo "Не вдалося зафіксувати стан аудіографа; створені модулі видаляються" >&2
+        cleanup_build_modules
+        return 1
+    fi
+    BUILD_MODULES=()
+
+    echo "MUSIC + ALERT -> $MASTER_SINK -> $output_target (PipeWire/Pulse graph)"
 }
 
 switch_output() {
     validate_audio_bus_config
     require_pulse_server
 
-    local physical old_physical old_output_loop new_output_loop
-    local master_bus music_bus alert_bus music_loop alert_loop master_mute
-    physical="$(wait_for_physical_sink)"
+    local physical output_target old_physical old_output_target old_output_loop new_output_loop
+    local parking_bus master_bus music_bus alert_bus music_loop alert_loop master_mute
+    physical="$(find_physical_sink || true)"
+    output_target="${physical:-$PARKING_SINK}"
     old_physical="$(state_value PHYSICAL)"
+    old_output_target="$(state_value OUTPUT_TARGET)"
+    old_output_target="${old_output_target:-${old_physical:-$PARKING_SINK}}"
     old_output_loop="$(state_value OUTPUT_LOOP_MODULE)"
+    parking_bus="$(state_value PARKING_BUS_MODULE)"
     master_bus="$(state_value MASTER_BUS_MODULE)"
     music_bus="$(state_value MUSIC_BUS_MODULE)"
     alert_bus="$(state_value ALERT_BUS_MODULE)"
     music_loop="$(state_value MUSIC_LOOP_MODULE)"
     alert_loop="$(state_value ALERT_LOOP_MODULE)"
 
-    if [[ -z "$master_bus" || -z "$music_bus" || -z "$alert_bus" \
+    if [[ -z "$parking_bus" || -z "$master_bus" || -z "$music_bus" || -z "$alert_bus" \
         || -z "$music_loop" || -z "$alert_loop" ]] \
+        || ! pactl get-sink-volume "$PARKING_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$MASTER_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$MUSIC_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$ALERT_SINK" >/dev/null 2>&1; then
@@ -393,8 +424,10 @@ switch_output() {
         return
     fi
 
-    if [[ "$old_physical" == "$physical" && "$old_output_loop" =~ ^[0-9]+$ ]]; then
-        prepare_physical_sink "$physical"
+    if [[ "$old_output_target" == "$output_target" && "$old_output_loop" =~ ^[0-9]+$ ]]; then
+        if [[ -n "$physical" ]]; then
+            prepare_physical_sink "$physical"
+        fi
         if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
             || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER" \
             || ! set_loopback_gain_db "$old_output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
@@ -404,7 +437,9 @@ switch_output() {
         return
     fi
 
-    prepare_physical_sink "$physical"
+    if [[ -n "$physical" ]]; then
+        prepare_physical_sink "$physical"
+    fi
     if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
         || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER"; then
         echo "Не вдалося підтвердити unity gain внутрішніх шин; попередній маршрут залишено" >&2
@@ -413,27 +448,41 @@ switch_output() {
     master_mute="$(pactl get-sink-mute "$MASTER_SINK" 2>/dev/null | awk '{print $2}')"
     pactl set-sink-mute "$MASTER_SINK" 1
 
-    if ! new_output_loop="$(load_loopback "$MASTER_SINK" "$physical")"; then
+    BUILD_MODULES=()
+    if ! load_loopback_into new_output_loop "$MASTER_SINK" "$output_target" \
+        "proaudio-player-final-output"; then
         [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося підключити MASTER до '$physical'; попередній маршрут залишено" >&2
+        echo "Не вдалося підключити MASTER до '$output_target'; попередній маршрут залишено" >&2
         return 1
     fi
 
     if ! set_loopback_gain_db "$new_output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
         pactl unload-module "$new_output_loop" >/dev/null 2>&1 || true
         [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося встановити unity gain для '$physical'; попередній маршрут залишено" >&2
+        echo "Не вдалося встановити unity gain для '$output_target'; попередній маршрут залишено" >&2
         return 1
     fi
 
-    if [[ "$old_output_loop" =~ ^[0-9]+$ ]]; then
-        pactl unload-module "$old_output_loop" >/dev/null 2>&1 || true
+    if ! write_state "$physical" "$output_target" "$parking_bus" "$master_bus" \
+        "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$new_output_loop"; then
+        cleanup_build_modules
+        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
+        echo "Не вдалося зафіксувати новий маршрут; попередній маршрут залишено" >&2
+        return 1
     fi
 
-    write_state "$physical" "$master_bus" "$music_bus" "$alert_bus" \
-        "$music_loop" "$alert_loop" "$new_output_loop"
+    if [[ "$old_output_loop" =~ ^[0-9]+$ ]] \
+        && ! pactl unload-module "$old_output_loop" >/dev/null 2>&1; then
+        write_state "$old_physical" "$old_output_target" "$parking_bus" "$master_bus" \
+            "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$old_output_loop" || true
+        cleanup_build_modules
+        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
+        echo "Не вдалося від'єднати попередній маршрут; перемикання скасовано" >&2
+        return 1
+    fi
+    BUILD_MODULES=()
     [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0
-    echo "Фінальний вихід перемкнено ${old_physical:-<none>} -> $physical"
+    echo "Фінальний вихід перемкнено $old_output_target -> $output_target"
 }
 
 stop_buses() {
