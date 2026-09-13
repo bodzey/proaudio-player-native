@@ -12,6 +12,7 @@ LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
 GRAPH_UNITY_DB="0.0"
+GRAPH_UNITY_RAW="65536"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
 LOCK_DIR="${XDG_RUNTIME_DIR}/proaudio-player-audio-routing.lock"
 BUILD_MODULES=()
@@ -287,30 +288,23 @@ sink_input_for_module() {
         /^[[:space:]]*Owner Module:/ && $3 == wanted { print input_index; exit }'
 }
 
-pulse_raw_from_db() {
-    local db="$1"
-    awk -v db="$db" 'BEGIN {
-        raw = 65536.0 * exp(log(10.0) * db / 60.0)
-        if (raw < 0.0) raw = 0.0
-        if (raw > 65536.0) raw = 65536.0
-        printf "%.0f\n", raw
-    }'
-}
-
 set_loopback_gain_db() {
     local module="$1" db="$2" label="$3"
-    local input="" raw=""
+    local input=""
+    if [[ "$db" != "$GRAPH_UNITY_DB" ]]; then
+        echo "$label: дозволено лише фіксований unity gain ${GRAPH_UNITY_DB} dB" >&2
+        return 1
+    fi
     input="$(sink_input_for_module "$module" || true)"
     if ! [[ "$input" =~ ^[0-9]+$ ]]; then
         sleep 0.1
         input="$(sink_input_for_module "$module" || true)"
     fi
     if [[ "$input" =~ ^[0-9]+$ ]]; then
-        raw="$(pulse_raw_from_db "$db")"
-        # Raw Pulse volume is absolute. A signed "-XdB" string is relative in
-        # pactl and would accumulate attenuation every time routing is reconciled.
-        pactl set-sink-input-volume "$input" "$raw"
-        echo "$label gain = ${db} dB (absolute raw $raw, sink-input $input)"
+        # PA_VOLUME_NORM is an exact absolute unity value and needs no floating
+        # point math. This stays compatible with BusyBox awk builds without math.
+        pactl set-sink-input-volume "$input" "$GRAPH_UNITY_RAW"
+        echo "$label gain = ${db} dB (absolute raw $GRAPH_UNITY_RAW, sink-input $input)"
         return 0
     fi
     echo "Не вдалося знайти sink-input для $label module $module" >&2

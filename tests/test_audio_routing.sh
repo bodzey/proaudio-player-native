@@ -26,6 +26,7 @@ grep -Eq '^PARKING_BUS_MODULE=[0-9]+$' "$state_file"
 grep -Fq 'module-loopback|source=proaudio_player_master.monitor sink=proaudio_player_parking' \
     "$MOCK_PACTL_STATE/modules"
 [[ "$(grep -c '^set-sink-input-volume|.* 65536$' "$MOCK_PACTL_STATE/calls")" == 3 ]]
+! grep -Eq 'exp\(|log\(' "$repo_root/scripts/audio-buses.sh"
 
 touch "$MOCK_PACTL_STATE/physical-present"
 HARDWARE_MIXER_MODE=off bash "$repo_root/scripts/audio-buses.sh" switch

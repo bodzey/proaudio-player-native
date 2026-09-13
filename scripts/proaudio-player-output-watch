@@ -117,6 +117,16 @@ reconcile_output() {
 
     if [[ "$configured" != "AUTO" ]] && sink_available "$configured"; then
         desired_physical="$configured"
+    elif [[ "$configured" == "AUTO" \
+        && -n "$current" \
+        && "$current" != "${PARKING_SINK:-proaudio_player_parking}" \
+        && "$current" != "auto_null" \
+        && "$current" != proaudio_player_* ]] \
+        && sink_available "$current"; then
+        # AUTO chooses once and then keeps the routed physical sink until it
+        # actually disappears. Sink RUNNING/SUSPENDED is a consequence of our
+        # own loopback and must never make the policy oscillate between devices.
+        desired_physical="$current"
     else
         desired_physical="$(physical_candidates | head -n 1 || true)"
     fi
@@ -135,6 +145,10 @@ reconcile_output() {
 
 export LC_ALL=C
 reconcile_output || true
+
+if [[ "${1:-watch}" == "once" ]]; then
+    exit 0
+fi
 
 # PulseAudio/PipeWire-Pulse subscriptions are event driven. If the server itself
 # restarts the subscription exits; systemd restarts this watcher and reconciliation

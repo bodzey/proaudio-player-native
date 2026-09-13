@@ -42,17 +42,20 @@ jobs:
             exit 1
           fi
           grep -Fq 'GRAPH_UNITY_DB="0.0"' scripts/audio-buses.sh
+          grep -Fq 'GRAPH_UNITY_RAW="65536"' scripts/audio-buses.sh
           grep -Eq 'set_loopback_gain_db "\$music_loop" "\$GRAPH_UNITY_DB" "MUSIC->MASTER"' scripts/audio-buses.sh
           grep -Eq 'set_loopback_gain_db "\$alert_loop" "\$GRAPH_UNITY_DB" "ALERT->MASTER"' scripts/audio-buses.sh
           grep -Eq 'set_loopback_gain_db "\$output_loop" "\$GRAPH_UNITY_DB" "MASTER->OUTPUT"' scripts/audio-buses.sh
-          grep -Fq 'pulse_raw_from_db' scripts/audio-buses.sh
-          grep -Fq 'pactl set-sink-input-volume "$input" "$raw"' scripts/audio-buses.sh
+          grep -Fq 'pactl set-sink-input-volume "$input" "$GRAPH_UNITY_RAW"' scripts/audio-buses.sh
           grep -Fq 'playback_has_zero_percent' scripts/audio-buses.sh
           if grep -Fq 'set-sink-input-volume "$input" "${db}dB"' scripts/audio-buses.sh; then
             echo 'signed dB strings are relative in pactl and must never set fixed graph gains' >&2
             exit 1
           fi
-          test "$(awk 'BEGIN { printf "%.0f", 65536.0 * exp(log(10.0) * 0.0 / 60.0) }')" = 65536
+          if grep -Eq 'exp\(|log\(' scripts/audio-buses.sh; then
+            echo 'runtime audio routing must not require optional awk math support' >&2
+            exit 1
+          fi
       - name: Check processing-rate authority
         run: |
           grep -Eq '^SAMPLE_RATE=[0-9]+$' config/audio.env.example
@@ -89,7 +92,9 @@ jobs:
             }' tests/fixtures/pulse-sink-inputs.txt)"
           test "$result" = 123
       - name: Test audio graph failure and hot-plug paths
-        run: tests/test_audio_routing.sh
+        run: |
+          tests/test_audio_routing.sh
+          tests/test_output_watch.sh
       - name: Check bounded Pulse setup polling
         run: |
           if grep -Eq 'seq[[:space:]]+1[[:space:]]+[1-9][0-9]+' scripts/audio-buses.sh; then

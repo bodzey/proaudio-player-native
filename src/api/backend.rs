@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
@@ -158,6 +159,40 @@ pub struct WebController {
 }
 
 impl WebController {
+    fn receiver_process_id<'a>(
+        stream: &'a crate::audio_backend::StreamState,
+        key: &str,
+    ) -> Option<&'a str> {
+        let binary = stream.property("application.process.binary");
+        let application = stream.property("application.name");
+        let matches = match key {
+            "spotify" => binary.to_ascii_lowercase().contains("spotify")
+                || application.to_ascii_lowercase().contains("spotify"),
+            _ => false,
+        };
+        let pid = stream.property("application.process.id");
+        (matches && !pid.is_empty() && pid.bytes().all(|value| value.is_ascii_digit()))
+            .then_some(pid)
+    }
+
+    async fn terminate_receiver_streams(&self, key: &str) -> Result<()> {
+        let pids = self
+            .audio
+            .list_sink_inputs()
+            .await?
+            .iter()
+            .filter_map(|stream| Self::receiver_process_id(stream, key).map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+
+        for pid in pids {
+            let output = self.run("kill", &["-TERM", &pid], false, 3).await?;
+            if output.code != 0 {
+                bail!("Не вдалося зупинити {key} receiver PID {pid}: {}", output.stderr);
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(
         config: Arc<AppConfig>,
         audio: AudioEngine,
@@ -1061,6 +1096,12 @@ impl WebController {
             if output.code != 0 {
                 bail!("MPRIS-команда {method} не виконана: {}", output.stderr);
             }
+            if backend == "spotify-mpris" && action == "stop" {
+                // spotifyd can acknowledge MPRIS Stop while its existing audio
+                // stream keeps draining. Terminating the identified receiver is
+                // the only deterministic Stop; systemd starts a clean endpoint.
+                self.terminate_receiver_streams("spotify").await?;
+            }
         } else if backend == "dlna-upnp" {
             dlna::client().control(action).await?;
         } else {
@@ -1927,4 +1968,52 @@ pub async fn serve(controller: WebController) -> Result<()> {
     });
     axum::serve(listener, router(controller)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::audio_backend::StreamState;
+
+    use super::WebController;
+
+    fn stream(binary: &str, application: &str, pid: &str) -> StreamState {
+        StreamState {
+            index: 1,
+            sink: 1,
+            name: String::new(),
+            properties: HashMap::from([
+                ("application.process.binary".into(), binary.into()),
+                ("application.name".into(), application.into()),
+                ("application.process.id".into(), pid.into()),
+            ]),
+            volumes_percent: vec![100.0],
+            muted: false,
+            corked: false,
+            has_volume: true,
+            volume_writable: true,
+        }
+    }
+
+    #[test]
+    fn identifies_only_numeric_spotify_receiver_pid() {
+        let spotify = stream("spotifyd", "Spotify", "1234");
+        assert_eq!(
+            WebController::receiver_process_id(&spotify, "spotify"),
+            Some("1234")
+        );
+
+        assert_eq!(
+            WebController::receiver_process_id(&stream("mpd", "MPD", "22"), "spotify"),
+            None
+        );
+        assert_eq!(
+            WebController::receiver_process_id(
+                &stream("spotifyd", "Spotify", "1234; reboot"),
+                "spotify"
+            ),
+            None
+        );
+    }
 }

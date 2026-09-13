@@ -11,7 +11,9 @@ case "$command_name" in
         ;;
     list)
         if [[ "${1:-} ${2:-}" == "short sinks" ]]; then
-            if [[ -f "$state/physical-present" ]]; then
+            if [[ -f "$state/sinks" ]]; then
+                cat "$state/sinks"
+            elif [[ -f "$state/physical-present" ]]; then
                 printf '1\tmock_physical\tPipeWire\tfloat32le 2ch 48000Hz\tSUSPENDED\n'
             fi
         elif [[ "${1:-}" == "sink-inputs" ]]; then
@@ -40,7 +42,9 @@ case "$command_name" in
         printf '%s\n' "${1:-}" >>"$state/unloaded"
         ;;
     get-sink-volume)
-        if [[ "${1:-}" == "mock_physical" ]] && [[ ! -f "$state/physical-present" ]]; then
+        if [[ -f "$state/sinks" ]]; then
+            awk -v wanted="${1:-}" '$2 == wanted { found=1 } END { exit !found }' "$state/sinks"
+        elif [[ "${1:-}" == "mock_physical" ]] && [[ ! -f "$state/physical-present" ]]; then
             exit 1
         fi
         printf 'Volume: front-left: 65536 / 100%% / 0.00 dB, front-right: 65536 / 100%% / 0.00 dB\n'
