@@ -8,7 +8,10 @@ use tokio::sync::Mutex;
 use url::Url;
 
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
-const AVTRANSPORT_ENDPOINT: &str = "http://127.0.0.1:49494/upnp/control/rendertransport1";
+const AVTRANSPORT_ENDPOINTS: &[&str] = &[
+    "http://169.254.253.1:49494/upnp/control/rendertransport1",
+    "http://127.0.0.1:49494/upnp/control/rendertransport1",
+];
 
 static CLIENT: OnceLock<DlnaClient> = OnceLock::new();
 
@@ -68,17 +71,19 @@ impl DlnaClient {
             return Ok(cached);
         }
 
-        // gmediarender is an implementation detail, not a second network-facing
-        // renderer. Firmware binds it to loopback, so the native daemon is the
-        // only UPnP MediaRenderer advertised on the LAN.
-        if self
-            .soap_at(AVTRANSPORT_ENDPOINT, "GetTransportInfo", "")
-            .await
-            .is_ok()
-        {
-            let endpoint = AVTRANSPORT_ENDPOINT.to_owned();
-            *self.endpoint.lock().await = Some(endpoint.clone());
-            return Ok(Some(endpoint));
+        // gmediarender is an internal decoder worker on a private dummy network.
+        // The legacy loopback endpoint remains a compatibility fallback for an
+        // already-running older image during an in-place native daemon upgrade.
+        for endpoint in AVTRANSPORT_ENDPOINTS {
+            if self
+                .soap_at(endpoint, "GetTransportInfo", "")
+                .await
+                .is_ok()
+            {
+                let endpoint = (*endpoint).to_owned();
+                *self.endpoint.lock().await = Some(endpoint.clone());
+                return Ok(Some(endpoint));
+            }
         }
         Ok(None)
     }
