@@ -333,6 +333,18 @@ impl WebController {
         }))
     }
 
+    fn mpd_has_session(mpd: &Value) -> bool {
+        mpd.get("available").and_then(Value::as_bool) == Some(true)
+            && (matches!(
+                mpd.get("state").and_then(Value::as_str),
+                Some("playing" | "paused")
+            ) || mpd.get("queue_length").and_then(Value::as_u64).unwrap_or(0) > 0
+                || mpd
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty()))
+    }
+
     fn summarize_sources(
         items: Vec<crate::audio_backend::StreamState>,
         music_index: u32,
@@ -397,6 +409,11 @@ impl WebController {
 
             let mut media = media;
             if source_key == "mpd" {
+                // MPD keeps a silent Pulse sink-input after stopping. It is a
+                // reusable transport object, not an active audio session.
+                if !Self::mpd_has_session(mpd) {
+                    continue;
+                }
                 source_type = if mpd.get("is_stream").and_then(Value::as_bool) == Some(true) {
                     "Інтернет-радіо".to_owned()
                 } else {
@@ -949,7 +966,7 @@ impl WebController {
 
     pub async fn resolve_active_player(&self, sources: &[Value], mpd: &Value) -> Result<Value> {
         let winner = self.source_state.read().await.clone();
-        if winner.as_deref() == Some("mpd") {
+        if winner.as_deref() == Some("mpd") && Self::mpd_has_session(mpd) {
             return Ok(self.local_player(mpd));
         }
         let external = winner.as_deref().and_then(|key| {
@@ -1004,16 +1021,7 @@ impl WebController {
             Err(err) => debug!(error = %err, "Cached DLNA AVTransport state unavailable"),
         }
 
-        if mpd.get("available").and_then(Value::as_bool) == Some(true)
-            && (matches!(
-                mpd.get("state").and_then(Value::as_str),
-                Some("playing" | "paused")
-            ) || mpd.get("queue_length").and_then(Value::as_u64).unwrap_or(0) > 0
-                || mpd
-                    .get("file")
-                    .and_then(Value::as_str)
-                    .is_some_and(|v| !v.is_empty()))
-        {
+        if Self::mpd_has_session(mpd) {
             return Ok(self.local_player(mpd));
         }
         Ok(self.idle_player())
@@ -2060,6 +2068,25 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn stopped_empty_mpd_sink_input_is_not_an_active_source() {
+        let mpd = serde_json::json!({
+            "available": true,
+            "state": "stopped",
+            "queue_length": 0,
+            "file": "",
+        });
+        let sources = WebController::summarize_sources(
+            vec![stream_at(41, "mpd", "Music Player Daemon", "700")],
+            1,
+            Some("mpd"),
+            &mpd,
+        );
+
+        assert!(sources.is_empty());
+        assert!(!WebController::mpd_has_session(&mpd));
     }
 
     #[test]
