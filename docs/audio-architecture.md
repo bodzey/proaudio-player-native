@@ -50,9 +50,9 @@ parking instead of tearing down the audio graph.
 - Hardware mixer normalization is accepted only when the dB mapping is trustworthy. In particular, a reported 0 dB value that resolves to 0% is rejected rather than treated as unity.
 - Graph construction is transactional: a failed module load or gain setup unloads every module created by that attempt instead of leaving a partial parallel route.
 
-This keeps the permanent path linear and inside PipeWire. The source arbiter permits exactly one programme sink-input on MUSIC, including during receiver reconnects. Before an announcement starts, the MUSIC ducking transition completes; the announcement is then capped only to the remaining linear sample-peak budget. The two maximum possible bus contributions therefore add to no more than unity. The ALERT fader is restored after every announcement, including failed playback.
+This keeps the permanent path linear and inside PipeWire. The source arbiter permits exactly one programme sink-input on MUSIC, including during receiver reconnects. Before an announcement starts, the MUSIC ducking transition completes. If the user-selected ALERT level needs more than the remaining linear sample-peak budget, MUSIC yields further while the file is audible. The two maximum possible bus contributions therefore add to no more than unity, while playback policy never moves the ALERT fader.
 
-Every duck, silence, announcement-gain and MUSIC restore transition is serialized
+Every duck, silence, per-event gain and MUSIC restore transition is serialized
 with MUSIC and ALERT fader updates. A concurrent API adjustment therefore cannot
 invalidate the peak budget halfway through an announcement or be lost when the
 pre-announcement state is restored.
