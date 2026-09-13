@@ -663,12 +663,16 @@ mod tests {
 
     #[test]
     fn non_finite_runtime_durations_are_rejected() {
-        let mut provider = ProviderConfig::default();
-        provider.poll_interval_seconds = f64::NAN;
-        assert!(validate_provider(&provider).is_err());
-        provider.poll_interval_seconds = default_poll();
-        provider.request_timeout_seconds = f64::INFINITY;
-        assert!(validate_provider(&provider).is_err());
+        let nan_poll = ProviderConfig {
+            poll_interval_seconds: f64::NAN,
+            ..ProviderConfig::default()
+        };
+        assert!(validate_provider(&nan_poll).is_err());
+        let infinite_timeout = ProviderConfig {
+            request_timeout_seconds: f64::INFINITY,
+            ..ProviderConfig::default()
+        };
+        assert!(validate_provider(&infinite_timeout).is_err());
 
         let audio = AudioConfig {
             duck_fade_seconds: f64::NAN,

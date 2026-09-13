@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -244,7 +244,7 @@ impl MixerStateRuntime {
     }
 }
 
-fn atomic_json_write<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
+fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let payload = serde_json::to_vec_pretty(value)?;
     atomic_file::write(path, &payload, 0o600)
 }
