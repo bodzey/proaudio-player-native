@@ -6,9 +6,9 @@ Programme receivers are transports and remain at unity. MUSIC and MASTER are use
 
 MUSIC and ALERT are mixed in PipeWire's floating-point graph. Their graph links remain at unity and priority is implemented by ducking MUSIC before announcement playback. The default MUSIC duck is -12 dB.
 
-During the short interval in which an announcement is actually audible, ALERT is capped to the linear sample-peak budget left by the already-ducked MUSIC bus. Per channel, `alert <= 1 - music`; therefore the worst-case coherent sum is no greater than unity. The persisted ALERT fader is never raised and is restored after playback.
+During the short interval in which an announcement is actually audible, the ALERT fader remains exactly at the user-selected value. If the normal MUSIC duck still leaves insufficient linear sample-peak budget, MUSIC alone is reduced further. Per channel, `music <= 1 - alert`; therefore the worst-case coherent sum is no greater than unity without playback policy taking ownership of the ALERT control.
 
-At the defaults, full-scale MUSIC ducked by -12 dB contributes about 0.251 linear amplitude, leaving about 0.749 for ALERT (approximately -2.51 dB). If MUSIC is quieter, muted or at zero, ALERT automatically receives more of the budget up to true unity. This attenuation exists only while both buses may contribute.
+At the defaults, full-scale MUSIC ducked by -12 dB contributes about 0.251 linear amplitude. An ALERT fader at approximately -2.51 dB contributes the complementary 0.749 and leaves the normal duck unchanged. If the user selects a louder ALERT level, MUSIC yields further while the file is audible; at true-unity ALERT, the mathematically safe worst-case MUSIC contribution is zero. This extra duck exists only while both buses may contribute.
 
 All three permanent graph links carry absolute Pulse unity volume. Repeated startup, reconciliation and output switching are idempotent and cannot accumulate attenuation. Consequently, a single programme source at MUSIC=MASTER=100% reaches the physical software sink with gain exactly 1.0.
 
