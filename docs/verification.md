@@ -11,7 +11,7 @@ After changing the graph, verify the appliance in this order:
 6. Switching between built-in and USB output moves only the final MASTER loopback; MUSIC/ALERT/MASTER modules keep their identities and current user volumes.
 7. The physical PipeWire sink remains 100% and the ALSA playback control, when normalized, never reports positive dB gain.
 8. Spotify, AirPlay, MPD and DLNA each arrive at MUSIC at unity; source arbitration leaves exactly one programme sink-input audible, including after a receiver reconnect.
-9. Alert playback finishes MUSIC ducking before ALERT becomes audible, caps ALERT to the remaining linear peak budget, then restores both the saved ALERT fader and MUSIC state.
+9. Alert playback finishes normal MUSIC ducking before ALERT becomes audible, leaves the ALERT fader unchanged, yields MUSIC further only if required by the linear peak budget, then restores MUSIC state.
 10. With MUSIC=MASTER=100% and no alert, a 0 dBFS test signal has identical sample amplitude at the source, MUSIC monitor, MASTER monitor and physical software sink monitor.
 11. With a full-scale music test signal ducked by -12 dB and a simultaneous full-scale alert, the physical software sink peak does not exceed 0 dBFS.
 12. Boot with no physical DAC: the daemon and API remain active and MASTER routes to PARKING.
