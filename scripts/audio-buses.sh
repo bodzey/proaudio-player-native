@@ -19,13 +19,21 @@ BUILD_MODULES=()
 acquire_lock() {
     local deadline=$((SECONDS + 15))
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        local owner=""
+        owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+        if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -f -- "$LOCK_DIR/pid"
+            rmdir "$LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
         if ((SECONDS >= deadline)); then
             echo "Не вдалося отримати блокування маршрутизації аудіо" >&2
             return 1
         fi
         sleep 0.1
     done
-    trap 'rmdir "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT INT TERM
+    printf '%s\n' "$$" >"$LOCK_DIR/pid"
+    trap 'rm -f -- "$LOCK_DIR/pid"; rmdir "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT INT TERM
 }
 
 require_pulse_server() {

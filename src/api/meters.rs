@@ -326,7 +326,6 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
     let mut music_task: Option<JoinHandle<()>> = None;
     let mut alert_task: Option<JoinHandle<()>> = None;
     let mut master_task: Option<JoinHandle<()>> = None;
-    let mut master_sink: Option<String> = None;
     let sample_rate = controller.config.audio.sample_rate;
 
     let mut emit = interval(METER_INTERVAL);
@@ -344,7 +343,6 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
                     abort(&mut music_task);
                     abort(&mut alert_task);
                     abort(&mut master_task);
-                    master_sink = None;
                     frame.reset();
                     continue;
                 }
@@ -366,29 +364,13 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
                     ));
                 }
 
-                let current_master = controller.physical_sink().await.ok();
-                if current_master != master_sink {
-                    abort(&mut master_task);
-                    frame.master = StereoLevel::silence(false);
-                    master_sink = current_master.clone();
-                    if let Some(sink) = current_master {
-                        master_task = Some(spawn_monitor(
-                            MeterTarget::Master,
-                            sink,
-                            sample_rate,
-                            updates.clone(),
-                        ));
-                    }
-                } else if master_task.as_ref().is_some_and(|task| task.is_finished()) {
-                    abort(&mut master_task);
-                    if let Some(sink) = master_sink.clone() {
-                        master_task = Some(spawn_monitor(
-                            MeterTarget::Master,
-                            sink,
-                            sample_rate,
-                            updates.clone(),
-                        ));
-                    }
+                if master_task.as_ref().is_none_or(|task| task.is_finished()) {
+                    master_task = Some(spawn_monitor(
+                        MeterTarget::Master,
+                        crate::output_router::DEFAULT_MASTER_SINK.to_owned(),
+                        sample_rate,
+                        updates.clone(),
+                    ));
                 }
             }
             _ = emit.tick() => {

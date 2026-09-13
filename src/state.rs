@@ -1,7 +1,5 @@
 use std::fs;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -10,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use tracing::error;
+use tracing::{error, warn};
 
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+use crate::atomic_file;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioSnapshot {
@@ -69,15 +68,27 @@ impl StateStore {
     }
 
     pub fn load(&self) -> RuntimeState {
-        let Ok(text) = fs::read_to_string(&self.path) else {
-            return RuntimeState::default();
+        let text = match fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return RuntimeState::default()
+            }
+            Err(error) => {
+                warn!(path = %self.path.display(), %error, "Не вдалося прочитати runtime state");
+                return RuntimeState::default();
+            }
         };
-        let Ok(state) = serde_json::from_str::<RuntimeState>(&text) else {
-            return RuntimeState::default();
+        let state = match serde_json::from_str::<RuntimeState>(&text) {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(path = %self.path.display(), %error, "Пошкоджений runtime state проігноровано");
+                return RuntimeState::default();
+            }
         };
         if matches!(state.mode.as_str(), "normal" | "alert") {
             state
         } else {
+            warn!(path = %self.path.display(), mode = %state.mode, "Невідомий runtime mode проігноровано");
             RuntimeState::default()
         }
     }
@@ -234,28 +245,8 @@ impl MixerStateRuntime {
 }
 
 fn atomic_json_write<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), sequence));
     let payload = serde_json::to_vec_pretty(value)?;
-    let result = (|| -> Result<()> {
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        file.write_all(&payload)?;
-        file.sync_all()?;
-        fs::rename(&tmp, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    atomic_file::write(path, &payload, 0o600)
 }
 
 #[cfg(test)]

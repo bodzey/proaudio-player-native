@@ -44,4 +44,13 @@ fi
 [[ ! -e "$XDG_RUNTIME_DIR/proaudio-player-bus-modules" ]]
 [[ "$(paste -sd, "$MOCK_PACTL_STATE/unloaded")" == '3,2,1' ]]
 
+new_case stale_lock
+lock_dir="$XDG_RUNTIME_DIR/proaudio-player-audio-routing.lock"
+mkdir "$lock_dir"
+printf '999999999\n' >"$lock_dir/pid"
+HARDWARE_MIXER_MODE=off bash "$repo_root/scripts/audio-buses.sh" start
+[[ ! -e "$lock_dir" ]]
+grep -Fxq 'OUTPUT_TARGET=proaudio_player_parking' \
+    "$XDG_RUNTIME_DIR/proaudio-player-bus-modules"
+
 printf 'audio routing shell tests passed\n'

@@ -56,8 +56,19 @@ jobs:
       - name: Check processing-rate authority
         run: |
           grep -Eq '^SAMPLE_RATE=[0-9]+$' config/audio.env.example
-          if grep -Eq '^[[:space:]]+(sample_rate_mode|sample_rate|allowed_sample_rates):' config/config.yaml.example; then
-            echo 'audio.env must remain the single processing-rate authority' >&2
+          if grep -Eq '^[[:space:]]+(sample_rate_mode|sample_rate|allowed_sample_rates|music_sink|alert_sink):' config/config.yaml.example; then
+            echo 'audio.env must remain the single processing-domain authority' >&2
+            exit 1
+          fi
+          grep -Fq 'required_bus_name(&text, "MUSIC_SINK"' src/processing_domain.rs
+          grep -Fq 'required_bus_name(&text, "ALERT_SINK"' src/processing_domain.rs
+          grep -Fq 'required_bus_name(&text, "MASTER_SINK"' src/processing_domain.rs
+      - name: Check logical meter topology
+        run: |
+          grep -Fq 'MeterTarget::Master' src/api/meters.rs
+          grep -Fq 'DEFAULT_MASTER_SINK.to_owned()' src/api/meters.rs
+          if grep -Fq 'controller.physical_sink().await' src/api/meters.rs; then
+            echo 'MASTER meter must follow the logical MASTER bus, not a physical DAC' >&2
             exit 1
           fi
       - name: Install native build dependencies

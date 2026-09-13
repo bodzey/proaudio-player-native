@@ -1,13 +1,12 @@
 use std::env;
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use url::Url;
+
+use crate::atomic_file;
 
 fn default_endpoint() -> String {
     "http://192.168.88.122/v1/iot/active_air_raid_alerts/{uid}.json".into()
@@ -466,7 +465,7 @@ pub fn save_provider_settings(config: &ProviderConfig) -> Result<()> {
         "rate_limit_backoff_seconds": config.rate_limit_backoff_seconds,
         "clear_confirmations": config.clear_confirmations
     }}))?;
-    atomic_write(&config.settings_file, payload.as_bytes(), 0o600)
+    atomic_file::write(&config.settings_file, payload.as_bytes(), 0o600)
 }
 
 pub fn save_provider_token(config: &ProviderConfig, token: &str) -> Result<()> {
@@ -474,18 +473,10 @@ pub fn save_provider_token(config: &ProviderConfig, token: &str) -> Result<()> {
     if token.is_empty() {
         bail!("API-токен не може бути порожнім");
     }
-    if let Some(parent) = config.token_file.parent() {
-        fs::create_dir_all(parent)?;
+    if token.len() > 4_096 {
+        bail!("API-токен перевищує 4096 байтів");
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&config.token_file)?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(format!("{token}\n").as_bytes())?;
-    file.sync_all()?;
-    Ok(())
+    atomic_file::write(&config.token_file, format!("{token}\n").as_bytes(), 0o600)
 }
 
 pub fn save_audio_settings(audio: &AudioConfig, minute: &MinuteSilenceConfig) -> Result<()> {
@@ -499,25 +490,7 @@ pub fn save_audio_settings(audio: &AudioConfig, minute: &MinuteSilenceConfig) ->
         "alert_repeat_interval_minutes": audio.alert_repeat_interval_minutes,
         "duck_only_during_announcement": audio.duck_only_during_announcement
     }}))?;
-    atomic_write(&audio.settings_file, payload.as_bytes(), 0o600)
-}
-
-fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|v| v.to_str()).unwrap_or("")
-    ));
-    {
-        let mut file = fs::File::create(&tmp)?;
-        file.set_permissions(fs::Permissions::from_mode(mode))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    Ok(())
+    atomic_file::write(&audio.settings_file, payload.as_bytes(), 0o600)
 }
 
 pub fn validate_provider(p: &ProviderConfig) -> Result<()> {
@@ -533,27 +506,52 @@ pub fn validate_provider(p: &ProviderConfig) -> Result<()> {
     if !p.endpoint.contains("{uid}") {
         bail!("provider.endpoint має містити шаблон {{uid}}");
     }
+    if p.endpoint.len() > 2_048 {
+        bail!("provider.endpoint перевищує 2048 байтів");
+    }
+    if p.token.as_ref().is_some_and(|token| token.len() > 4_096) {
+        bail!("provider.token перевищує 4096 байтів");
+    }
     let parsed = Url::parse(&p.status_endpoint())
         .context("provider.endpoint має бути коректною HTTP(S)-адресою")?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         bail!("provider.endpoint має бути HTTP(S)");
     }
-    if p.poll_interval_seconds < 8.0 {
-        bail!("poll_interval_seconds має бути не менше 8 секунд");
+    if !p.poll_interval_seconds.is_finite()
+        || !(8.0..=3_600.0).contains(&p.poll_interval_seconds)
+    {
+        bail!("poll_interval_seconds має бути в межах 8..3600 секунд");
     }
-    if p.request_timeout_seconds <= 0.0 {
-        bail!("request_timeout_seconds має бути більшим за нуль");
+    if !p.request_timeout_seconds.is_finite()
+        || !(0.1..=120.0).contains(&p.request_timeout_seconds)
+    {
+        bail!("request_timeout_seconds має бути в межах 0.1..120 секунд");
     }
-    if p.rate_limit_backoff_seconds < 60.0 {
-        bail!("rate_limit_backoff_seconds має бути не менше 60 секунд");
+    if !p.rate_limit_backoff_seconds.is_finite()
+        || !(60.0..=86_400.0).contains(&p.rate_limit_backoff_seconds)
+    {
+        bail!("rate_limit_backoff_seconds має бути в межах 60..86400 секунд");
     }
-    if p.clear_confirmations == 0 {
-        bail!("clear_confirmations має бути не менше 1");
+    if !(1..=100).contains(&p.clear_confirmations) {
+        bail!("clear_confirmations має бути в межах 1..100");
     }
     Ok(())
 }
 
 pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
+    if a.music_sink.trim().is_empty() || a.alert_sink.trim().is_empty() {
+        bail!("назви MUSIC та ALERT sink не можуть бути порожніми");
+    }
+    if a.music_sink == a.alert_sink {
+        bail!("MUSIC та ALERT повинні використовувати різні sink");
+    }
+    if a.player_binary.trim().is_empty() {
+        bail!("audio.player_binary не може бути порожнім");
+    }
     if !(-60.0..=0.0).contains(&a.duck_db) {
         bail!("duck_db має бути в межах -60..0");
     }
@@ -587,8 +585,14 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
     if a.sample_rate_mode != SampleRateMode::Fixed {
         bail!("audio.sample_rate_mode adaptive/native ще не активовано; використовуйте fixed");
     }
-    if a.duck_fade_seconds < 0.0 || a.restore_fade_seconds < 0.0 || m.music_fade_seconds < 0.0 {
-        bail!("час fade не може бути від'ємним");
+    for (name, value) in [
+        ("duck_fade_seconds", a.duck_fade_seconds),
+        ("restore_fade_seconds", a.restore_fade_seconds),
+        ("minute_silence.music_fade_seconds", m.music_fade_seconds),
+    ] {
+        if !value.is_finite() || !(0.0..=60.0).contains(&value) {
+            bail!("{name} має бути в межах 0..60 секунд");
+        }
     }
     Ok(())
 }
@@ -604,6 +608,12 @@ pub fn validate_config(c: &AppConfig) -> Result<()> {
         .map_err(|_| anyhow!("невідомий часовий пояс minute_silence.timezone"))?;
     if c.api.max_library_items == 0 || c.api.max_library_items > 50_000 {
         bail!("api.max_library_items має бути 1..50000");
+    }
+    if c.api.host.trim().is_empty() || c.api.port == 0 {
+        bail!("api.host не може бути порожнім, а api.port має бути 1..65535");
+    }
+    if c.minute_silence.catch_up_seconds > 86_400 {
+        bail!("minute_silence.catch_up_seconds має бути 0..86400");
     }
     Ok(())
 }
@@ -649,5 +659,30 @@ mod tests {
         assert_eq!(config.api.host, "127.0.0.1");
         assert_eq!(config.api.port, 9090);
         assert_eq!(config.api.max_library_items, 42);
+    }
+
+    #[test]
+    fn non_finite_runtime_durations_are_rejected() {
+        let mut provider = ProviderConfig::default();
+        provider.poll_interval_seconds = f64::NAN;
+        assert!(validate_provider(&provider).is_err());
+        provider.poll_interval_seconds = default_poll();
+        provider.request_timeout_seconds = f64::INFINITY;
+        assert!(validate_provider(&provider).is_err());
+
+        let audio = AudioConfig {
+            duck_fade_seconds: f64::NAN,
+            ..AudioConfig::default()
+        };
+        assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
+    }
+
+    #[test]
+    fn logical_buses_must_be_distinct() {
+        let audio = AudioConfig {
+            alert_sink: default_music_sink(),
+            ..AudioConfig::default()
+        };
+        assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
     }
 }

@@ -2,12 +2,14 @@
 
 mod alerts;
 mod api;
+mod atomic_file;
 mod audio;
 mod audio_backend;
 mod command;
 mod config;
 mod dlna;
 mod fourstream;
+mod media_time;
 mod output_gain;
 mod output_router;
 mod processing_domain;
@@ -32,7 +34,7 @@ use alerts::{AlertController, SharedRuntimeState};
 use api::ApiController;
 use audio::AudioEngine;
 use audio_backend::AudioBackend;
-use config::{load_config, AppConfig};
+use config::{load_config, validate_config, AppConfig};
 use provider::AlertsProvider;
 use pulse::PulseControl;
 use source_arbiter::SourceArbiter;
@@ -208,6 +210,9 @@ async fn run_once(config: Arc<AppConfig>) -> Result<()> {
 }
 
 async fn test_alert(config: Arc<AppConfig>, start: bool, end: bool, hold: f64) -> Result<()> {
+    if !hold.is_finite() || !(0.0..=3_600.0).contains(&hold) {
+        return Err(anyhow!("--hold має бути скінченним числом у межах 0..3600 секунд"));
+    }
     let audio = audio_engine(config)?;
     let snapshot = audio.snapshot().await?;
     let result = async {
@@ -254,6 +259,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut config = load_config(&cli.config)?;
     processing_domain::apply(&mut config)?;
+    validate_config(&config)?;
     let config = Arc::new(config);
     init_logging(&config);
 

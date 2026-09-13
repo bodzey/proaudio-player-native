@@ -52,15 +52,21 @@ parking instead of tearing down the audio graph.
 
 This keeps the permanent path linear and inside PipeWire. The source arbiter permits exactly one programme sink-input on MUSIC, including during receiver reconnects. Before an announcement starts, the MUSIC ducking transition completes; the announcement is then capped only to the remaining linear sample-peak budget. The two maximum possible bus contributions therefore add to no more than unity. The ALERT fader is restored after every announcement, including failed playback.
 
-Talkover duck/play/restore is serialized with MUSIC and ALERT fader updates.
-A concurrent API adjustment therefore cannot invalidate the peak budget halfway
-through an announcement or be lost when the pre-announcement state is restored.
+Every duck, silence, announcement-gain and MUSIC restore transition is serialized
+with MUSIC and ALERT fader updates. A concurrent API adjustment therefore cannot
+invalidate the peak budget halfway through an announcement or be lost when the
+pre-announcement state is restored.
 
 This complementary linear mix law protects the current two-bus appliance without a permanent headroom penalty, nonlinear processing or an asynchronous userspace bridge. It assumes each admitted source itself remains within full scale. A future mode that permits arbitrary simultaneous streams would require a graph-native post-mix limiter and is outside this contract.
 
 ## Sample-rate policy
 
-`/etc/proaudio-player-alert/audio.env` is the processing-rate authority. The current appliance uses a fixed 48 kHz processing domain and lets PipeWire perform boundary conversion for sources or hardware that use another rate. This avoids rebuilding the live graph when a transport changes format.
+`/etc/proaudio-player-alert/audio.env` is the processing-domain authority for the
+rate, stereo channel count and logical bus identities. The YAML file does not
+duplicate these graph settings. The current appliance uses a fixed 48 kHz stereo
+domain and lets PipeWire perform boundary conversion for sources or hardware that
+use another rate. This avoids rebuilding the live graph when a transport changes
+format.
 
 A future direct/bit-perfect mode can bypass mixing and user DSP for a single source, switch the hardware clock to the source rate, and disable alerts for the duration of direct playback. That mode is intentionally separate from the normal mixed appliance mode.
 

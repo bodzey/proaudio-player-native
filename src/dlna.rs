@@ -166,7 +166,7 @@ impl DlnaClient {
     }
 
     pub async fn seek_rel_time(&self, target: &str) -> Result<()> {
-        if clock_to_seconds(Some(target)).is_none() {
+        if crate::media_time::clock_to_seconds(Some(target)).is_none() {
             bail!("Некоректна DLNA позиція seek");
         }
         let arguments = format!(
@@ -239,25 +239,6 @@ fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-fn clock_to_seconds(value: Option<&str>) -> Option<f64> {
-    let value = value?.trim();
-    if value.is_empty() || value == "NOT_IMPLEMENTED" {
-        return None;
-    }
-    let parts = value
-        .split(':')
-        .map(str::parse::<u64>)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .ok()?;
-    match parts.as_slice() {
-        [minutes, seconds] if *seconds < 60 => Some((minutes * 60 + seconds) as f64),
-        [hours, minutes, seconds] if *minutes < 60 && *seconds < 60 => {
-            Some((hours * 3600 + minutes * 60 + seconds) as f64)
-        }
-        _ => None,
-    }
-}
-
 fn media_server(track_uri: &str) -> Option<String> {
     Url::parse(track_uri)
         .ok()?
@@ -302,8 +283,8 @@ fn parse_player(position: &str, transport: &str, actions: &str) -> Value {
         nonempty(tag_value(position, "RelTime")).filter(|value| value != "NOT_IMPLEMENTED");
     let duration =
         nonempty(tag_value(position, "TrackDuration")).filter(|value| value != "NOT_IMPLEMENTED");
-    let position_seconds = clock_to_seconds(elapsed.as_deref());
-    let duration_seconds = clock_to_seconds(duration.as_deref());
+    let position_seconds = crate::media_time::clock_to_seconds(elapsed.as_deref());
+    let duration_seconds = crate::media_time::clock_to_seconds(duration.as_deref());
     let progress = match (position_seconds, duration_seconds) {
         (Some(position), Some(duration)) if duration > 0.0 => {
             (position * 100.0 / duration).clamp(0.0, 100.0).round() as u32
@@ -396,7 +377,7 @@ mod tests {
 
     #[test]
     fn seek_clock_rejects_invalid_ranges() {
-        assert_eq!(clock_to_seconds(Some("01:02:03")), Some(3723.0));
-        assert_eq!(clock_to_seconds(Some("00:99:00")), None);
+        assert_eq!(crate::media_time::clock_to_seconds(Some("01:02:03")), Some(3723.0));
+        assert_eq!(crate::media_time::clock_to_seconds(Some("00:99:00")), None);
     }
 }

@@ -126,19 +126,6 @@ fn format_seconds(value: Option<f64>) -> Option<String> {
     })
 }
 
-fn clock_to_seconds(value: Option<&str>) -> Option<f64> {
-    let value = value?;
-    let parts = value
-        .split(':')
-        .filter_map(|v| v.parse::<u64>().ok())
-        .collect::<Vec<_>>();
-    match parts.as_slice() {
-        [minutes, seconds] => Some((minutes * 60 + seconds) as f64),
-        [hours, minutes, seconds] => Some((hours * 3600 + minutes * 60 + seconds) as f64),
-        _ => None,
-    }
-}
-
 fn output_value(output: &OutputDescriptor) -> Value {
     json!({
         "id": output.id,
@@ -832,8 +819,8 @@ impl WebController {
                 .or_else(|| mpd.get("station").and_then(Value::as_str)).unwrap_or(""),
             "album": mpd.get("album").and_then(Value::as_str).unwrap_or(""),
             "art_url": Value::Null,
-            "position_seconds": clock_to_seconds(elapsed),
-            "duration_seconds": clock_to_seconds(duration),
+            "position_seconds": crate::media_time::clock_to_seconds(elapsed),
+            "duration_seconds": crate::media_time::clock_to_seconds(duration),
             "elapsed": elapsed,
             "duration": duration,
             "progress": mpd.get("progress").and_then(Value::as_u64).unwrap_or(0),

@@ -88,6 +88,7 @@ impl AudioEngine {
     }
 
     pub async fn restore_user_mixer(&self) -> Result<()> {
+        let _policy_guard = self.mix_policy_lock.lock().await;
         let cfg = self.config()?;
         let state = self.mixer_state.snapshot();
 
@@ -336,7 +337,7 @@ impl AudioEngine {
             .collect()
     }
 
-    pub async fn enter_alert(&self, snapshot: &AudioSnapshot) -> Result<()> {
+    async fn enter_alert_locked(&self, snapshot: &AudioSnapshot) -> Result<()> {
         let cfg = self.config()?;
         let current = self.snapshot().await?;
         let target = self.ducked_volumes(snapshot)?;
@@ -352,7 +353,12 @@ impl AudioEngine {
         .await
     }
 
-    pub async fn enter_silence(&self, snapshot: &AudioSnapshot, duration: f64) -> Result<()> {
+    pub async fn enter_alert(&self, snapshot: &AudioSnapshot) -> Result<()> {
+        let _policy_guard = self.mix_policy_lock.lock().await;
+        self.enter_alert_locked(snapshot).await
+    }
+
+    async fn enter_silence_locked(&self, snapshot: &AudioSnapshot, duration: f64) -> Result<()> {
         if snapshot.muted {
             return Ok(());
         }
@@ -366,7 +372,12 @@ impl AudioEngine {
         .await
     }
 
-    pub async fn ensure_alert(&self, snapshot: &AudioSnapshot) -> Result<()> {
+    pub async fn enter_silence(&self, snapshot: &AudioSnapshot, duration: f64) -> Result<()> {
+        let _policy_guard = self.mix_policy_lock.lock().await;
+        self.enter_silence_locked(snapshot, duration).await
+    }
+
+    async fn ensure_alert_locked(&self, snapshot: &AudioSnapshot) -> Result<()> {
         let cfg = self.config()?;
         self.set_volume(&cfg.music_sink, &self.ducked_volumes(snapshot)?)
             .await?;
@@ -376,7 +387,12 @@ impl AudioEngine {
         Ok(())
     }
 
-    pub async fn restore(&self, snapshot: Option<&AudioSnapshot>) -> Result<()> {
+    pub async fn ensure_alert(&self, snapshot: &AudioSnapshot) -> Result<()> {
+        let _policy_guard = self.mix_policy_lock.lock().await;
+        self.ensure_alert_locked(snapshot).await
+    }
+
+    async fn restore_locked(&self, snapshot: Option<&AudioSnapshot>) -> Result<()> {
         let cfg = self.config()?;
         let current = self.snapshot().await?;
         let (target, muted) = match snapshot {
@@ -400,6 +416,11 @@ impl AudioEngine {
         Ok(())
     }
 
+    pub async fn restore(&self, snapshot: Option<&AudioSnapshot>) -> Result<()> {
+        let _policy_guard = self.mix_policy_lock.lock().await;
+        self.restore_locked(snapshot).await
+    }
+
     pub async fn play(
         &self,
         media_file: &std::path::Path,
@@ -419,9 +440,9 @@ impl AudioEngine {
         // so a concurrent fader move cannot invalidate the mix-safe cap or be
         // overwritten by restoring the pre-announcement snapshot.
         let _policy_guard = self.mix_policy_lock.lock().await;
-        self.enter_alert(snapshot).await?;
+        self.enter_alert_locked(snapshot).await?;
         let playback = self.play_with_locked_policy(media_file, None).await;
-        let restore = self.restore(Some(snapshot)).await;
+        let restore = self.restore_locked(Some(snapshot)).await;
         playback?;
         restore
     }
@@ -485,7 +506,7 @@ impl AudioEngine {
         }
 
         let playback = async {
-            let output = Command::new(&cfg.player_binary)
+            let playback = Command::new(&cfg.player_binary)
                 .args(["--no-video", "--really-quiet", "--ao=pulse", "--volume=100"])
                 .arg(media_file)
                 .env("PULSE_SINK", &cfg.alert_sink)
@@ -494,9 +515,13 @@ impl AudioEngine {
                 .stderr(Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
-                .with_context(|| format!("не вдалося запустити {}", cfg.player_binary))?
-                .wait_with_output()
-                .await?;
+                .with_context(|| format!("не вдалося запустити {}", cfg.player_binary))?;
+            let output = tokio::time::timeout(
+                Duration::from_secs(15 * 60),
+                playback.wait_with_output(),
+            )
+            .await
+            .context("тайм-аут відтворення оповіщення")??;
             if !output.status.success() {
                 return Err(anyhow!(
                     "не вдалося відтворити {}: {}",

@@ -7,8 +7,16 @@ STATE_FILE="${XDG_RUNTIME_DIR:-/run/proaudio-player}/proaudio-player-bus-modules
 BUS_SCRIPT="${BUS_SCRIPT:-/usr/libexec/proaudio-player/audio-buses.sh}"
 
 load_config() {
+    MUSIC_SINK=proaudio_player_music
+    ALERT_SINK=proaudio_player_alert
+    MASTER_SINK=proaudio_player_master
     PHYSICAL_SINK=AUTO
     PARKING_SINK=proaudio_player_parking
+    SAMPLE_RATE=48000
+    AUDIO_CHANNELS=2
+    LOOPBACK_LATENCY_MSEC=100
+    OUTPUT_VOLUME_PERCENT=100
+    HARDWARE_MIXER_MODE=unity
     if [[ -f "$AUDIO_ENV" ]]; then
         # shellcheck disable=SC1090
         source "$AUDIO_ENV"

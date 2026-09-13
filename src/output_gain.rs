@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use crate::audio_backend::{AudioBackend, BackendFuture, SinkState};
-
-const DEFAULT_MASTER_SINK: &str = "proaudio_player_master";
+use crate::output_router::DEFAULT_MASTER_SINK;
 
 pub trait OutputGain: Send + Sync {
     fn backend_name(&self) -> &'static str;

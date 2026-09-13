@@ -561,6 +561,7 @@ async fn description(State(controller): State<WebController>, headers: HeaderMap
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("127.0.0.1:{}", controller.config.api.port));
+    let host = xml_escape(&host);
     let udn = device_uuid();
     let linkplay = linkplay_uuid(&udn);
     text_response(

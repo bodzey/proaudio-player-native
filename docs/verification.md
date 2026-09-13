@@ -6,7 +6,8 @@ After changing the graph, verify the appliance in this order:
 2. `pactl list short sinks` shows MUSIC, ALERT, MASTER, PARKING and, when attached, the selected physical sink.
 3. `pactl list short sink-inputs` shows two internal bus loopbacks into MASTER and one final MASTER loopback into the selected physical sink while audio is active; all three links report 0 dB/unity.
 4. The selected physical sink becomes `RUNNING` during playback; an unselected sink remains idle or suspended.
-5. MUSIC and MASTER meters move during programme playback.
+5. MUSIC and MASTER meters move during programme playback; MASTER continues to
+   monitor the logical final mix while the physical route is on PARKING/no DAC.
 6. Switching between built-in and USB output moves only the final MASTER loopback; MUSIC/ALERT/MASTER modules keep their identities and current user volumes.
 7. The physical PipeWire sink remains 100% and the ALSA playback control, when normalized, never reports positive dB gain.
 8. Spotify, AirPlay, MPD and DLNA each arrive at MUSIC at unity; source arbitration leaves exactly one programme sink-input audible, including after a receiver reconnect.

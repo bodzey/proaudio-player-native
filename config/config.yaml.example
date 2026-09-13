@@ -10,8 +10,6 @@ provider:
   clear_confirmations: 2
 
 audio:
-  music_sink: "proaudio_player_music"
-  alert_sink: "proaudio_player_alert"
   duck_db: -12
   duck_fade_seconds: 1
   restore_fade_seconds: 3
