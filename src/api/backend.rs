@@ -2092,6 +2092,8 @@ mod tests {
     #[test]
     fn summarizes_duplicate_mpd_streams_as_one_radio_source() {
         let mpd = serde_json::json!({
+            "available": true,
+            "state": "playing",
             "is_stream": true,
             "title": "KISS FM",
             "stream_url": "https://online.kissfm.ua/KissFM_HD",
