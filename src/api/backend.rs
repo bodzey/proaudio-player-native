@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
@@ -333,16 +333,18 @@ impl WebController {
         }))
     }
 
-    pub async fn active_sources(&self) -> Result<Vec<Value>> {
-        let music_index = self
-            .audio
-            .sink_state(&self.config.audio.music_sink)
-            .await?
-            .index;
-        let winner = self.source_state.read().await.clone();
-        let mut result = Vec::new();
+    fn summarize_sources(
+        items: Vec<crate::audio_backend::StreamState>,
+        music_index: u32,
+        winner: Option<&str>,
+        mpd: &Value,
+    ) -> Vec<Value> {
+        // Pulse may briefly retain an old sink-input while MPD changes URLs.
+        // The control API represents logical programme sources, not transport
+        // implementation details, so retain only the newest stream per source.
+        let mut sources = BTreeMap::<String, (u32, Value)>::new();
 
-        for item in self.audio.list_sink_inputs().await? {
+        for item in items {
             if item.sink != music_index || item.corked {
                 continue;
             }
@@ -378,7 +380,7 @@ impl WebController {
             };
 
             let identity = format!("{application} {binary}").to_ascii_lowercase();
-            let (source_key, source_type) = if identity.contains("spotify") {
+            let (source_key, mut source_type) = if identity.contains("spotify") {
                 ("spotify".to_owned(), "Spotify Connect".to_owned())
             } else if identity.contains("shairport") || identity.contains("airplay") {
                 ("airplay".to_owned(), "AirPlay".to_owned())
@@ -393,15 +395,54 @@ impl WebController {
                 (format!("other:{binary}"), application.clone())
             };
 
-            result.push(json!({
+            let mut media = media;
+            if source_key == "mpd" {
+                source_type = if mpd.get("is_stream").and_then(Value::as_bool) == Some(true) {
+                    "Інтернет-радіо".to_owned()
+                } else {
+                    "Локальна бібліотека".to_owned()
+                };
+                media = ["title", "station", "stream_url", "file"]
+                    .into_iter()
+                    .filter_map(|key| mpd.get(key).and_then(Value::as_str))
+                    .find(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or(media);
+            }
+
+            let value = json!({
                 "key": source_key,
-                "active": winner.as_deref() == Some(source_key.as_str()),
+                "active": winner == Some(source_key.as_str()),
                 "type": source_type,
                 "application": application,
                 "media": media,
-            }));
+            });
+            let replace = sources
+                .get(&source_key)
+                .is_none_or(|(current_index, _)| item.index > *current_index);
+            if replace {
+                sources.insert(source_key, (item.index, value));
+            }
         }
-        Ok(result)
+
+        let mut result = sources.into_values().collect::<Vec<_>>();
+        result.sort_by(|left, right| right.0.cmp(&left.0));
+        result.into_iter().map(|(_, source)| source).collect()
+    }
+
+    pub async fn active_sources(&self, mpd: &Value) -> Result<Vec<Value>> {
+        let music_index = self
+            .audio
+            .sink_state(&self.config.audio.music_sink)
+            .await?
+            .index;
+        let winner = self.source_state.read().await.clone();
+        Ok(Self::summarize_sources(
+            self.audio.list_sink_inputs().await?,
+            music_index,
+            winner.as_deref(),
+            mpd,
+        ))
     }
 
     pub async fn sink_state(&self, sink: &str) -> Result<Value> {
@@ -1010,7 +1051,7 @@ impl WebController {
             .mpd_status()
             .await
             .unwrap_or_else(|_| json!({ "available": false, "state": "unavailable" }));
-        let sources = self.active_sources().await.unwrap_or_default();
+        let sources = self.active_sources(&mpd).await.unwrap_or_default();
         let mut player = self
             .resolve_active_player(&sources, &mpd)
             .await
@@ -1041,8 +1082,8 @@ impl WebController {
             bail!("Невідома дія");
         }
         self.ensure_controls_available().await?;
-        let sources = self.active_sources().await.unwrap_or_default();
         let mpd = self.mpd_status().await?;
+        let sources = self.active_sources(&mpd).await.unwrap_or_default();
         let player = self.resolve_active_player(&sources, &mpd).await?;
         if player
             .get("controls")
@@ -1978,9 +2019,9 @@ mod tests {
 
     use super::WebController;
 
-    fn stream(binary: &str, application: &str, pid: &str) -> StreamState {
+    fn stream_at(index: u32, binary: &str, application: &str, pid: &str) -> StreamState {
         StreamState {
-            index: 1,
+            index,
             sink: 1,
             name: String::new(),
             properties: HashMap::from([
@@ -1994,6 +2035,10 @@ mod tests {
             has_volume: true,
             volume_writable: true,
         }
+    }
+
+    fn stream(binary: &str, application: &str, pid: &str) -> StreamState {
+        stream_at(1, binary, application, pid)
     }
 
     #[test]
@@ -2015,5 +2060,48 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn summarizes_duplicate_mpd_streams_as_one_radio_source() {
+        let mpd = serde_json::json!({
+            "is_stream": true,
+            "title": "KISS FM",
+            "stream_url": "https://online.kissfm.ua/KissFM_HD",
+        });
+        let sources = WebController::summarize_sources(
+            vec![
+                stream_at(41, "mpd", "Music Player Daemon", "700"),
+                stream_at(47, "mpd", "Music Player Daemon", "700"),
+                stream_at(52, "mpd", "Music Player Daemon", "700"),
+            ],
+            1,
+            Some("mpd"),
+            &mpd,
+        );
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["key"], "mpd");
+        assert_eq!(sources[0]["active"], true);
+        assert_eq!(sources[0]["type"], "Інтернет-радіо");
+        assert_eq!(sources[0]["media"], "KISS FM");
+    }
+
+    #[test]
+    fn source_summary_ignores_corked_and_non_music_streams() {
+        let mut corked = stream_at(2, "mpd", "Music Player Daemon", "700");
+        corked.corked = true;
+        let outside_music = StreamState {
+            sink: 9,
+            ..stream_at(3, "spotifyd", "Spotify", "701")
+        };
+
+        assert!(WebController::summarize_sources(
+            vec![corked, outside_music],
+            1,
+            Some("mpd"),
+            &serde_json::json!({}),
+        )
+        .is_empty());
     }
 }
