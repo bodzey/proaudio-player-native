@@ -26,6 +26,7 @@ pub struct AudioEngine {
     output_router: Arc<dyn OutputRouter>,
     mixer_state: MixerStateRuntime,
     mix_policy_lock: Arc<Mutex<()>>,
+    alert_playback_cancel: watch::Sender<u64>,
 }
 
 impl AudioEngine {
@@ -45,6 +46,7 @@ impl AudioEngine {
         output_gain: Arc<dyn OutputGain>,
         output_router: Arc<dyn OutputRouter>,
     ) -> Self {
+        let (alert_playback_cancel, _) = watch::channel(0);
         Self {
             config,
             backend,
@@ -52,6 +54,7 @@ impl AudioEngine {
             output_router,
             mixer_state: MixerStateRuntime::new(MIXER_STATE_FILE),
             mix_policy_lock: Arc::new(Mutex::new(())),
+            alert_playback_cancel,
         }
     }
 
@@ -81,6 +84,11 @@ impl AudioEngine {
 
     pub fn subscribe_output_changes(&self) -> watch::Receiver<u64> {
         self.output_router.subscribe_changes()
+    }
+
+    pub fn cancel_alert_playback(&self) {
+        let generation = (*self.alert_playback_cancel.borrow()).wrapping_add(1);
+        self.alert_playback_cancel.send_replace(generation);
     }
 
     pub fn start_mixer_state_writer(&self) -> JoinHandle<()> {
@@ -470,10 +478,14 @@ impl AudioEngine {
         media_file: &std::path::Path,
         volume_percent: Option<f64>,
     ) -> Result<()> {
+        let mut playback_cancel = self.alert_playback_cancel.subscribe();
         if !media_file.is_file() {
             bail!("файл оповіщення відсутній: {}", media_file.display());
         }
         let cfg = self.config()?;
+        if !cfg.notifications_enabled {
+            bail!("систему сповіщень вимкнено");
+        }
 
         if let Some(volume) = volume_percent {
             if !(0.0..=100.0).contains(&volume) {
@@ -543,12 +555,16 @@ impl AudioEngine {
                 .kill_on_drop(true)
                 .spawn()
                 .with_context(|| format!("не вдалося запустити {}", cfg.player_binary))?;
-            let output = tokio::time::timeout(
-                Duration::from_secs(15 * 60),
-                playback.wait_with_output(),
-            )
-            .await
-            .context("тайм-аут відтворення оповіщення")??;
+            let output = tokio::select! {
+                result = tokio::time::timeout(
+                    Duration::from_secs(15 * 60),
+                    playback.wait_with_output(),
+                ) => result.context("тайм-аут відтворення оповіщення")??,
+                changed = playback_cancel.changed() => {
+                    changed.context("канал скасування відтворення закрито")?;
+                    bail!("відтворення сповіщення скасовано");
+                }
+            };
             if !output.status.success() {
                 return Err(anyhow!(
                     "не вдалося відтворити {}: {}",

@@ -1733,6 +1733,9 @@ async fn put_audio_settings(
     }
     validate_audio(&audio, &minute).map_err(map_bad_request)?;
     save_audio_settings(&audio, &minute).map_err(map_internal)?;
+    if !audio.notifications_enabled {
+        controller.audio.cancel_alert_playback();
+    }
     controller.audio_settings().map(Json).map_err(map_internal)
 }
 
