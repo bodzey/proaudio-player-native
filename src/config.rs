@@ -554,13 +554,10 @@ pub fn validate_provider(p: &ProviderConfig) -> Result<()> {
     {
         bail!("provider.endpoint має бути HTTP(S)");
     }
-    if !p.poll_interval_seconds.is_finite()
-        || !(8.0..=3_600.0).contains(&p.poll_interval_seconds)
-    {
+    if !p.poll_interval_seconds.is_finite() || !(8.0..=3_600.0).contains(&p.poll_interval_seconds) {
         bail!("poll_interval_seconds має бути в межах 8..3600 секунд");
     }
-    if !p.request_timeout_seconds.is_finite()
-        || !(0.1..=120.0).contains(&p.request_timeout_seconds)
+    if !p.request_timeout_seconds.is_finite() || !(0.1..=120.0).contains(&p.request_timeout_seconds)
     {
         bail!("request_timeout_seconds має бути в межах 0.1..120 секунд");
     }

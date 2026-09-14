@@ -75,11 +75,7 @@ impl DlnaClient {
         // The legacy loopback endpoint remains a compatibility fallback for an
         // already-running older image during an in-place native daemon upgrade.
         for endpoint in AVTRANSPORT_ENDPOINTS {
-            if self
-                .soap_at(endpoint, "GetTransportInfo", "")
-                .await
-                .is_ok()
-            {
+            if self.soap_at(endpoint, "GetTransportInfo", "").await.is_ok() {
                 let endpoint = (*endpoint).to_owned();
                 *self.endpoint.lock().await = Some(endpoint.clone());
                 return Ok(Some(endpoint));
@@ -382,7 +378,10 @@ mod tests {
 
     #[test]
     fn seek_clock_rejects_invalid_ranges() {
-        assert_eq!(crate::media_time::clock_to_seconds(Some("01:02:03")), Some(3723.0));
+        assert_eq!(
+            crate::media_time::clock_to_seconds(Some("01:02:03")),
+            Some(3723.0)
+        );
         assert_eq!(crate::media_time::clock_to_seconds(Some("00:99:00")), None);
     }
 }

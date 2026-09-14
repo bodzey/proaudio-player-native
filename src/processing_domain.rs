@@ -61,7 +61,10 @@ fn required_bus_name<'a>(text: &'a str, key: &str, path: &Path) -> Result<&'a st
     let value = env_value(text, key)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("{} не містить {key}", path.display()))?;
-    if value.chars().any(|value| value.is_whitespace() || value == '\0') {
+    if value
+        .chars()
+        .any(|value| value.is_whitespace() || value == '\0')
+    {
         bail!("некоректний {key} у {}", path.display());
     }
     Ok(value)
@@ -88,10 +91,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "proaudio-audio-env-{}-{stamp}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("proaudio-audio-env-{}-{stamp}", std::process::id()));
         fs::write(&path, contents).unwrap();
         path
     }

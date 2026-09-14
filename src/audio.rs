@@ -2,16 +2,16 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use tokio::process::Command;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::audio_backend::{
-    AudioBackend, SinkState, StreamState, linear_to_percent, percent_to_linear,
+    linear_to_percent, percent_to_linear, AudioBackend, SinkState, StreamState,
 };
-use crate::config::{AppConfig, effective_audio};
+use crate::config::{effective_audio, AppConfig};
 use crate::output_gain::{BackendOutputGain, OutputGain};
 use crate::output_router::{ExternalOutputRouter, OutputDescriptor, OutputRouter};
 use crate::state::{AudioSnapshot, MixerStateRuntime};
@@ -453,7 +453,8 @@ impl AudioEngine {
         volume_percent: Option<f64>,
     ) -> Result<()> {
         let _policy_guard = self.mix_policy_lock.lock().await;
-        self.play_with_locked_policy(media_file, volume_percent).await
+        self.play_with_locked_policy(media_file, volume_percent)
+            .await
     }
 
     pub async fn play_talkover(
@@ -496,11 +497,8 @@ impl AudioEngine {
         let alert_snapshot = self.snapshot_sink(&cfg.alert_sink).await?;
         let music_snapshot = self.snapshot_sink(&cfg.music_sink).await?;
         let event_volume_percent = volume_percent.unwrap_or(100.0);
-        let playback_music = Self::mix_safe_music_volumes(
-            &music_snapshot,
-            &alert_snapshot,
-            event_volume_percent,
-        );
+        let playback_music =
+            Self::mix_safe_music_volumes(&music_snapshot, &alert_snapshot, event_volume_percent);
         let temporary_music_duck = playback_music
             .iter()
             .zip(&music_snapshot.volumes_percent)
@@ -530,14 +528,13 @@ impl AudioEngine {
 
         let playback = async {
             let mut player = Command::new(&cfg.player_binary);
-            player
-                .args([
-                    "--no-video",
-                    "--really-quiet",
-                    "--ao=pulse",
-                    "--volume=100",
-                    "--volume-max=100",
-                ]);
+            player.args([
+                "--no-video",
+                "--really-quiet",
+                "--ao=pulse",
+                "--volume=100",
+                "--volume-max=100",
+            ]);
             match Self::event_volume_gain_db(event_volume_percent) {
                 Some(db) => {
                     player.arg(format!("--volume-gain={db:.8}"));
@@ -667,8 +664,7 @@ mod tests {
                     volumes_percent: vec![alert_percent],
                     muted: false,
                 };
-                let safe_music =
-                    AudioEngine::mix_safe_music_volumes(&music, &alert, 100.0)[0];
+                let safe_music = AudioEngine::mix_safe_music_volumes(&music, &alert, 100.0)[0];
                 let sum = percent_to_linear(safe_music) + percent_to_linear(alert_percent);
                 assert!(sum <= 1.0 + 1.0e-12);
                 assert!(safe_music <= music_percent + 1.0e-12);

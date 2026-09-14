@@ -467,10 +467,9 @@ async fn soap_control(
             ("RecordMedium", "NOT_IMPLEMENTED".into()),
             ("WriteStatus", "NOT_IMPLEMENTED".into()),
         ]),
-        "GetCurrentTransportActions" => values.push((
-            "Actions",
-            "Play,Pause,Stop,Seek,Next,Previous".into(),
-        )),
+        "GetCurrentTransportActions" => {
+            values.push(("Actions", "Play,Pause,Stop,Seek,Next,Previous".into()))
+        }
         "SetAVTransportURI" => {
             controller
                 .ensure_controls_available()
@@ -541,7 +540,11 @@ async fn soap_control(
     } else {
         AVTRANSPORT_SERVICE
     };
-    let namespace = if service.is_empty() { fallback } else { service };
+    let namespace = if service.is_empty() {
+        fallback
+    } else {
+        service
+    };
     let fields = values
         .iter()
         .map(|(key, value)| format!("<{key}>{}</{key}>", xml_escape(value)))

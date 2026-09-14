@@ -28,7 +28,10 @@ impl BackendOutputGain {
         Self::with_master_sink(backend, DEFAULT_MASTER_SINK)
     }
 
-    pub fn with_master_sink(backend: Arc<dyn AudioBackend>, master_sink: impl Into<String>) -> Self {
+    pub fn with_master_sink(
+        backend: Arc<dyn AudioBackend>,
+        master_sink: impl Into<String>,
+    ) -> Self {
         Self {
             backend,
             master_sink: master_sink.into(),

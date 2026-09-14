@@ -13,11 +13,7 @@ fn temporary_path(path: &Path, sequence: u64) -> PathBuf {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("state");
-    path.with_file_name(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        sequence
-    ))
+    path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), sequence))
 }
 
 /// Atomically replace a small persistent file and make the rename durable.
@@ -45,9 +41,8 @@ pub fn write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
             Ok(file) => break (temporary, file),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("не вдалося створити {}", temporary.display())
-                })
+                return Err(error)
+                    .with_context(|| format!("не вдалося створити {}", temporary.display()))
             }
         }
     };

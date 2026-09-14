@@ -211,7 +211,9 @@ async fn run_once(config: Arc<AppConfig>) -> Result<()> {
 
 async fn test_alert(config: Arc<AppConfig>, start: bool, end: bool, hold: f64) -> Result<()> {
     if !hold.is_finite() || !(0.0..=3_600.0).contains(&hold) {
-        return Err(anyhow!("--hold має бути скінченним числом у межах 0..3600 секунд"));
+        return Err(anyhow!(
+            "--hold має бути скінченним числом у межах 0..3600 секунд"
+        ));
     }
     let audio = audio_engine(config)?;
     let snapshot = audio.snapshot().await?;

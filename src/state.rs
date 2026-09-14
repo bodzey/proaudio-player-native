@@ -12,7 +12,6 @@ use tracing::{error, warn};
 
 use crate::atomic_file;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioSnapshot {
     #[serde(default)]
@@ -229,10 +228,7 @@ impl MixerStateRuntime {
                     sleep(Duration::from_millis(100)).await;
                 }
 
-                let snapshot = state
-                    .lock()
-                    .map(|value| value.clone())
-                    .unwrap_or_default();
+                let snapshot = state.lock().map(|value| value.clone()).unwrap_or_default();
                 let writer = store.clone();
                 match tokio::task::spawn_blocking(move || writer.save(&snapshot)).await {
                     Ok(Ok(())) => {}

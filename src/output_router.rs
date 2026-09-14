@@ -6,8 +6,8 @@ use anyhow::{anyhow, bail, Result};
 use tokio::sync::{watch, Mutex};
 use tokio::time::sleep;
 
-use crate::audio_backend::{AudioBackend, BackendFuture, SinkDescriptor};
 use crate::atomic_file;
+use crate::audio_backend::{AudioBackend, BackendFuture, SinkDescriptor};
 
 pub const DEFAULT_MASTER_SINK: &str = "proaudio_player_master";
 const DEFAULT_OUTPUT_FILE: &str = "/var/lib/proaudio-player-alert/audio-output.env";
@@ -139,11 +139,7 @@ impl ExternalOutputRouter {
         let path = self.output_file.clone();
         let value = output.unwrap_or("AUTO").to_owned();
         tokio::task::spawn_blocking(move || {
-            atomic_file::write(
-                &path,
-                format!("PHYSICAL_SINK={value}\n").as_bytes(),
-                0o600,
-            )
+            atomic_file::write(&path, format!("PHYSICAL_SINK={value}\n").as_bytes(), 0o600)
         })
         .await??;
         Ok(())
@@ -271,7 +267,8 @@ impl OutputRouter for ExternalOutputRouter {
                 return Ok(Self::describe(selected, true));
             }
 
-            self.write_configured_output(previous_configured.as_deref()).await?;
+            self.write_configured_output(previous_configured.as_deref())
+                .await?;
             bail!("Не вдалося підтвердити перемикання аудіовиходу; попередній вибір відновлено")
         })
     }
