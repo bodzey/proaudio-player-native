@@ -10,6 +10,7 @@ provider:
   clear_confirmations: 2
 
 audio:
+  notifications_enabled: true
   duck_db: -12
   duck_fade_seconds: 1
   restore_fade_seconds: 3
@@ -17,8 +18,8 @@ audio:
   default_restore_volume_percent: 100
   alert_repeat_interval_minutes: 0
   duck_only_during_announcement: false
-  start_file: "/usr/share/proaudio-player/announcements/alarm_start.mp3"
-  end_file: "/usr/share/proaudio-player/announcements/alarm_end.mp3"
+  start_file: "/var/lib/proaudio-player-alert/media/alarm_start.mp3"
+  end_file: "/var/lib/proaudio-player-alert/media/alarm_end.mp3"
   player_binary: "/usr/bin/mpv"
   settings_file: "/var/lib/proaudio-player-alert/audio-settings.yaml"
 
@@ -29,7 +30,7 @@ minute_silence:
   catch_up_seconds: 120
   music_fade_seconds: 1
   volume_percent: 100
-  file: "/usr/share/proaudio-player/announcements/minute_silence.mp3"
+  file: "/var/lib/proaudio-player-alert/media/minute_silence.mp3"
 
 api:
   enabled: true

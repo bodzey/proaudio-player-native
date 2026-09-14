@@ -202,6 +202,8 @@ pub struct AudioConfig {
     pub music_sink: String,
     #[serde(default = "default_alert_sink")]
     pub alert_sink: String,
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
     #[serde(default = "default_duck_db")]
     pub duck_db: f64,
     #[serde(default = "default_duck_fade")]
@@ -237,6 +239,7 @@ impl Default for AudioConfig {
         Self {
             music_sink: default_music_sink(),
             alert_sink: default_alert_sink(),
+            notifications_enabled: true,
             duck_db: default_duck_db(),
             duck_fade_seconds: default_duck_fade(),
             restore_fade_seconds: default_restore_fade(),
@@ -358,12 +361,18 @@ struct AudioSettingsFile {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioSettingsPatch {
+    pub notifications_enabled: Option<bool>,
     pub duck_db: Option<f64>,
     pub duck_fade_seconds: Option<f64>,
     pub restore_fade_seconds: Option<f64>,
     pub alert_volume_percent: Option<f64>,
     pub default_restore_volume_percent: Option<f64>,
     pub minute_silence_volume_percent: Option<f64>,
+    pub minute_silence_enabled: Option<bool>,
+    pub minute_silence_start_time: Option<String>,
+    pub minute_silence_timezone: Option<String>,
+    pub minute_silence_catch_up_seconds: Option<u64>,
+    pub minute_silence_music_fade_seconds: Option<f64>,
     pub alert_repeat_interval_minutes: Option<u64>,
     pub duck_only_during_announcement: Option<bool>,
 }
@@ -428,6 +437,9 @@ pub fn effective_audio(
     }
     let file: AudioSettingsFile = serde_yaml::from_str(&raw)?;
     if let Some(a) = file.audio {
+        if let Some(v) = a.notifications_enabled {
+            audio.notifications_enabled = v;
+        }
         if let Some(v) = a.duck_db {
             audio.duck_db = v;
         }
@@ -445,6 +457,21 @@ pub fn effective_audio(
         }
         if let Some(v) = a.minute_silence_volume_percent {
             silence.volume_percent = v;
+        }
+        if let Some(v) = a.minute_silence_enabled {
+            silence.enabled = v;
+        }
+        if let Some(v) = a.minute_silence_start_time {
+            silence.start_time = v;
+        }
+        if let Some(v) = a.minute_silence_timezone {
+            silence.timezone = v;
+        }
+        if let Some(v) = a.minute_silence_catch_up_seconds {
+            silence.catch_up_seconds = v;
+        }
+        if let Some(v) = a.minute_silence_music_fade_seconds {
+            silence.music_fade_seconds = v;
         }
         if let Some(v) = a.alert_repeat_interval_minutes {
             audio.alert_repeat_interval_minutes = v;
@@ -482,11 +509,17 @@ pub fn save_provider_token(config: &ProviderConfig, token: &str) -> Result<()> {
 pub fn save_audio_settings(audio: &AudioConfig, minute: &MinuteSilenceConfig) -> Result<()> {
     validate_audio(audio, minute)?;
     let payload = serde_yaml::to_string(&serde_json::json!({"audio": {
+        "notifications_enabled": audio.notifications_enabled,
         "duck_db": audio.duck_db, "duck_fade_seconds": audio.duck_fade_seconds,
         "restore_fade_seconds": audio.restore_fade_seconds,
         "alert_volume_percent": audio.alert_volume_percent,
         "default_restore_volume_percent": audio.default_restore_volume_percent,
         "minute_silence_volume_percent": minute.volume_percent,
+        "minute_silence_enabled": minute.enabled,
+        "minute_silence_start_time": minute.start_time,
+        "minute_silence_timezone": minute.timezone,
+        "minute_silence_catch_up_seconds": minute.catch_up_seconds,
+        "minute_silence_music_fade_seconds": minute.music_fade_seconds,
         "alert_repeat_interval_minutes": audio.alert_repeat_interval_minutes,
         "duck_only_during_announcement": audio.duck_only_during_announcement
     }}))?;
@@ -567,6 +600,14 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
             bail!("{name} має бути в межах 0..100");
         }
     }
+    chrono::NaiveTime::parse_from_str(&m.start_time, "%H:%M:%S")
+        .map_err(|_| anyhow!("minute_silence.start_time має формат HH:MM:SS"))?;
+    m.timezone
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| anyhow!("невідомий часовий пояс minute_silence.timezone"))?;
+    if m.catch_up_seconds > 86_400 {
+        bail!("minute_silence.catch_up_seconds має бути 0..86400");
+    }
     if a.alert_repeat_interval_minutes > 1_440 {
         bail!("alert_repeat_interval_minutes має бути 0..1440");
     }
@@ -600,20 +641,11 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
 pub fn validate_config(c: &AppConfig) -> Result<()> {
     validate_provider(&c.provider)?;
     validate_audio(&c.audio, &c.minute_silence)?;
-    chrono::NaiveTime::parse_from_str(&c.minute_silence.start_time, "%H:%M:%S")
-        .map_err(|_| anyhow!("minute_silence.start_time має формат HH:MM:SS"))?;
-    c.minute_silence
-        .timezone
-        .parse::<chrono_tz::Tz>()
-        .map_err(|_| anyhow!("невідомий часовий пояс minute_silence.timezone"))?;
     if c.api.max_library_items == 0 || c.api.max_library_items > 50_000 {
         bail!("api.max_library_items має бути 1..50000");
     }
     if c.api.host.trim().is_empty() || c.api.port == 0 {
         bail!("api.host не може бути порожнім, а api.port має бути 1..65535");
-    }
-    if c.minute_silence.catch_up_seconds > 86_400 {
-        bail!("minute_silence.catch_up_seconds має бути 0..86400");
     }
     Ok(())
 }
@@ -688,5 +720,58 @@ mod tests {
             ..AudioConfig::default()
         };
         assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
+    }
+
+    #[test]
+    fn minute_silence_runtime_schedule_is_validated() {
+        let invalid_time = MinuteSilenceConfig {
+            start_time: "25:61:00".into(),
+            ..MinuteSilenceConfig::default()
+        };
+        assert!(validate_audio(&AudioConfig::default(), &invalid_time).is_err());
+
+        let invalid_timezone = MinuteSilenceConfig {
+            timezone: "Nowhere/Invalid".into(),
+            ..MinuteSilenceConfig::default()
+        };
+        assert!(validate_audio(&AudioConfig::default(), &invalid_timezone).is_err());
+    }
+
+    #[test]
+    fn alert_runtime_switches_are_persisted() {
+        let directory = std::env::temp_dir().join(format!(
+            "proaudio-player-audio-settings-test-{}",
+            std::process::id()
+        ));
+        let settings_file = directory.join("audio.yaml");
+        let audio = AudioConfig {
+            notifications_enabled: false,
+            settings_file: settings_file.clone(),
+            ..AudioConfig::default()
+        };
+        let minute = MinuteSilenceConfig {
+            enabled: false,
+            timezone: "Europe/Kyiv".into(),
+            start_time: "09:15:00".into(),
+            catch_up_seconds: 120,
+            music_fade_seconds: 2.5,
+            ..MinuteSilenceConfig::default()
+        };
+
+        save_audio_settings(&audio, &minute).unwrap();
+        let base = AudioConfig {
+            settings_file,
+            ..AudioConfig::default()
+        };
+        let (saved_audio, saved_minute) =
+            effective_audio(&base, &MinuteSilenceConfig::default()).unwrap();
+        assert!(!saved_audio.notifications_enabled);
+        assert!(!saved_minute.enabled);
+        assert_eq!(saved_minute.start_time, "09:15:00");
+        assert_eq!(saved_minute.timezone, "Europe/Kyiv");
+        assert_eq!(saved_minute.catch_up_seconds, 120);
+        assert_eq!(saved_minute.music_fade_seconds, 2.5);
+
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

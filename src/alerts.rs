@@ -50,6 +50,9 @@ impl AlertController {
     }
 
     pub async fn recover(&mut self) -> Result<()> {
+        if !self.audio.config()?.notifications_enabled {
+            return self.deactivate_notifications().await;
+        }
         let (was_active, minute_snapshot, mode, alert_snapshot) = {
             let mut state = self.state.lock().await;
             let values = (
@@ -98,6 +101,49 @@ impl AlertController {
         };
         self.persist().await?;
         Ok(snapshot)
+    }
+
+    async fn deactivate_notifications(&mut self) -> Result<()> {
+        let current = self.state.lock().await.clone();
+        if current.mode == "normal" && !current.minute_silence_active {
+            return Ok(());
+        }
+
+        let minute_snapshot = if current.minute_silence_active {
+            self.cancel_minute_silence().await?
+        } else {
+            None
+        };
+        let restore_snapshot = minute_snapshot.or(current.audio_snapshot);
+        self.audio.restore(restore_snapshot.as_ref()).await?;
+
+        {
+            let mut state = self.state.lock().await;
+            let last_minute_silence_date = state.last_minute_silence_date.clone();
+            let last_success_at = state.last_success_at.clone();
+            *state = RuntimeState {
+                mode: "normal".into(),
+                last_success_at,
+                last_change_at: Some(Utc::now().to_rfc3339()),
+                last_minute_silence_date,
+                ..RuntimeState::default()
+            };
+        }
+        self.last_alert_announcement = None;
+        self.persist().await?;
+        warn!("Сповіщення вимкнено; пріоритетний аудіорежим скасовано");
+        Ok(())
+    }
+
+    async fn stop_disabled_minute_silence(&mut self) -> Result<()> {
+        let active = self.state.lock().await.minute_silence_active;
+        if !active {
+            return Ok(());
+        }
+        let snapshot = self.cancel_minute_silence().await?;
+        self.audio.restore(snapshot.as_ref()).await?;
+        warn!("Хвилину мовчання вимкнено під час відтворення; аудіо відновлено");
+        Ok(())
     }
 
     fn minute_due(&self, state: &RuntimeState) -> Result<bool> {
@@ -393,6 +439,10 @@ impl AlertController {
     }
 
     pub async fn run_once(&mut self) -> Result<f64> {
+        if !self.audio.config()?.notifications_enabled {
+            self.deactivate_notifications().await?;
+            return Ok(self.provider.current_config()?.poll_interval_seconds);
+        }
         match self.provider.fetch().await {
             Ok(result) => {
                 let next = result.next_poll_seconds;
@@ -441,7 +491,21 @@ impl AlertController {
         }
         let mut next_poll = Instant::now();
         loop {
-            if let Err(err) = self.maybe_start_minute_silence().await {
+            let (audio_config, minute_config) =
+                effective_audio(&self.config.audio, &self.config.minute_silence)?;
+            if !audio_config.notifications_enabled {
+                if let Err(err) = self.deactivate_notifications().await {
+                    error!("не вдалося вимкнути пріоритетний аудіорежим: {err:#}");
+                }
+                next_poll = Instant::now();
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+            if !minute_config.enabled {
+                if let Err(err) = self.stop_disabled_minute_silence().await {
+                    error!("не вдалося завершити вимкнену хвилину мовчання: {err:#}");
+                }
+            } else if let Err(err) = self.maybe_start_minute_silence().await {
                 error!("minute silence scheduler: {err:#}");
             }
             if Instant::now() >= next_poll {

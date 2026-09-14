@@ -33,10 +33,17 @@ The following paths are relative to `/api/v1`:
 - `GET|POST /audio/hardware`, `POST /audio/level`
 - `GET|PUT /settings/audio`, `GET|PUT /settings/alerts`
 - `POST /settings/alerts/test`
+- `GET /settings/alerts/media` — metadata for the alarm-start, alarm-end and minute-silence MP3 files.
+- `PUT /settings/alerts/media/{kind}` — atomically replace one file with a raw MP3 body (`alarm_start`, `alarm_end` or `minute_silence`, up to 16 MiB).
+- `DELETE /settings/alerts/media/{kind}` — restore the selected factory MP3.
 - `GET /library`, `POST /library/update`, `POST /library/play`
 - `POST /streams/play`
 - `GET /playlists`, `POST /playlists/load`
 - `GET /queue`, `POST /queue/play`, `POST /queue/remove`, `POST /queue/clear`
+
+`GET|PUT /settings/audio` also controls `notifications_enabled` and the complete minute-silence schedule: `minute_silence_enabled`, `minute_silence_start_time`, `minute_silence_timezone`, `minute_silence_catch_up_seconds` and `minute_silence_music_fade_seconds`. Changes are persisted and observed by the running alert controller without restarting the daemon. Disabling all notifications stops provider polling, cancels an active priority mode and restores the saved music level.
+
+Uploaded alert media is stored at the configured active paths. Appliance images configure these below `/var/lib/proaudio-player-alert/media`, which is backed by the persistent DATA partition. Factory copies remain read-only below `/usr/share/proaudio-player/announcements`.
 
 ## Errors
 
