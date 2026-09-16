@@ -1,23 +1,23 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
-use axum::Router;
+use anyhow::{anyhow, Result};
 use axum::extract::State;
-use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::get;
+use axum::Router;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-use tokio::time::{MissedTickBehavior, interval, sleep};
+use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::debug;
 
 use super::backend::WebController;
@@ -192,39 +192,24 @@ fn meter_window_frames(sample_rate: u32) -> usize {
     ((u64::from(sample_rate) * METER_WINDOW_MILLIS) / 1_000).max(1) as usize
 }
 
-fn spawn_recorder(device: &str, sample_rate: u32) -> Result<Child> {
-    let programs = [("parec", false), ("pacat", true)];
-    let mut not_found = Vec::new();
+fn spawn_recorder(sink: &str, sample_rate: u32) -> Result<Child> {
+    let mut command = Command::new("pw-record");
+    command
+        .arg("--raw")
+        .arg("--format=f32")
+        .arg(format!("--rate={sample_rate}"))
+        .arg("--channels=2")
+        .arg("--latency=40ms")
+        .arg(format!("--target={sink}"))
+        .arg("--properties=stream.capture.sink=true")
+        .arg("-")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
 
-    for (program, record_flag) in programs {
-        let mut command = Command::new(program);
-        if record_flag {
-            command.arg("--record");
-        }
-        command
-            .arg("--raw")
-            .arg("--format=float32le")
-            .arg(format!("--rate={sample_rate}"))
-            .arg("--channels=2")
-            .arg("--latency-msec=40")
-            .arg(format!("--device={device}"))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-
-        match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                not_found.push(program);
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    Err(anyhow!(
-        "meter capture unavailable: {} not found",
-        not_found.join("/"),
-    ))
+    command
+        .spawn()
+        .map_err(|error| anyhow!("meter capture unavailable through pw-record: {error}"))
 }
 
 async fn capture_once(
@@ -233,8 +218,7 @@ async fn capture_once(
     sample_rate: u32,
     updates: &mpsc::Sender<MeterUpdate>,
 ) -> Result<()> {
-    let device = format!("{sink}.monitor");
-    let mut child = spawn_recorder(&device, sample_rate)?;
+    let mut child = spawn_recorder(sink, sample_rate)?;
     let mut stdout = child
         .stdout
         .take()
