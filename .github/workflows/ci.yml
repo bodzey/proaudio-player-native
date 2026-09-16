@@ -14,105 +14,68 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Check audio helper scripts
+
+      - name: Check helper scripts
         run: |
           bash -n scripts/audio-buses.sh
           bash -n scripts/proaudio-player-audioctl
           bash -n scripts/proaudio-player-output-watch
+
       - name: Check source gain policy
         run: |
           grep -Eq 'mixer_type[[:space:]]+"none"' config/mpd.conf
           grep -Eq 'replay_gain_handler[[:space:]]+"none"' config/mpd.conf
           grep -Eq '^volume_controller[[:space:]]*=[[:space:]]*"none"' config/spotifyd.conf
           grep -Eq 'ignore_volume_control[[:space:]]*=[[:space:]]*"yes"' config/shairport-sync.conf
-      - name: Check direct output graph policy
+
+      - name: Check native PipeWire graph policy
         run: |
-          grep -Eq 'OUTPUT_LOOP_MODULE' scripts/audio-buses.sh
-          grep -Eq 'load_loopback_into output_loop "\$MASTER_SINK" "\$output_target"' scripts/audio-buses.sh
-          grep -Fq 'proaudio-player-final-output' scripts/audio-buses.sh
-          grep -Fq 'PARKING_SINK="${PARKING_SINK:-proaudio_player_parking}"' scripts/audio-buses.sh
-          if grep -Eq '^LIMITER_' config/audio.env.example; then
-            echo 'the physical output path must not depend on the retired userspace PCM limiter' >&2
+          grep -Fq 'support.null-audio-sink' config/pipewire/80-proaudio-buses.conf
+          grep -Fq 'node.name = "proaudio_player_music"' config/pipewire/80-proaudio-buses.conf
+          grep -Fq 'node.name = "proaudio_player_alert"' config/pipewire/80-proaudio-buses.conf
+          grep -Fq 'node.name = "proaudio_player_master"' config/pipewire/80-proaudio-buses.conf
+          grep -Fq 'node.name = "proaudio_player_parking"' config/pipewire/80-proaudio-buses.conf
+          grep -Fq 'pw-link "$source:monitor_FL" "$target:playback_FL"' scripts/audio-buses.sh
+          grep -Fq 'pw-link "$source:monitor_FR" "$target:playback_FR"' scripts/audio-buses.sh
+          grep -Fq 'pw-dump -m -N' scripts/proaudio-player-output-watch
+          if grep -Eq '\b(pactl|parec|pacat)\b' scripts/audio-buses.sh scripts/proaudio-player-output-watch scripts/proaudio-player-audioctl systemd/proaudio-player-native.service; then
+            echo 'Pulse client tools are forbidden in the native PipeWire routing path' >&2
             exit 1
           fi
-      - name: Check absolute graph gain policy
+
+      - name: Check physical-output safety policy
         run: |
+          grep -Fq 'OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"' scripts/audio-buses.sh
+          grep -Fq 'wpctl set-volume "$id" 1.0' scripts/audio-buses.sh
+          grep -Fq 'playback_has_zero_percent' scripts/audio-buses.sh
+          grep -Fq 'restore_hardware_raw' scripts/audio-buses.sh
           if grep -Eq '^(OUTPUT_HEADROOM_DB|ALERT_MIX_GAIN_DB)=' config/audio.env.example; then
             echo 'fixed hidden attenuation is forbidden in the unity graph' >&2
             exit 1
           fi
-          grep -Fq 'GRAPH_UNITY_DB="0.0"' scripts/audio-buses.sh
-          grep -Fq 'GRAPH_UNITY_RAW="65536"' scripts/audio-buses.sh
-          grep -Eq 'set_loopback_gain_db "\$music_loop" "\$GRAPH_UNITY_DB" "MUSIC->MASTER"' scripts/audio-buses.sh
-          grep -Eq 'set_loopback_gain_db "\$alert_loop" "\$GRAPH_UNITY_DB" "ALERT->MASTER"' scripts/audio-buses.sh
-          grep -Eq 'set_loopback_gain_db "\$output_loop" "\$GRAPH_UNITY_DB" "MASTER->OUTPUT"' scripts/audio-buses.sh
-          grep -Fq 'pactl set-sink-input-volume "$input" "$GRAPH_UNITY_RAW"' scripts/audio-buses.sh
-          grep -Fq 'playback_has_zero_percent' scripts/audio-buses.sh
-          if grep -Fq 'set-sink-input-volume "$input" "${db}dB"' scripts/audio-buses.sh; then
-            echo 'signed dB strings are relative in pactl and must never set fixed graph gains' >&2
-            exit 1
-          fi
-          if grep -Eq 'exp\(|log\(' scripts/audio-buses.sh; then
-            echo 'runtime audio routing must not require optional awk math support' >&2
-            exit 1
-          fi
+
       - name: Check processing-rate authority
         run: |
           grep -Eq '^SAMPLE_RATE=[0-9]+$' config/audio.env.example
+          grep -Eq '^AUDIO_CHANNELS=[0-9]+$' config/audio.env.example
           if grep -Eq '^[[:space:]]+(sample_rate_mode|sample_rate|allowed_sample_rates|music_sink|alert_sink):' config/config.yaml.example; then
-            echo 'audio.env must remain the single processing-domain authority' >&2
+            echo 'audio.env must remain the processing-domain authority' >&2
             exit 1
           fi
           grep -Fq 'required_bus_name(&text, "MUSIC_SINK"' src/processing_domain.rs
           grep -Fq 'required_bus_name(&text, "ALERT_SINK"' src/processing_domain.rs
           grep -Fq 'required_bus_name(&text, "MASTER_SINK"' src/processing_domain.rs
+
       - name: Check logical meter topology
         run: |
           grep -Fq 'MeterTarget::Master' src/api/meters.rs
           grep -Fq 'DEFAULT_MASTER_SINK.to_owned()' src/api/meters.rs
-          if grep -Fq 'controller.physical_sink().await' src/api/meters.rs; then
-            echo 'MASTER meter must follow the logical MASTER bus, not a physical DAC' >&2
+          grep -Fq 'Command::new("pw-record")' src/api/meters.rs
+          if grep -Eq '\b(parec|pacat)\b' src/api/meters.rs; then
+            echo 'meters must use the native PipeWire recorder' >&2
             exit 1
           fi
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y busybox libpulse-dev pkg-config
-      - name: Check BusyBox awk loopback lookup
-        run: |
-          result="$(busybox awk -v wanted=456 '
-            /^Sink Input #[0-9]+/ {
-              input_index=$3
-              sub(/^#/, "", input_index)
-              next
-            }
-            /^[[:space:]]*Owner Module:/ && $3 == wanted {
-              print input_index
-              exit
-            }' tests/fixtures/pulse-sink-inputs.txt)"
-          test "$result" = 123
-      - name: Test audio graph failure and hot-plug paths
-        run: |
-          tests/test_audio_routing.sh
-          tests/test_output_watch.sh
-      - name: Check bounded Pulse setup polling
-        run: |
-          if grep -Eq 'seq[[:space:]]+1[[:space:]]+[1-9][0-9]+' scripts/audio-buses.sh; then
-            echo 'audio setup must not create high-rate pactl retry storms' >&2
-            exit 1
-          fi
-          grep -Fq 'PipeWire-Pulse недоступний; запуск аудіографа припинено' scripts/audio-buses.sh
-      - name: Check output watcher health reconciliation
-        run: |
-          grep -Fq 'graph_healthy "$desired_target"' scripts/proaudio-player-output-watch
-          grep -Fq 'physical_sink_is_unity' scripts/proaudio-player-output-watch
-          grep -Fq 'loopback_exists "$output_loop"' scripts/proaudio-player-output-watch
-          grep -Fq 'desired_target="${desired_physical:-${PARKING_SINK:-proaudio_player_parking}}"' scripts/proaudio-player-output-watch
-      - name: Check transactional graph construction
-        run: |
-          grep -Fq 'BUILD_MODULES=()' scripts/audio-buses.sh
-          grep -Fq 'cleanup_build_modules' scripts/audio-buses.sh
-          grep -Fq 'Не вдалося створити повний аудіограф; часткові модулі видаляються' scripts/audio-buses.sh
+
       - name: Check control-plane fault isolation
         run: |
           grep -Fq 'keep_user_mixer_restored' src/main.rs
@@ -120,11 +83,19 @@ jobs:
             echo 'the control plane must survive logical graph restarts' >&2
             exit 1
           fi
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpulse-dev pkg-config
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
           components: clippy
+
       - name: Run tests
         run: cargo test --locked
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
