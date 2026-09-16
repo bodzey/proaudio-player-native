@@ -76,6 +76,14 @@ jobs:
             exit 1
           fi
 
+      - name: Check Pulse-free runtime contract
+        run: |
+          test ! -e src/pulse.rs
+          if grep -REn 'PULSE_SERVER|PULSE_SINK|--ao=pulse|pulsesink' src scripts systemd config --exclude='Cargo.lock' --exclude='Cargo.toml'; then
+            echo 'Pulse runtime integration remains in shipped native files' >&2
+            exit 1
+          fi
+
       - name: Check control-plane fault isolation
         run: |
           grep -Fq 'keep_user_mixer_restored' src/main.rs
@@ -87,7 +95,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpulse-dev pkg-config
+          sudo apt-get install -y pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
         with:
