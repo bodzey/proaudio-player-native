@@ -531,10 +531,11 @@ impl AudioEngine {
             player.args([
                 "--no-video",
                 "--really-quiet",
-                "--ao=pulse",
+                "--ao=alsa",
                 "--volume=100",
                 "--volume-max=100",
             ]);
+            player.arg(format!("--audio-device=alsa/{}", cfg.alert_sink));
             match Self::event_volume_gain_db(event_volume_percent) {
                 Some(db) => {
                     player.arg(format!("--volume-gain={db:.8}"));
@@ -545,7 +546,6 @@ impl AudioEngine {
             }
             let playback = player
                 .arg(media_file)
-                .env("PULSE_SINK", &cfg.alert_sink)
                 .env("LC_ALL", "C")
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -596,7 +596,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pulse_db_percent_conversion_matches_cubic_volume_scale() {
+    fn db_percent_conversion_matches_cubic_volume_scale() {
         assert!((db_to_percent(0.0) - 100.0).abs() < 1.0e-9);
         assert!((db_to_percent(-6.0) - 79.432_823_472_428_14).abs() < 1.0e-9);
         assert!((db_to_percent(-60.0) - 10.0).abs() < 1.0e-9);
