@@ -83,6 +83,10 @@ jobs:
             echo 'Pulse runtime integration remains in shipped native files' >&2
             exit 1
           fi
+          if grep -Ein 'libpulse|pulseaudio' Cargo.toml Cargo.lock; then
+            echo 'Pulse crates are forbidden in the native dependency graph' >&2
+            exit 1
+          fi
 
       - name: Check control-plane fault isolation
         run: |
