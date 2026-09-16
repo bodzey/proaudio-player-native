@@ -12,9 +12,9 @@ mod fourstream;
 mod media_time;
 mod output_gain;
 mod output_router;
+mod pipewire;
 mod processing_domain;
 mod provider;
-mod pulse;
 mod source_arbiter;
 mod state;
 
@@ -35,8 +35,8 @@ use api::ApiController;
 use audio::AudioEngine;
 use audio_backend::AudioBackend;
 use config::{load_config, validate_config, AppConfig};
+use pipewire::PipeWireControl;
 use provider::AlertsProvider;
-use pulse::PulseControl;
 use source_arbiter::SourceArbiter;
 use state::StateStore;
 
@@ -83,7 +83,7 @@ fn init_logging(config: &AppConfig) {
 }
 
 fn audio_engine(config: Arc<AppConfig>) -> Result<AudioEngine> {
-    let backend: Arc<dyn AudioBackend> = Arc::new(PulseControl::new()?);
+    let backend: Arc<dyn AudioBackend> = Arc::new(PipeWireControl::new()?);
     Ok(AudioEngine::new(config, backend))
 }
 
