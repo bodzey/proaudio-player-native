@@ -10,7 +10,6 @@ User=proaudio-player
 Group=proaudio-player
 Environment=HOME=/var/lib/proaudio-player
 Environment=XDG_RUNTIME_DIR=/run/proaudio-player
-Environment=PULSE_SERVER=unix:/run/pulse/native
 StateDirectory=proaudio-player-alert
 StateDirectoryMode=0750
 ExecStart=/usr/bin/proaudio-player-native --config /etc/proaudio-player-alert/config.yaml run

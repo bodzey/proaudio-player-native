@@ -2,7 +2,6 @@
 set -euo pipefail
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/proaudio-player}"
-export PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}"
 CONFIG="/etc/proaudio-player-alert/config.yaml"
 NATIVE_SERVICE="proaudio-player-native.service"
 
@@ -66,13 +65,16 @@ case "${1:-}" in
         /usr/bin/proaudio-player-native --config "$CONFIG" test-cycle --hold "${2:-5}"
         ;;
     sinks)
-        pactl list short sinks
+        wpctl status -n
+        ;;
+    graph)
+        pw-link -l
         ;;
     logs)
         journalctl -u "$NATIVE_SERVICE" -n "${2:-100}" --no-pager
         ;;
     *)
-        echo "Використання: proaudio-player-audioctl {start|stop|restart|services|status|test-start|test-end|test-silence|test-cycle [секунди]|sinks|logs [рядки]}" >&2
+        echo "Використання: proaudio-player-audioctl {start|stop|restart|services|status|test-start|test-end|test-silence|test-cycle [секунди]|sinks|graph|logs [рядки]}" >&2
         exit 2
         ;;
 esac

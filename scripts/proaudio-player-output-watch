@@ -3,7 +3,6 @@ set -euo pipefail
 
 AUDIO_ENV="${AUDIO_ENV:-/etc/proaudio-player-alert/audio.env}"
 OUTPUT_ENV="${OUTPUT_ENV:-/var/lib/proaudio-player-alert/audio-output.env}"
-STATE_FILE="${XDG_RUNTIME_DIR:-/run/proaudio-player}/proaudio-player-bus-modules"
 BUS_SCRIPT="${BUS_SCRIPT:-/usr/libexec/proaudio-player/audio-buses.sh}"
 
 load_config() {
@@ -14,7 +13,6 @@ load_config() {
     PARKING_SINK=proaudio_player_parking
     SAMPLE_RATE=48000
     AUDIO_CHANNELS=2
-    LOOPBACK_LATENCY_MSEC=100
     OUTPUT_VOLUME_PERCENT=100
     HARDWARE_MIXER_MODE=unity
     if [[ -f "$AUDIO_ENV" ]]; then
@@ -28,135 +26,33 @@ load_config() {
             PHYSICAL_SINK="$configured"
         fi
     fi
-    export MUSIC_SINK ALERT_SINK MASTER_SINK PARKING_SINK SAMPLE_RATE AUDIO_CHANNELS
-    export LOOPBACK_LATENCY_MSEC OUTPUT_VOLUME_PERCENT HARDWARE_MIXER_MODE
-}
-
-physical_candidates() {
-    pactl list short sinks 2>/dev/null |
-        awk -v music="${MUSIC_SINK:-proaudio_player_music}" \
-            -v alert="${ALERT_SINK:-proaudio_player_alert}" \
-            -v master="${MASTER_SINK:-proaudio_player_master}" '
-            $2 != music && $2 != alert && $2 != master && $2 != "auto_null" &&
-            $2 !~ /^proaudio_player_/ {
-                priority = ($NF == "RUNNING" ? 0 : 1)
-                print priority "\t" $2
-            }' |
-        sort -k1,1n -k2,2 |
-        cut -f2-
-}
-
-sink_available() {
-    local sink="$1"
-    pactl get-sink-volume "$sink" >/dev/null 2>&1
-}
-
-current_output_target() {
-    [[ -f "$STATE_FILE" ]] || return 0
-    awk -F= '
-        $1 == "OUTPUT_TARGET" { print substr($0, index($0, "=") + 1); found=1; exit }
-        $1 == "PHYSICAL" { legacy=substr($0, index($0, "=") + 1) }
-        END { if (!found) print legacy }
-    ' "$STATE_FILE"
-}
-
-state_value() {
-    local wanted="$1"
-    [[ -f "$STATE_FILE" ]] || return 0
-    awk -F= -v wanted="$wanted" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE"
-}
-
-loopback_exists() {
-    local module="$1"
-    [[ "$module" =~ ^[0-9]+$ ]] || return 1
-    pactl list sink-inputs 2>/dev/null | awk -v wanted="$module" '
-        /^[[:space:]]*Owner Module:/ && $3 == wanted { found=1; exit }
-        END { exit !found }'
-}
-
-physical_sink_is_unity() {
-    local sink="$1"
-    [[ "$(pactl get-sink-mute "$sink" 2>/dev/null | awk '{print $2}')" == "no" ]] || return 1
-    pactl get-sink-volume "$sink" 2>/dev/null |
-        tr '/,' '\n' |
-        awk '
-            BEGIN { valid=1 }
-            /^[[:space:]]*[0-9]+%[[:space:]]*$/ {
-                value=$1
-                found=1
-                if (value != "100%") valid=0
-            }
-            END { exit !(found && valid) }'
-}
-
-graph_healthy() {
-    local output_target="$1"
-    local music_loop alert_loop output_loop
-    music_loop="$(state_value MUSIC_LOOP_MODULE)"
-    alert_loop="$(state_value ALERT_LOOP_MODULE)"
-    output_loop="$(state_value OUTPUT_LOOP_MODULE)"
-
-    sink_available "${MUSIC_SINK:-proaudio_player_music}" \
-        && sink_available "${ALERT_SINK:-proaudio_player_alert}" \
-        && sink_available "${MASTER_SINK:-proaudio_player_master}" \
-        && { [[ "$output_target" == "${PARKING_SINK:-proaudio_player_parking}" ]] \
-            || physical_sink_is_unity "$output_target"; } \
-        && loopback_exists "$music_loop" \
-        && loopback_exists "$alert_loop" \
-        && loopback_exists "$output_loop"
+    export MUSIC_SINK ALERT_SINK MASTER_SINK PARKING_SINK PHYSICAL_SINK
+    export SAMPLE_RATE AUDIO_CHANNELS OUTPUT_VOLUME_PERCENT HARDWARE_MIXER_MODE
 }
 
 reconcile_output() {
     load_config
-
-    local configured="${PHYSICAL_SINK:-AUTO}"
-    local desired_physical=""
-    local desired_target=""
-    local current
-    current="$(current_output_target)"
-
-    if [[ "$configured" != "AUTO" ]] && sink_available "$configured"; then
-        desired_physical="$configured"
-    elif [[ "$configured" == "AUTO" \
-        && -n "$current" \
-        && "$current" != "${PARKING_SINK:-proaudio_player_parking}" \
-        && "$current" != "auto_null" \
-        && "$current" != proaudio_player_* ]] \
-        && sink_available "$current"; then
-        # AUTO chooses once and then keeps the routed physical sink until it
-        # actually disappears. Sink RUNNING/SUSPENDED is a consequence of our
-        # own loopback and must never make the policy oscillate between devices.
-        desired_physical="$current"
-    else
-        desired_physical="$(physical_candidates | head -n 1 || true)"
-    fi
-    desired_target="${desired_physical:-${PARKING_SINK:-proaudio_player_parking}}"
-
-    if [[ "$current" == "$desired_target" ]] && graph_healthy "$desired_target"; then
-        return 0
-    fi
-
-    # Preserve an explicitly configured output while it is temporarily absent.
-    # Only the environment of this switch operation falls back to AUTO.
-    export PHYSICAL_SINK="${desired_physical:-AUTO}"
-    echo "Audio routing: reconciling ${current:-<none>} -> $desired_target" >&2
-    "$BUS_SCRIPT" switch
+    "$BUS_SCRIPT" switch || true
 }
 
 export LC_ALL=C
-reconcile_output || true
+reconcile_output
 
 if [[ "${1:-watch}" == "once" ]]; then
     exit 0
 fi
 
-# PulseAudio/PipeWire-Pulse subscriptions are event driven. If the server itself
-# restarts the subscription exits; systemd restarts this watcher and reconciliation
-# happens again from the current graph state.
-pactl subscribe | while IFS= read -r event; do
-    case "$event" in
-        *" on sink "*|*" on server "*|*" on card "*)
-            reconcile_output || true
-            ;;
-    esac
+# pw-dump monitor mode follows native PipeWire registry changes without the
+# PulseAudio compatibility protocol. One reconciliation per wall-clock second
+# debounces the burst of node/port/link events generated by a single hot-plug.
+while true; do
+    last_second=""
+    while IFS= read -r _event; do
+        second="$(date +%s)"
+        if [[ "$second" != "$last_second" ]]; then
+            last_second="$second"
+            reconcile_output
+        fi
+    done < <(pw-dump -m -N 2>/dev/null) || true
+    sleep 1
 done

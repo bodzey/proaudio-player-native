@@ -8,14 +8,10 @@ PARKING_SINK="${PARKING_SINK:-proaudio_player_parking}"
 PHYSICAL_SINK="${PHYSICAL_SINK:-AUTO}"
 SAMPLE_RATE="${SAMPLE_RATE:-48000}"
 AUDIO_CHANNELS="${AUDIO_CHANNELS:-2}"
-LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
-GRAPH_UNITY_DB="0.0"
-GRAPH_UNITY_RAW="65536"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
 LOCK_DIR="${XDG_RUNTIME_DIR}/proaudio-player-audio-routing.lock"
-BUILD_MODULES=()
 
 acquire_lock() {
     local deadline=$((SECONDS + 15))
@@ -37,34 +33,74 @@ acquire_lock() {
     trap 'rm -f -- "$LOCK_DIR/pid"; rmdir "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT INT TERM
 }
 
-require_pulse_server() {
-    if ! pactl info >/dev/null 2>&1; then
-        echo "PipeWire-Pulse недоступний; запуск аудіографа припинено" >&2
+require_pipewire() {
+    command -v pw-cli >/dev/null 2>&1 || {
+        echo "pw-cli відсутній" >&2
         return 1
-    fi
+    }
+    command -v pw-link >/dev/null 2>&1 || {
+        echo "pw-link відсутній" >&2
+        return 1
+    }
+    command -v wpctl >/dev/null 2>&1 || {
+        echo "wpctl відсутній" >&2
+        return 1
+    }
+    pw-cli info 0 >/dev/null 2>&1 || {
+        echo "PipeWire native socket недоступний" >&2
+        return 1
+    }
+}
+
+node_rows() {
+    pw-cli ls Node 2>/dev/null | awk '
+        function emit() {
+            if (id != "" && name != "" && media == "Audio/Sink") {
+                print id "\t" name
+            }
+        }
+        /^[[:space:]]*id [0-9]+,/ {
+            emit()
+            id=$2
+            sub(/,$/, "", id)
+            name=""
+            media=""
+            next
+        }
+        /^[[:space:]]*node.name = / {
+            value=$0
+            sub(/^[^=]*=[[:space:]]*"/, "", value)
+            sub(/"[[:space:]]*$/, "", value)
+            name=value
+            next
+        }
+        /^[[:space:]]*media.class = / {
+            value=$0
+            sub(/^[^=]*=[[:space:]]*"/, "", value)
+            sub(/"[[:space:]]*$/, "", value)
+            media=value
+            next
+        }
+        END { emit() }
+    '
+}
+
+node_id() {
+    local wanted="$1"
+    node_rows | awk -F '\t' -v wanted="$wanted" '$2 == wanted { print $1; exit }'
+}
+
+sink_available() {
+    [[ -n "$(node_id "$1" || true)" ]]
 }
 
 physical_candidates() {
-    pactl list short sinks |
-        awk -v music="$MUSIC_SINK" -v alert="$ALERT_SINK" -v master="$MASTER_SINK" '
-            $2 != music && $2 != alert && $2 != master && $2 != "auto_null" &&
-            $2 !~ /^proaudio_player_/ {
-                priority = ($NF == "RUNNING" ? 0 : 1)
-                print priority "\t" $2
-            }' |
-        sort -k1,1n -k2,2 |
-        cut -f2-
-}
-
-find_physical_sink() {
-    if [[ "$PHYSICAL_SINK" != "AUTO" ]]; then
-        if pactl get-sink-volume "$PHYSICAL_SINK" >/dev/null 2>&1; then
-            printf '%s\n' "$PHYSICAL_SINK"
-            return 0
-        fi
-        return 1
-    fi
-    physical_candidates | head -n 1
+    node_rows |
+        awk -F '\t' -v music="$MUSIC_SINK" -v alert="$ALERT_SINK" \
+            -v master="$MASTER_SINK" -v parking="$PARKING_SINK" '
+            $2 != music && $2 != alert && $2 != master && $2 != parking &&
+            $2 != "auto_null" && $2 !~ /^proaudio_player_/ { print $2 }' |
+        sort -u
 }
 
 state_value() {
@@ -73,67 +109,48 @@ state_value() {
     awk -F= -v wanted="$wanted" '$1 == wanted { print substr($0, index($0,"=")+1); exit }' "$STATE_FILE"
 }
 
+find_physical_sink() {
+    if [[ "$PHYSICAL_SINK" != "AUTO" ]]; then
+        sink_available "$PHYSICAL_SINK" || return 1
+        printf '%s\n' "$PHYSICAL_SINK"
+        return 0
+    fi
+
+    local current
+    current="$(state_value PHYSICAL)"
+    if [[ -n "$current" ]] && sink_available "$current"; then
+        printf '%s\n' "$current"
+        return 0
+    fi
+    physical_candidates | head -n 1
+}
+
 write_state() {
-    local physical="$1" output_target="$2" parking_bus="$3" master_bus="$4"
-    local music_bus="$5" alert_bus="$6" music_loop="$7" alert_loop="$8" output_loop="$9"
+    local physical="$1" output_target="$2"
     local temporary="${STATE_FILE}.tmp"
     {
+        printf 'GRAPH_BACKEND=pipewire\n'
         printf 'PHYSICAL=%s\n' "$physical"
         printf 'OUTPUT_TARGET=%s\n' "$output_target"
-        printf 'PARKING_BUS_MODULE=%s\n' "$parking_bus"
+        printf 'MUSIC_SINK=%s\n' "$MUSIC_SINK"
+        printf 'ALERT_SINK=%s\n' "$ALERT_SINK"
         printf 'MASTER_SINK=%s\n' "$MASTER_SINK"
-        printf 'MASTER_BUS_MODULE=%s\n' "$master_bus"
-        printf 'MUSIC_BUS_MODULE=%s\n' "$music_bus"
-        printf 'ALERT_BUS_MODULE=%s\n' "$alert_bus"
-        printf 'MUSIC_LOOP_MODULE=%s\n' "$music_loop"
-        printf 'ALERT_LOOP_MODULE=%s\n' "$alert_loop"
-        printf 'OUTPUT_LOOP_MODULE=%s\n' "$output_loop"
+        printf 'PARKING_SINK=%s\n' "$PARKING_SINK"
     } >"$temporary"
     mv -f -- "$temporary" "$STATE_FILE"
 }
 
-load_module_into() {
-    local destination="$1"
-    shift
-    local module
-    module="$(pactl load-module "$@")" || return 1
-    [[ "$module" =~ ^[0-9]+$ ]] || return 1
-    printf -v "$destination" '%s' "$module"
-    BUILD_MODULES+=("$module")
-}
-
-cleanup_build_modules() {
-    local index
-    for ((index=${#BUILD_MODULES[@]} - 1; index >= 0; index--)); do
-        pactl unload-module "${BUILD_MODULES[index]}" >/dev/null 2>&1 || true
-    done
-    BUILD_MODULES=()
-}
-
-unload_saved_modules() {
-    [[ -f "$STATE_FILE" ]] || return 0
-    local modules=()
-    local key value index
-    while IFS='=' read -r key value; do
-        if [[ "$key" == "MODULE" || "$key" == *_MODULE ]] && [[ "$value" =~ ^[0-9]+$ ]]; then
-            modules+=("$value")
+wait_for_sink() {
+    local sink="$1"
+    local i
+    for ((i=0; i<100; i++)); do
+        if sink_available "$sink"; then
+            return 0
         fi
-    done <"$STATE_FILE"
-    for ((index=${#modules[@]} - 1; index >= 0; index--)); do
-        pactl unload-module "${modules[index]}" >/dev/null 2>&1 || true
+        sleep 0.1
     done
-    rm -f -- "$STATE_FILE"
-}
-
-alsa_card_for_sink() {
-    local physical="$1"
-    pactl list sinks | awk -v wanted="$physical" '
-        /^Sink #[0-9]+/ { active=0; next }
-        /^[[:space:]]*Name:/ { active=($2 == wanted); next }
-        active && ($1 == "alsa.card" || $1 == "api.alsa.card") && $2 == "=" {
-            gsub(/"/, "", $3)
-            if ($3 ~ /^[0-9]+$/) { print $3; exit }
-        }'
+    echo "PipeWire sink '$sink' не з'явився" >&2
+    return 1
 }
 
 safe_playback_control() {
@@ -173,6 +190,18 @@ restore_hardware_raw() {
     [[ -n "$raw" ]] && amixer -q -c "$card" sset "$control" "$raw" >/dev/null 2>&1
 }
 
+alsa_card_for_sink() {
+    local physical="$1" id
+    id="$(node_id "$physical" || true)"
+    [[ "$id" =~ ^[0-9]+$ ]] || return 1
+    wpctl inspect "$id" 2>/dev/null | awk -F= '
+        /(^|[[:space:]])(api\.alsa\.card|alsa\.card)[[:space:]]*=/ {
+            value=$2
+            gsub(/["[:space:]]/, "", value)
+            if (value ~ /^[0-9]+$/) { print value; exit }
+        }'
+}
+
 prepare_hardware_mixer() {
     local physical="$1"
     [[ "$HARDWARE_MIXER_MODE" == "off" ]] && return 0
@@ -199,9 +228,6 @@ prepare_hardware_mixer() {
         fi
         after="$(amixer -c "$card" sget "$control" 2>/dev/null || true)"
 
-        # Some broken USB descriptors report raw minimum as 0.00 dB. Treating
-        # that as unity mutes the device. Never accept a 0 dB probe that lands
-        # at 0%; restore the previous raw setting instead.
         if printf '%s\n' "$after" | playback_has_zero_percent; then
             restore_hardware_raw "$card" "$control" "$original_raw" || true
             echo "ALSA card $card: '$control' 0 dB maps to 0%; dB map is untrusted, raw level restored" >&2
@@ -257,243 +283,157 @@ prepare_hardware_mixer() {
 }
 
 prepare_physical_sink() {
-    local physical="$1"
+    local physical="$1" id
     if [[ "$OUTPUT_VOLUME_PERCENT" != "100" ]]; then
-        echo "OUTPUT_VOLUME_PERCENT має бути 100: фізичний software sink є фіксованим unity stage" >&2
+        echo "OUTPUT_VOLUME_PERCENT має бути 100: фізичний PipeWire sink є фіксованим unity stage" >&2
         return 1
     fi
-    pactl set-sink-mute "$physical" 1
+    id="$(node_id "$physical" || true)"
+    [[ "$id" =~ ^[0-9]+$ ]] || return 1
+    wpctl set-mute "$id" 1
     prepare_hardware_mixer "$physical"
-    pactl set-sink-volume "$physical" 100%
-    pactl set-sink-mute "$physical" 0
+    wpctl set-volume "$id" 1.0
+    wpctl set-mute "$id" 0
 }
 
-load_loopback_into() {
-    local destination="$1" source="$2" target="$3" stream_name="$4"
-    load_module_into "$destination" module-loopback \
-        source="$source.monitor" sink="$target" \
-        latency_msec="$LOOPBACK_LATENCY_MSEC" \
-        sink_input_properties="media.name=$stream_name" \
-        source_dont_move=true sink_dont_move=true
+unlink_stereo() {
+    local source="$1" target="$2"
+    pw-link -d "$source:monitor_FL" "$target:playback_FL" >/dev/null 2>&1 || true
+    pw-link -d "$source:monitor_FR" "$target:playback_FR" >/dev/null 2>&1 || true
 }
 
-sink_input_for_module() {
-    local module="$1"
-    pactl list sink-inputs | awk -v wanted="$module" '
-        /^Sink Input #[0-9]+/ {
-            input_index=$3
-            sub(/^#/, "", input_index)
-            next
-        }
-        /^[[:space:]]*Owner Module:/ && $3 == wanted { print input_index; exit }'
-}
-
-set_loopback_gain_db() {
-    local module="$1" db="$2" label="$3"
-    local input=""
-    if [[ "$db" != "$GRAPH_UNITY_DB" ]]; then
-        echo "$label: дозволено лише фіксований unity gain ${GRAPH_UNITY_DB} dB" >&2
+link_stereo() {
+    local source="$1" target="$2"
+    pw-link "$source:monitor_FL" "$target:playback_FL"
+    if ! pw-link "$source:monitor_FR" "$target:playback_FR"; then
+        pw-link -d "$source:monitor_FL" "$target:playback_FL" >/dev/null 2>&1 || true
         return 1
     fi
-    input="$(sink_input_for_module "$module" || true)"
-    if ! [[ "$input" =~ ^[0-9]+$ ]]; then
-        sleep 0.1
-        input="$(sink_input_for_module "$module" || true)"
+}
+
+connect_internal_graph() {
+    unlink_stereo "$MUSIC_SINK" "$MASTER_SINK"
+    unlink_stereo "$ALERT_SINK" "$MASTER_SINK"
+    if ! link_stereo "$MUSIC_SINK" "$MASTER_SINK"; then
+        return 1
     fi
-    if [[ "$input" =~ ^[0-9]+$ ]]; then
-        # PA_VOLUME_NORM is an exact absolute unity value and needs no floating
-        # point math. This stays compatible with BusyBox awk builds without math.
-        pactl set-sink-input-volume "$input" "$GRAPH_UNITY_RAW"
-        echo "$label gain = ${db} dB (absolute raw $GRAPH_UNITY_RAW, sink-input $input)"
-        return 0
+    if ! link_stereo "$ALERT_SINK" "$MASTER_SINK"; then
+        unlink_stereo "$MUSIC_SINK" "$MASTER_SINK"
+        return 1
     fi
-    echo "Не вдалося знайти sink-input для $label module $module" >&2
-    return 1
+}
+
+initialize_logical_levels() {
+    local sink id
+    for sink in "$MUSIC_SINK" "$ALERT_SINK" "$MASTER_SINK"; do
+        id="$(node_id "$sink" || true)"
+        [[ "$id" =~ ^[0-9]+$ ]] || return 1
+        wpctl set-volume "$id" 1.0
+        wpctl set-mute "$id" 0
+    done
+    id="$(node_id "$MUSIC_SINK" || true)"
+    wpctl set-default "$id" >/dev/null 2>&1 || true
 }
 
 validate_audio_bus_config() {
-    if ! [[ "$SAMPLE_RATE" =~ ^[0-9]+$ ]] || ((10#$SAMPLE_RATE < 8000 || 10#$SAMPLE_RATE > 384000)); then
-        echo "SAMPLE_RATE має бути цілим числом від 8000 до 384000" >&2
+    if [[ "$SAMPLE_RATE" != "48000" ]]; then
+        echo "Pure PipeWire appliance graph currently requires SAMPLE_RATE=48000" >&2
         return 1
     fi
-    if ! [[ "$AUDIO_CHANNELS" =~ ^[0-9]+$ ]] || ((10#$AUDIO_CHANNELS < 1 || 10#$AUDIO_CHANNELS > 8)); then
-        echo "AUDIO_CHANNELS має бути цілим числом від 1 до 8" >&2
+    if [[ "$AUDIO_CHANNELS" != "2" ]]; then
+        echo "Pure PipeWire appliance graph currently requires AUDIO_CHANNELS=2" >&2
         return 1
     fi
 }
 
-start_buses() {
-    unload_saved_modules
-    validate_audio_bus_config
-    require_pulse_server
+wait_for_logical_graph() {
+    wait_for_sink "$PARKING_SINK"
+    wait_for_sink "$MASTER_SINK"
+    wait_for_sink "$MUSIC_SINK"
+    wait_for_sink "$ALERT_SINK"
+}
 
-    local physical output_target parking_bus master_bus music_bus alert_bus
-    local music_loop alert_loop output_loop
+start_buses() {
+    validate_audio_bus_config
+    require_pipewire
+    wait_for_logical_graph
+
+    local physical output_target
     physical="$(find_physical_sink || true)"
     output_target="${physical:-$PARKING_SINK}"
-    if [[ -n "$physical" ]] && ! prepare_physical_sink "$physical"; then
+
+    if [[ -n "$physical" ]]; then
+        prepare_physical_sink "$physical"
+    fi
+
+    if ! connect_internal_graph; then
+        echo "Не вдалося створити MUSIC/ALERT -> MASTER PipeWire graph" >&2
+        return 1
+    fi
+    initialize_logical_levels
+
+    unlink_stereo "$MASTER_SINK" "$PARKING_SINK"
+    if [[ -n "$physical" ]]; then
+        unlink_stereo "$MASTER_SINK" "$physical"
+    fi
+    if ! link_stereo "$MASTER_SINK" "$output_target"; then
+        echo "Не вдалося підключити MASTER до '$output_target'" >&2
         return 1
     fi
 
-    BUILD_MODULES=()
-    if ! load_module_into parking_bus module-null-sink \
-            sink_name="$PARKING_SINK" \
-            sink_properties="device.description=ProAudio_Player_Parking_Output monitor.channel-volumes=true" \
-            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
-        || ! load_module_into master_bus module-null-sink \
-            sink_name="$MASTER_SINK" \
-            sink_properties="device.description=ProAudio_Player_Final_Mix monitor.channel-volumes=true" \
-            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
-        || ! load_module_into music_bus module-null-sink \
-            sink_name="$MUSIC_SINK" \
-            sink_properties="device.description=ProAudio_Player_Music_Bus monitor.channel-volumes=true" \
-            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
-        || ! load_module_into alert_bus module-null-sink \
-            sink_name="$ALERT_SINK" \
-            sink_properties="device.description=ProAudio_Player_Alert_Bus monitor.channel-volumes=true" \
-            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
-        || ! load_loopback_into music_loop "$MUSIC_SINK" "$MASTER_SINK" \
-            "proaudio-player-music-to-master" \
-        || ! load_loopback_into alert_loop "$ALERT_SINK" "$MASTER_SINK" \
-            "proaudio-player-alert-to-master" \
-        || ! load_loopback_into output_loop "$MASTER_SINK" "$output_target" \
-            "proaudio-player-final-output"; then
-        echo "Не вдалося створити повний аудіограф; часткові модулі видаляються" >&2
-        cleanup_build_modules
-        return 1
-    fi
-
-    if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
-        || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER"; then
-        cleanup_build_modules
-        return 1
-    fi
-    if ! set_loopback_gain_db "$output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
-        cleanup_build_modules
-        return 1
-    fi
-
-    if ! pactl set-default-sink "$MUSIC_SINK" \
-        || ! pactl set-sink-volume "$MUSIC_SINK" 100% \
-        || ! pactl set-sink-volume "$ALERT_SINK" 100% \
-        || ! pactl set-sink-volume "$MASTER_SINK" 100% \
-        || ! pactl set-sink-mute "$MUSIC_SINK" 0 \
-        || ! pactl set-sink-mute "$ALERT_SINK" 0 \
-        || ! pactl set-sink-mute "$MASTER_SINK" 0; then
-        echo "Не вдалося завершити ініціалізацію аудіографа; створені модулі видаляються" >&2
-        cleanup_build_modules
-        return 1
-    fi
-
-    if ! write_state "$physical" "$output_target" "$parking_bus" "$master_bus" \
-        "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$output_loop"; then
-        echo "Не вдалося зафіксувати стан аудіографа; створені модулі видаляються" >&2
-        cleanup_build_modules
-        return 1
-    fi
-    BUILD_MODULES=()
-
-    echo "MUSIC + ALERT -> $MASTER_SINK -> $output_target (PipeWire/Pulse graph)"
+    write_state "$physical" "$output_target"
+    echo "MUSIC + ALERT -> $MASTER_SINK -> $output_target (native PipeWire graph)"
 }
 
 switch_output() {
     validate_audio_bus_config
-    require_pulse_server
+    require_pipewire
+    wait_for_logical_graph
 
-    local physical output_target old_physical old_output_target old_output_loop new_output_loop
-    local parking_bus master_bus music_bus alert_bus music_loop alert_loop master_mute
+    local physical output_target old_target master_id master_was_muted=0
     physical="$(find_physical_sink || true)"
     output_target="${physical:-$PARKING_SINK}"
-    old_physical="$(state_value PHYSICAL)"
-    old_output_target="$(state_value OUTPUT_TARGET)"
-    old_output_target="${old_output_target:-${old_physical:-$PARKING_SINK}}"
-    old_output_loop="$(state_value OUTPUT_LOOP_MODULE)"
-    parking_bus="$(state_value PARKING_BUS_MODULE)"
-    master_bus="$(state_value MASTER_BUS_MODULE)"
-    music_bus="$(state_value MUSIC_BUS_MODULE)"
-    alert_bus="$(state_value ALERT_BUS_MODULE)"
-    music_loop="$(state_value MUSIC_LOOP_MODULE)"
-    alert_loop="$(state_value ALERT_LOOP_MODULE)"
+    old_target="$(state_value OUTPUT_TARGET)"
 
-    if [[ -z "$parking_bus" || -z "$master_bus" || -z "$music_bus" || -z "$alert_bus" \
-        || -z "$music_loop" || -z "$alert_loop" ]] \
-        || ! pactl get-sink-volume "$PARKING_SINK" >/dev/null 2>&1 \
-        || ! pactl get-sink-volume "$MASTER_SINK" >/dev/null 2>&1 \
-        || ! pactl get-sink-volume "$MUSIC_SINK" >/dev/null 2>&1 \
-        || ! pactl get-sink-volume "$ALERT_SINK" >/dev/null 2>&1; then
-        echo "Стан постійних шин відсутній; виконується повне відновлення" >&2
-        start_buses
-        return
-    fi
-
-    if [[ "$old_output_target" == "$output_target" && "$old_output_loop" =~ ^[0-9]+$ ]]; then
-        if [[ -n "$physical" ]]; then
-            prepare_physical_sink "$physical"
-        fi
-        if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
-            || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER" \
-            || ! set_loopback_gain_db "$old_output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
-            echo "Не вдалося відновити unity gain аудіографа" >&2
-            return 1
-        fi
-        return
+    if [[ "$old_target" == "$output_target" ]] && sink_available "$output_target"; then
+        return 0
     fi
 
     if [[ -n "$physical" ]]; then
         prepare_physical_sink "$physical"
     fi
-    if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
-        || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER"; then
-        echo "Не вдалося підтвердити unity gain внутрішніх шин; попередній маршрут залишено" >&2
-        return 1
-    fi
-    master_mute="$(pactl get-sink-mute "$MASTER_SINK" 2>/dev/null | awk '{print $2}')"
-    pactl set-sink-mute "$MASTER_SINK" 1
 
-    BUILD_MODULES=()
-    if ! load_loopback_into new_output_loop "$MASTER_SINK" "$output_target" \
-        "proaudio-player-final-output"; then
-        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
+    master_id="$(node_id "$MASTER_SINK" || true)"
+    [[ "$master_id" =~ ^[0-9]+$ ]] || return 1
+    if wpctl get-volume "$master_id" 2>/dev/null | grep -q '\[MUTED\]'; then
+        master_was_muted=1
+    fi
+    wpctl set-mute "$master_id" 1
+
+    unlink_stereo "$MASTER_SINK" "$output_target"
+    if ! link_stereo "$MASTER_SINK" "$output_target"; then
+        unlink_stereo "$MASTER_SINK" "$output_target"
+        ((master_was_muted == 1)) || wpctl set-mute "$master_id" 0 >/dev/null 2>&1 || true
         echo "Не вдалося підключити MASTER до '$output_target'; попередній маршрут залишено" >&2
         return 1
     fi
 
-    if ! set_loopback_gain_db "$new_output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
-        pactl unload-module "$new_output_loop" >/dev/null 2>&1 || true
-        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося встановити unity gain для '$output_target'; попередній маршрут залишено" >&2
-        return 1
+    if [[ -n "$old_target" && "$old_target" != "$output_target" ]]; then
+        unlink_stereo "$MASTER_SINK" "$old_target"
     fi
 
-    if ! write_state "$physical" "$output_target" "$parking_bus" "$master_bus" \
-        "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$new_output_loop"; then
-        cleanup_build_modules
-        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося зафіксувати новий маршрут; попередній маршрут залишено" >&2
-        return 1
-    fi
-
-    if [[ "$old_output_loop" =~ ^[0-9]+$ ]] \
-        && ! pactl unload-module "$old_output_loop" >/dev/null 2>&1; then
-        write_state "$old_physical" "$old_output_target" "$parking_bus" "$master_bus" \
-            "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$old_output_loop" || true
-        cleanup_build_modules
-        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося від'єднати попередній маршрут; перемикання скасовано" >&2
-        return 1
-    fi
-    BUILD_MODULES=()
-    [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0
-    echo "Фінальний вихід перемкнено $old_output_target -> $output_target"
+    write_state "$physical" "$output_target"
+    ((master_was_muted == 1)) || wpctl set-mute "$master_id" 0
+    echo "Фінальний PipeWire вихід перемкнено ${old_target:-<none>} -> $output_target"
 }
 
 stop_buses() {
-    local physical
-    physical="$(state_value PHYSICAL)"
-    unload_saved_modules
-    if [[ -n "$physical" ]]; then
-        pactl set-default-sink "$physical" >/dev/null 2>&1 || true
-    fi
+    local output_target
+    output_target="$(state_value OUTPUT_TARGET)"
+    [[ -n "$output_target" ]] && unlink_stereo "$MASTER_SINK" "$output_target"
+    unlink_stereo "$MUSIC_SINK" "$MASTER_SINK"
+    unlink_stereo "$ALERT_SINK" "$MASTER_SINK"
+    rm -f -- "$STATE_FILE"
 }
 
 case "${1:-}" in
