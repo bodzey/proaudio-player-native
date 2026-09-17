@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use axum::body::Body;
@@ -6,12 +7,15 @@ use axum::extract::Path as AxumPath;
 use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
+use serde_json::{json, Value};
 
 use super::WebController;
 
 const DEFAULT_WEBUI_DIR: &str = "/usr/share/proaudio-player/webui";
 const WEBUI_DIR_ENV: &str = "PROAUDIO_WEBUI_DIR";
+const RELEASE_FILE: &str = "/etc/proaudio-release";
+const THERMAL_ROOT: &str = "/sys/class/thermal";
 
 fn webui_root() -> Option<PathBuf> {
     let value = env::var(WEBUI_DIR_ENV).unwrap_or_else(|_| DEFAULT_WEBUI_DIR.to_owned());
@@ -51,6 +55,66 @@ fn content_type(path: &Path) -> &'static str {
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     }
+}
+
+fn release_value(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (candidate, value) = line.split_once('=')?;
+        (candidate == key).then(|| value.trim().to_owned())
+    })
+}
+
+fn release_info() -> Value {
+    let text = fs::read_to_string(RELEASE_FILE).unwrap_or_default();
+    json!({
+        "version": release_value(&text, "PROAUDIO_VERSION"),
+        "channel": release_value(&text, "PROAUDIO_CHANNEL"),
+        "status": release_value(&text, "PROAUDIO_STATUS"),
+        "build_id": release_value(&text, "PROAUDIO_BUILD_ID"),
+        "firmware_sha": release_value(&text, "PROAUDIO_FIRMWARE_SHA"),
+        "native_sha": release_value(&text, "PROAUDIO_NATIVE_SHA"),
+        "webui_sha": release_value(&text, "PROAUDIO_WEBUI_SHA"),
+    })
+}
+
+fn temperature_celsius_from_millidegrees(text: &str) -> Option<f64> {
+    let value = text.trim().parse::<f64>().ok()? / 1000.0;
+    value.is_finite().then_some(value)
+}
+
+fn cpu_temperature_celsius() -> Option<f64> {
+    let entries = fs::read_dir(THERMAL_ROOT).ok()?;
+    let mut fallback = None;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("thermal_zone") {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(raw_temp) = fs::read_to_string(path.join("temp")) else {
+            continue;
+        };
+        let Some(temp) = temperature_celsius_from_millidegrees(&raw_temp) else {
+            continue;
+        };
+        let kind = fs::read_to_string(path.join("type"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if kind.contains("cpu") || kind.contains("soc") || kind.contains("package") {
+            return Some(temp);
+        }
+        fallback.get_or_insert(temp);
+    }
+
+    fallback
+}
+
+async fn system_info() -> Json<Value> {
+    Json(json!({
+        "temperature_celsius": cpu_temperature_celsius(),
+        "release": release_info(),
+    }))
 }
 
 async fn serve_asset(relative: &str) -> Response {
@@ -118,6 +182,7 @@ async fn legacy_static_asset(AxumPath(path): AxumPath<String>) -> Response {
 pub(super) fn router() -> Router<WebController> {
     Router::<WebController>::new()
         .route("/", get(index))
+        .route("/system-info.json", get(system_info))
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
         .route("/sw.js", get(service_worker))
@@ -128,7 +193,7 @@ pub(super) fn router() -> Router<WebController> {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_relative_path;
+    use super::{release_value, safe_relative_path, temperature_celsius_from_millidegrees};
 
     #[test]
     fn accepts_only_relative_asset_paths() {
@@ -139,5 +204,22 @@ mod tests {
         assert!(safe_relative_path("assets/../../etc/passwd").is_none());
         assert!(safe_relative_path("/etc/passwd").is_none());
         assert!(safe_relative_path("").is_none());
+    }
+
+    #[test]
+    fn parses_release_identity_without_shelling_out() {
+        let release = "PROAUDIO_VERSION=0.1.0\nPROAUDIO_CHANNEL=development\n";
+        assert_eq!(release_value(release, "PROAUDIO_VERSION").as_deref(), Some("0.1.0"));
+        assert_eq!(
+            release_value(release, "PROAUDIO_CHANNEL").as_deref(),
+            Some("development")
+        );
+        assert_eq!(release_value(release, "MISSING"), None);
+    }
+
+    #[test]
+    fn converts_linux_thermal_millidegrees() {
+        assert_eq!(temperature_celsius_from_millidegrees("54530\n"), Some(54.53));
+        assert_eq!(temperature_celsius_from_millidegrees("invalid"), None);
     }
 }
