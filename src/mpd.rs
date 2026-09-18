@@ -115,8 +115,16 @@ impl Connection {
 }
 
 fn quote_argument(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\"");
-    format!("\"{escaped}\"")
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        if matches!(character, '\\' | '"') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn fields(lines: &[String]) -> HashMap<String, Vec<String>> {
