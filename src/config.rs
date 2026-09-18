@@ -620,8 +620,8 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
     if !a.allowed_sample_rates.contains(&a.sample_rate) {
         bail!("audio.sample_rate має входити до audio.allowed_sample_rates");
     }
-    if a.sample_rate_mode != SampleRateMode::Fixed {
-        bail!("audio.sample_rate_mode adaptive/native ще не активовано; використовуйте fixed");
+    if a.sample_rate_mode == SampleRateMode::Native {
+        bail!("audio.sample_rate_mode native зарезервовано для майбутнього direct/bit-perfect mode");
     }
     for (name, value) in [
         ("duck_fade_seconds", a.duck_fade_seconds),
@@ -670,9 +670,18 @@ mod tests {
     }
 
     #[test]
-    fn future_rate_modes_fail_closed_until_they_are_implemented() {
+    fn adaptive_rate_mode_is_valid_for_the_mixed_graph() {
         let audio = AudioConfig {
             sample_rate_mode: SampleRateMode::Adaptive,
+            ..AudioConfig::default()
+        };
+        validate_audio(&audio, &MinuteSilenceConfig::default()).unwrap();
+    }
+
+    #[test]
+    fn native_rate_mode_remains_reserved_for_direct_playback() {
+        let audio = AudioConfig {
+            sample_rate_mode: SampleRateMode::Native,
             ..AudioConfig::default()
         };
         assert!(validate_audio(&audio, &MinuteSilenceConfig::default()).is_err());
