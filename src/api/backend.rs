@@ -4,7 +4,7 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -45,6 +45,40 @@ const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const PLAYER_ACTIONS: &[&str] = &["play", "pause", "stop", "next", "prev"];
 const MAX_ALERT_MEDIA_BYTES: usize = 16 * 1024 * 1024;
 const MIN_ALERT_MEDIA_BYTES: usize = 512;
+
+static MPD_STATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[(playing|paused)\]").expect("valid MPD state regex"));
+static MPD_VOLUME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"volume:\s*(\d+)%").expect("valid MPD volume regex"));
+static MPD_QUEUE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"#(\d+)/(\d+)").expect("valid MPD queue regex"));
+static MPD_PROGRESS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(\d+:\d+(?::\d+)?)/(\d+:\d+(?::\d+)?)\s+\((\d+)%\)")
+        .expect("valid MPD progress regex")
+});
+static ALSA_CARD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*(\d+)\s+\[([^]]+)\]").expect("valid ALSA card regex")
+});
+static ALSA_CONTROL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Simple mixer control '([^']+)'").expect("valid ALSA control regex")
+});
+static ALSA_PERCENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Playback[^\n]*\[(\d+)%\]").expect("valid ALSA percent regex")
+});
+static ALSA_DB_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[(-?\d+(?:\.\d+)?)dB\]").expect("valid ALSA dB regex"));
+static ALSA_LIMITS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Limits:\s+Playback\s+(-?\d+)\s+-\s+(-?\d+)")
+        .expect("valid ALSA limits regex")
+});
+static ALSA_DB_SCALE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"dBscale-min=(-?\d+(?:\.\d+)?)dB,step=(-?\d+(?:\.\d+)?)dB")
+        .expect("valid ALSA dB scale regex")
+});
+static ALSA_DB_MINMAX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"dBminmax-min=(-?\d+(?:\.\d+)?)dB,max=(-?\d+(?:\.\d+)?)dB")
+        .expect("valid ALSA dB min/max regex")
+});
 
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult = std::result::Result<Json<Value>, ApiError>;
@@ -378,21 +412,17 @@ impl WebController {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         fields.resize(5, String::new());
-        let state_re = Regex::new(r"\[(playing|paused)\]")?;
-        let volume_re = Regex::new(r"volume:\s*(\d+)%")?;
-        let queue_re = Regex::new(r"#(\d+)/(\d+)")?;
-        let progress_re = Regex::new(r"(\d+:\d+(?::\d+)?)/(\d+:\d+(?::\d+)?)\s+\((\d+)%\)")?;
-        let state = state_re
+        let state = MPD_STATE_RE
             .captures(&status.stdout)
             .and_then(|c| c.get(1))
             .map(|m| m.as_str())
             .unwrap_or("stopped");
-        let volume = volume_re
+        let volume = MPD_VOLUME_RE
             .captures(&status.stdout)
             .and_then(|c| c.get(1))
             .and_then(|m| m.as_str().parse::<u32>().ok());
-        let queue = queue_re.captures(&status.stdout);
-        let progress = progress_re.captures(&status.stdout);
+        let queue = MPD_QUEUE_RE.captures(&status.stdout);
+        let progress = MPD_PROGRESS_RE.captures(&status.stdout);
         let file = fields.first().cloned().unwrap_or_default();
         let is_stream = file.starts_with("http://") || file.starts_with("https://");
         let station = fields.get(4).cloned().unwrap_or_default();
@@ -599,16 +629,9 @@ impl WebController {
 
     pub async fn hardware_mixers(&self) -> Result<Vec<Value>> {
         let cards_text = std::fs::read_to_string("/proc/asound/cards").unwrap_or_default();
-        let card_re = Regex::new(r"(?m)^\s*(\d+)\s+\[([^]]+)\]")?;
-        let control_re = Regex::new(r"Simple mixer control '([^']+)'")?;
-        let percent_re = Regex::new(r"Playback[^\n]*\[(\d+)%\]")?;
-        let db_re = Regex::new(r"\[(-?\d+(?:\.\d+)?)dB\]")?;
-        let limits_re = Regex::new(r"Limits:\s+Playback\s+(-?\d+)\s+-\s+(-?\d+)")?;
-        let db_scale_re = Regex::new(r"dBscale-min=(-?\d+(?:\.\d+)?)dB,step=(-?\d+(?:\.\d+)?)dB")?;
-        let db_minmax_re = Regex::new(r"dBminmax-min=(-?\d+(?:\.\d+)?)dB,max=(-?\d+(?:\.\d+)?)dB")?;
         let mut result = Vec::new();
 
-        for capture in card_re.captures_iter(&cards_text) {
+        for capture in ALSA_CARD_RE.captures_iter(&cards_text) {
             let card = capture
                 .get(1)
                 .and_then(|m| m.as_str().parse::<u32>().ok())
@@ -625,7 +648,7 @@ impl WebController {
                 continue;
             }
 
-            for control_capture in control_re.captures_iter(&controls.stdout) {
+            for control_capture in ALSA_CONTROL_RE.captures_iter(&controls.stdout) {
                 let control = control_capture.get(1).map(|m| m.as_str()).unwrap_or("");
                 let details = self
                     .run("amixer", &["-c", &card_text, "sget", control], false, 8)
@@ -634,7 +657,7 @@ impl WebController {
                     continue;
                 }
 
-                let values = percent_re
+                let values = ALSA_PERCENT_RE
                     .captures_iter(&details.stdout)
                     .filter_map(|c| c.get(1))
                     .filter_map(|m| m.as_str().parse::<f64>().ok())
@@ -643,7 +666,7 @@ impl WebController {
                     continue;
                 }
                 let percent = values.iter().sum::<f64>() / values.len() as f64;
-                let actual_db_values = db_re
+                let actual_db_values = ALSA_DB_RE
                     .captures_iter(&details.stdout)
                     .filter_map(|c| c.get(1))
                     .filter_map(|m| m.as_str().parse::<f64>().ok())
@@ -657,12 +680,12 @@ impl WebController {
                     .split("\nnumid=")
                     .find(|block| block.contains(&volume_marker))
                     .unwrap_or("");
-                let (db_min, db_max) = if let Some(c) = db_minmax_re.captures(content_block) {
+                let (db_min, db_max) = if let Some(c) = ALSA_DB_MINMAX_RE.captures(content_block) {
                     (
                         c.get(1).and_then(|m| m.as_str().parse::<f64>().ok()),
                         c.get(2).and_then(|m| m.as_str().parse::<f64>().ok()),
                     )
-                } else if let Some(c) = db_scale_re.captures(content_block) {
+                } else if let Some(c) = ALSA_DB_SCALE_RE.captures(content_block) {
                     let min = c.get(1).and_then(|m| m.as_str().parse::<f64>().ok());
                     let step = c.get(2).and_then(|m| m.as_str().parse::<f64>().ok());
                     let limits = limits_re.captures(&details.stdout);
