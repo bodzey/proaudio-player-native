@@ -6,8 +6,11 @@ ALERT_SINK="${ALERT_SINK:-proaudio_player_alert}"
 MASTER_SINK="${MASTER_SINK:-proaudio_player_master}"
 PARKING_SINK="${PARKING_SINK:-proaudio_player_parking}"
 PHYSICAL_SINK="${PHYSICAL_SINK:-AUTO}"
+SAMPLE_RATE_MODE="${SAMPLE_RATE_MODE:-fixed}"
 SAMPLE_RATE="${SAMPLE_RATE:-48000}"
+ALLOWED_SAMPLE_RATES="${ALLOWED_SAMPLE_RATES:-$SAMPLE_RATE}"
 AUDIO_CHANNELS="${AUDIO_CHANNELS:-2}"
+INTERNAL_SAMPLE_FORMAT="${INTERNAL_SAMPLE_FORMAT:-float32le}"
 LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
@@ -101,6 +104,54 @@ load_module_into() {
     printf -v "$destination" '%s' "$module"
     BUILD_MODULES+=("$module")
 }
+load_bus_sink_into() {
+    local destination="$1" sink_name="$2" description="$3"
+    local args=(
+        module-null-sink
+        "sink_name=$sink_name"
+        "sink_properties=device.description=$description monitor.channel-volumes=true"
+        "format=$INTERNAL_SAMPLE_FORMAT"
+        "channels=$AUDIO_CHANNELS"
+    )
+    if [[ "$SAMPLE_RATE_MODE" == "fixed" ]]; then
+        args+=("rate=$SAMPLE_RATE")
+    fi
+    load_module_into "$destination" "${args[@]}"
+}
+
+pipewire_allowed_rates_json() {
+    local rate result="["
+    IFS=',' read -ra rates <<<"$ALLOWED_SAMPLE_RATES"
+    for rate in "${rates[@]}"; do
+        rate="${rate//[[:space:]]/}"
+        [[ -n "$rate" ]] || continue
+        result+=" $rate"
+    done
+    printf '%s ]\n' "$result"
+}
+
+configure_pipewire_rate_policy() {
+    [[ "$SAMPLE_RATE_MODE" == "adaptive" ]] || return 0
+
+    if ! command -v pw-metadata >/dev/null 2>&1; then
+        echo "SAMPLE_RATE_MODE=adaptive потребує pw-metadata" >&2
+        return 1
+    fi
+
+    local allowed
+    allowed="$(pipewire_allowed_rates_json)"
+    if ! pw-metadata -n settings 0 clock.allowed-rates "$allowed" >/dev/null 2>&1; then
+        echo "Не вдалося застосувати PipeWire clock.allowed-rates=$allowed" >&2
+        return 1
+    fi
+    if ! pw-metadata -n settings 0 clock.force-rate 0 >/dev/null 2>&1; then
+        echo "Не вдалося дозволити автоматичне перемикання PipeWire graph rate" >&2
+        return 1
+    fi
+
+    echo "PipeWire adaptive rate policy: fallback ${SAMPLE_RATE} Hz, allowed $allowed"
+}
+
 
 cleanup_build_modules() {
     local index
@@ -273,7 +324,8 @@ load_loopback_into() {
     load_module_into "$destination" module-loopback \
         source="$source.monitor" sink="$target" \
         latency_msec="$LOOPBACK_LATENCY_MSEC" \
-        sink_input_properties="media.name=$stream_name" \
+        source_output_properties="node.passive=true resample.quality=10" \
+        sink_input_properties="media.name=$stream_name node.passive=true resample.quality=10" \
         source_dont_move=true sink_dont_move=true
 }
 
@@ -312,12 +364,40 @@ set_loopback_gain_db() {
 }
 
 validate_audio_bus_config() {
+    if [[ "$SAMPLE_RATE_MODE" != "fixed" && "$SAMPLE_RATE_MODE" != "adaptive" ]]; then
+        echo "SAMPLE_RATE_MODE має бути fixed або adaptive" >&2
+        return 1
+    fi
     if ! [[ "$SAMPLE_RATE" =~ ^[0-9]+$ ]] || ((10#$SAMPLE_RATE < 8000 || 10#$SAMPLE_RATE > 384000)); then
         echo "SAMPLE_RATE має бути цілим числом від 8000 до 384000" >&2
         return 1
     fi
+
+    local rate found=0
+    IFS=',' read -ra rates <<<"$ALLOWED_SAMPLE_RATES"
+    for rate in "${rates[@]}"; do
+        rate="${rate//[[:space:]]/}"
+        if ! [[ "$rate" =~ ^[0-9]+$ ]] || ((10#$rate < 8000 || 10#$rate > 384000)); then
+            echo "ALLOWED_SAMPLE_RATES містить некоректну частоту: $rate" >&2
+            return 1
+        fi
+        [[ "$rate" == "$SAMPLE_RATE" ]] && found=1
+    done
+    if [[ "$SAMPLE_RATE_MODE" == "adaptive" && "$found" != "1" ]]; then
+        echo "SAMPLE_RATE має входити до ALLOWED_SAMPLE_RATES в adaptive mode" >&2
+        return 1
+    fi
+
     if ! [[ "$AUDIO_CHANNELS" =~ ^[0-9]+$ ]] || ((10#$AUDIO_CHANNELS < 1 || 10#$AUDIO_CHANNELS > 8)); then
         echo "AUDIO_CHANNELS має бути цілим числом від 1 до 8" >&2
+        return 1
+    fi
+    if [[ "$AUDIO_CHANNELS" != "2" ]]; then
+        echo "Поточний mixed graph підтримує рівно 2 канали" >&2
+        return 1
+    fi
+    if [[ "$INTERNAL_SAMPLE_FORMAT" != "float32le" ]]; then
+        echo "INTERNAL_SAMPLE_FORMAT має бути float32le для high-precision mixed graph" >&2
         return 1
     fi
 }
@@ -326,6 +406,7 @@ start_buses() {
     unload_saved_modules
     validate_audio_bus_config
     require_pulse_server
+    configure_pipewire_rate_policy
 
     local physical output_target parking_bus master_bus music_bus alert_bus
     local music_loop alert_loop output_loop
@@ -336,22 +417,10 @@ start_buses() {
     fi
 
     BUILD_MODULES=()
-    if ! load_module_into parking_bus module-null-sink \
-            sink_name="$PARKING_SINK" \
-            sink_properties="device.description=ProAudio_Player_Parking_Output monitor.channel-volumes=true" \
-            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
-        || ! load_module_into master_bus module-null-sink \
-            sink_name="$MASTER_SINK" \
-            sink_properties="device.description=ProAudio_Player_Final_Mix monitor.channel-volumes=true" \
-            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
-        || ! load_module_into music_bus module-null-sink \
-            sink_name="$MUSIC_SINK" \
-            sink_properties="device.description=ProAudio_Player_Music_Bus monitor.channel-volumes=true" \
-            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
-        || ! load_module_into alert_bus module-null-sink \
-            sink_name="$ALERT_SINK" \
-            sink_properties="device.description=ProAudio_Player_Alert_Bus monitor.channel-volumes=true" \
-            rate="$SAMPLE_RATE" channels="$AUDIO_CHANNELS" \
+    if ! load_bus_sink_into parking_bus "$PARKING_SINK" "ProAudio_Player_Parking_Output" \
+        || ! load_bus_sink_into master_bus "$MASTER_SINK" "ProAudio_Player_Final_Mix" \
+        || ! load_bus_sink_into music_bus "$MUSIC_SINK" "ProAudio_Player_Music_Bus" \
+        || ! load_bus_sink_into alert_bus "$ALERT_SINK" "ProAudio_Player_Alert_Bus" \
         || ! load_loopback_into music_loop "$MUSIC_SINK" "$MASTER_SINK" \
             "proaudio-player-music-to-master" \
         || ! load_loopback_into alert_loop "$ALERT_SINK" "$MASTER_SINK" \
