@@ -68,6 +68,9 @@ fn default_duck_fade() -> f64 {
 fn default_restore_fade() -> f64 {
     3.0
 }
+fn default_mixer_volume() -> f64 {
+    89.125_093_813_374_56
+}
 fn default_volume() -> f64 {
     100.0
 }
@@ -210,9 +213,9 @@ pub struct AudioConfig {
     pub duck_fade_seconds: f64,
     #[serde(default = "default_restore_fade")]
     pub restore_fade_seconds: f64,
-    #[serde(default = "default_volume")]
+    #[serde(default = "default_mixer_volume")]
     pub alert_volume_percent: f64,
-    #[serde(default = "default_volume")]
+    #[serde(default = "default_mixer_volume")]
     pub default_restore_volume_percent: f64,
     #[serde(default = "default_alert_repeat_minutes")]
     pub alert_repeat_interval_minutes: u64,
@@ -243,8 +246,8 @@ impl Default for AudioConfig {
             duck_db: default_duck_db(),
             duck_fade_seconds: default_duck_fade(),
             restore_fade_seconds: default_restore_fade(),
-            alert_volume_percent: default_volume(),
-            default_restore_volume_percent: default_volume(),
+            alert_volume_percent: default_mixer_volume(),
+            default_restore_volume_percent: default_mixer_volume(),
             alert_repeat_interval_minutes: default_alert_repeat_minutes(),
             sample_rate_mode: default_sample_rate_mode(),
             sample_rate: default_sample_rate(),
@@ -650,6 +653,14 @@ pub fn validate_config(c: &AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_mixer_levels_are_minus_three_db() {
+        let audio = AudioConfig::default();
+        let to_db = |percent: f64| 60.0 * (percent / 100.0).log10();
+        assert!((to_db(audio.default_restore_volume_percent) + 3.0).abs() < 1.0e-9);
+        assert!((to_db(audio.alert_volume_percent) + 3.0).abs() < 1.0e-9);
+    }
 
     #[test]
     fn default_audio_rate_policy_preserves_current_runtime() {
