@@ -166,6 +166,7 @@ async fn fetch_directory() -> Result<Vec<DirectoryStation>> {
     }
 
     let mut last_error = None;
+    let remote_limit = REMOTE_LIMIT.to_string();
     for base in servers {
         let response = match client
             .get(format!("{base}/json/stations/search"))
@@ -174,7 +175,7 @@ async fn fetch_directory() -> Result<Vec<DirectoryStation>> {
                 ("hidebroken", "true"),
                 ("order", "votes"),
                 ("reverse", "true"),
-                ("limit", &REMOTE_LIMIT.to_string()),
+                ("limit", remote_limit.as_str()),
             ])
             .send()
             .await
