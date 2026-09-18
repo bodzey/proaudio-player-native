@@ -14,6 +14,7 @@ new_case() {
     : >"$MOCK_PACTL_STATE/unloaded"
     : >"$MOCK_PACTL_STATE/calls"
     ln -s "$repo_root/tests/fixtures/pactl" "$test_root/$name/bin/pactl"
+    ln -s "$repo_root/tests/fixtures/pw-metadata" "$test_root/$name/bin/pw-metadata"
     export PATH="$test_root/$name/bin:/usr/bin:/bin"
 }
 
@@ -35,6 +36,20 @@ grep -Fxq 'OUTPUT_TARGET=mock_physical' "$state_file"
 grep -Fxq '7' "$MOCK_PACTL_STATE/unloaded"
 grep -Fq 'module-loopback|source=proaudio_player_master.monitor sink=mock_physical' \
     "$MOCK_PACTL_STATE/modules"
+
+new_case adaptive_rate
+SAMPLE_RATE_MODE=adaptive \
+SAMPLE_RATE=48000 \
+ALLOWED_SAMPLE_RATES=44100,48000,96000 \
+HARDWARE_MIXER_MODE=off \
+bash "$repo_root/scripts/audio-buses.sh" start
+grep -Fxq -- '-n settings 0 clock.allowed-rates [ 44100 48000 96000 ]' \
+    "$MOCK_PACTL_STATE/pw-metadata-calls"
+grep -Fxq -- '-n settings 0 clock.force-rate 0' \
+    "$MOCK_PACTL_STATE/pw-metadata-calls"
+! grep -Eq 'module-null-sink\|.*rate=48000' "$MOCK_PACTL_STATE/modules"
+[[ "$(grep -c 'module-null-sink|.*format=float32le' "$MOCK_PACTL_STATE/modules")" == 4 ]]
+grep -Fq 'node.passive=true' "$MOCK_PACTL_STATE/modules"
 
 new_case partial_failure
 printf '4\n' >"$MOCK_PACTL_STATE/fail-at"
