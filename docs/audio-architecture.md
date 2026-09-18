@@ -59,16 +59,37 @@ pre-announcement state is restored.
 
 This complementary linear mix law protects the current two-bus appliance without a permanent headroom penalty, nonlinear processing or an asynchronous userspace bridge. It assumes each admitted source itself remains within full scale. A future mode that permits arbitrary simultaneous streams would require a graph-native post-mix limiter and is outside this contract.
 
-## Sample-rate policy
+## Sample-rate and PCM-format policy
 
 `/etc/proaudio-player-alert/audio.env` is the processing-domain authority for the
-rate, stereo channel count and logical bus identities. The YAML file does not
-duplicate these graph settings. The current appliance uses a fixed 48 kHz stereo
-domain and lets PipeWire perform boundary conversion for sources or hardware that
-use another rate. This avoids rebuilding the live graph when a transport changes
-format.
+rate policy, stereo channel count and logical bus identities. The YAML file does
+not duplicate these graph settings.
 
-A future direct/bit-perfect mode can bypass mixing and user DSP for a single source, switch the hardware clock to the source rate, and disable alerts for the duration of direct playback. That mode is intentionally separate from the normal mixed appliance mode.
+Production images use `SAMPLE_RATE_MODE=adaptive` with 48 kHz as the fallback
+rate and the common 44.1/48 kHz families up to 192 kHz as allowed graph rates.
+Logical MUSIC/ALERT/MASTER/PARKING buses deliberately do not pin a rate in this
+mode. Their loopback links are passive, so they do not keep a physical sink busy
+when no programme source is active. PipeWire is therefore free to move the graph
+and the selected ALSA device to a compatible active-stream rate when the device is
+idle. Unsupported source/device combinations are resampled by PipeWire rather
+than making playback fail.
+
+The mixed graph uses float32 PCM internally. This avoids introducing an
+unnecessary 16-bit quantisation boundary while MUSIC and ALERT are mixed or
+attenuated. The physical ALSA format is not hard-coded: PipeWire/WirePlumber
+negotiates the best format supported by the selected device. A 16-bit source can
+therefore travel through the float graph without losing information, while a
+24-bit-capable DAC is not artificially restricted to 16 bit.
+
+Resampling remains available as a compatibility boundary and is configured for
+high quality. Adaptive rate switching is an optimisation that removes avoidable
+SRC when the graph and device can follow the active stream; it is not allowed to
+make the graph fragile.
+
+A future direct/bit-perfect mode can bypass mixing and user gain for a single
+source and require an exact source-to-DAC format/rate match. That mode remains
+separate from normal mixed playback because alerts, ducking and MASTER gain are
+intentionally available in the normal appliance mode.
 
 ## Failure domains
 
