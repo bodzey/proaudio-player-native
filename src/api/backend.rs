@@ -776,6 +776,7 @@ impl WebController {
     pub fn audio_settings(&self) -> Result<Value> {
         let (audio, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
         Ok(json!({
+            "air_raid_alerts_enabled": audio.notifications_enabled,
             "notifications_enabled": audio.notifications_enabled,
             "duck_db": audio.duck_db,
             "duck_fade_seconds": audio.duck_fade_seconds,
@@ -1353,6 +1354,7 @@ struct AudioOutputBody {
 }
 #[derive(Deserialize, Default)]
 struct AudioSettingsBody {
+    air_raid_alerts_enabled: Option<bool>,
     notifications_enabled: Option<bool>,
     duck_db: Option<f64>,
     alert_volume_percent: Option<f64>,
@@ -1367,6 +1369,18 @@ struct AudioSettingsBody {
     restore_fade_seconds: Option<f64>,
     alert_repeat_interval_minutes: Option<u64>,
     duck_only_during_announcement: Option<bool>,
+}
+
+impl AudioSettingsBody {
+    fn resolved_air_raid_alerts_enabled(&self) -> Result<Option<bool>> {
+        match (self.air_raid_alerts_enabled, self.notifications_enabled) {
+            (Some(canonical), Some(legacy)) if canonical != legacy => {
+                bail!("air_raid_alerts_enabled і notifications_enabled не можуть суперечити одне одному")
+            }
+            (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+            (None, None) => Ok(None),
+        }
+    }
 }
 #[derive(Deserialize)]
 struct PlayerBody {
@@ -1684,7 +1698,10 @@ async fn put_audio_settings(
     let (mut audio, mut minute) =
         effective_audio(&controller.config.audio, &controller.config.minute_silence)
             .map_err(map_internal)?;
-    if let Some(v) = body.notifications_enabled {
+    if let Some(v) = body
+        .resolved_air_raid_alerts_enabled()
+        .map_err(map_bad_request)?
+    {
         audio.notifications_enabled = v;
     }
     if let Some(v) = body.duck_db {
@@ -2258,7 +2275,42 @@ mod tests {
 
     use crate::audio_backend::StreamState;
 
-    use super::{looks_like_mp3, WebController, MIN_ALERT_MEDIA_BYTES};
+    use super::{AudioSettingsBody, looks_like_mp3, WebController, MIN_ALERT_MEDIA_BYTES};
+
+    #[test]
+    fn audio_settings_accepts_canonical_and_legacy_air_raid_switches() {
+        let canonical: AudioSettingsBody =
+            serde_json::from_value(serde_json::json!({"air_raid_alerts_enabled": false}))
+                .unwrap();
+        assert_eq!(
+            canonical.resolved_air_raid_alerts_enabled().unwrap(),
+            Some(false)
+        );
+
+        let legacy: AudioSettingsBody =
+            serde_json::from_value(serde_json::json!({"notifications_enabled": true})).unwrap();
+        assert_eq!(
+            legacy.resolved_air_raid_alerts_enabled().unwrap(),
+            Some(true)
+        );
+
+        let matching: AudioSettingsBody = serde_json::from_value(serde_json::json!({
+            "air_raid_alerts_enabled": true,
+            "notifications_enabled": true
+        }))
+        .unwrap();
+        assert_eq!(
+            matching.resolved_air_raid_alerts_enabled().unwrap(),
+            Some(true)
+        );
+
+        let conflicting: AudioSettingsBody = serde_json::from_value(serde_json::json!({
+            "air_raid_alerts_enabled": true,
+            "notifications_enabled": false
+        }))
+        .unwrap();
+        assert!(conflicting.resolved_air_raid_alerts_enabled().is_err());
+    }
 
     #[test]
     fn alert_media_accepts_an_mp3_frame_and_rejects_arbitrary_data() {

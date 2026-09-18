@@ -50,9 +50,6 @@ impl AlertController {
     }
 
     pub async fn recover(&mut self) -> Result<()> {
-        if !self.audio.config()?.notifications_enabled {
-            return self.deactivate_notifications().await;
-        }
         let (was_active, minute_snapshot, mode, alert_snapshot) = {
             let mut state = self.state.lock().await;
             let values = (
@@ -71,16 +68,21 @@ impl AlertController {
         if was_active {
             self.persist().await?;
         }
+
+        let cfg = self.audio.config()?;
         if mode == "alert" {
-            let cfg = self.audio.config()?;
-            if let Some(snapshot) = alert_snapshot.as_ref() {
-                if cfg.duck_only_during_announcement {
-                    self.audio.restore(Some(snapshot)).await?;
-                } else {
-                    self.audio.ensure_alert(snapshot).await?;
+            if !cfg.notifications_enabled {
+                self.deactivate_air_raid_alerts().await?;
+            } else {
+                if let Some(snapshot) = alert_snapshot.as_ref() {
+                    if cfg.duck_only_during_announcement {
+                        self.audio.restore(Some(snapshot)).await?;
+                    } else {
+                        self.audio.ensure_alert(snapshot).await?;
+                    }
                 }
+                self.last_alert_announcement = Some(Instant::now());
             }
-            self.last_alert_announcement = Some(Instant::now());
         } else if was_active {
             self.audio.restore(minute_snapshot.as_ref()).await?;
         }
@@ -103,35 +105,31 @@ impl AlertController {
         Ok(snapshot)
     }
 
-    async fn deactivate_notifications(&mut self) -> Result<()> {
+    async fn deactivate_air_raid_alerts(&mut self) -> Result<()> {
         let current = self.state.lock().await.clone();
-        if current.mode == "normal" && !current.minute_silence_active {
+        if current.mode != "alert" {
             return Ok(());
         }
 
-        let minute_snapshot = if current.minute_silence_active {
-            self.cancel_minute_silence().await?
-        } else {
-            None
-        };
-        let restore_snapshot = minute_snapshot.or(current.audio_snapshot);
-        self.audio.restore(restore_snapshot.as_ref()).await?;
+        // The minute-of-silence scheduler is an independent feature. Disabling
+        // air-raid notifications must never cancel or reset its runtime state.
+        if !current.minute_silence_active {
+            self.audio.restore(current.audio_snapshot.as_ref()).await?;
+        }
 
         {
             let mut state = self.state.lock().await;
-            let last_minute_silence_date = state.last_minute_silence_date.clone();
-            let last_success_at = state.last_success_at.clone();
-            *state = RuntimeState {
-                mode: "normal".into(),
-                last_success_at,
-                last_change_at: Some(Utc::now().to_rfc3339()),
-                last_minute_silence_date,
-                ..RuntimeState::default()
-            };
+            state.mode = "normal".into();
+            state.clear_count = 0;
+            state.entry_announced = false;
+            state.clear_announced = false;
+            state.audio_snapshot = None;
+            state.last_change_at = Some(Utc::now().to_rfc3339());
+            state.matched_uids.clear();
         }
         self.last_alert_announcement = None;
         self.persist().await?;
-        warn!("Сповіщення вимкнено; пріоритетний аудіорежим скасовано");
+        warn!("Сповіщення про повітряну тривогу вимкнено; режим тривоги скасовано");
         Ok(())
     }
 
@@ -440,7 +438,7 @@ impl AlertController {
 
     pub async fn run_once(&mut self) -> Result<f64> {
         if !self.audio.config()?.notifications_enabled {
-            self.deactivate_notifications().await?;
+            self.deactivate_air_raid_alerts().await?;
             return Ok(self.provider.current_config()?.poll_interval_seconds);
         }
         match self.provider.fetch().await {
@@ -493,27 +491,28 @@ impl AlertController {
         loop {
             let (audio_config, minute_config) =
                 effective_audio(&self.config.audio, &self.config.minute_silence)?;
-            if !audio_config.notifications_enabled {
-                if let Err(err) = self.deactivate_notifications().await {
-                    error!("не вдалося вимкнути пріоритетний аудіорежим: {err:#}");
+            if audio_config.notifications_enabled {
+                if Instant::now() >= next_poll {
+                    let poll = self.run_once().await.unwrap_or_else(|err| {
+                        error!("alert controller: {err:#}");
+                        8.0
+                    });
+                    next_poll = Instant::now() + Duration::from_secs_f64(poll.max(0.25));
                 }
+            } else {
+                if let Err(err) = self.deactivate_air_raid_alerts().await {
+                    error!("не вдалося вимкнути режим повітряної тривоги: {err:#}");
+                }
+                // Poll immediately if air-raid notifications are enabled again.
                 next_poll = Instant::now();
-                sleep(Duration::from_millis(250)).await;
-                continue;
             }
+
             if !minute_config.enabled {
                 if let Err(err) = self.stop_disabled_minute_silence().await {
                     error!("не вдалося завершити вимкнену хвилину мовчання: {err:#}");
                 }
             } else if let Err(err) = self.maybe_start_minute_silence().await {
                 error!("minute silence scheduler: {err:#}");
-            }
-            if Instant::now() >= next_poll {
-                let poll = self.run_once().await.unwrap_or_else(|err| {
-                    error!("alert controller: {err:#}");
-                    8.0
-                });
-                next_poll = Instant::now() + Duration::from_secs_f64(poll.max(0.25));
             }
             sleep(Duration::from_millis(250)).await;
         }

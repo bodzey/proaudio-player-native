@@ -41,7 +41,7 @@ The following paths are relative to `/api/v1`:
 - `GET /playlists`, `POST /playlists/load`
 - `GET /queue`, `POST /queue/play`, `POST /queue/remove`, `POST /queue/clear`
 
-`GET|PUT /settings/audio` also controls `notifications_enabled` and the complete minute-silence schedule: `minute_silence_enabled`, `minute_silence_start_time`, `minute_silence_timezone`, `minute_silence_catch_up_seconds` and `minute_silence_music_fade_seconds`. Changes are persisted and observed by the running alert controller without restarting the daemon. Disabling all notifications stops provider polling, cancels an active priority mode and restores the saved music level.
+`GET|PUT /settings/audio` controls two independent notification features. `air_raid_alerts_enabled` enables or disables alerts.in.ua polling and air-raid audio; `minute_silence_enabled` independently enables or disables the daily minute-of-silence scheduler. The remaining minute-silence fields are `minute_silence_start_time`, `minute_silence_timezone`, `minute_silence_catch_up_seconds` and `minute_silence_music_fade_seconds`. Changes are persisted and observed by the running alert controller without restarting the daemon. Disabling air-raid alerts stops provider polling, cancels only an active air-raid priority mode and restores the saved music level; it does not disable or cancel the minute of silence. `notifications_enabled` remains accepted and returned as a deprecated compatibility alias for `air_raid_alerts_enabled`.
 
 Uploaded alert media is stored at the configured active paths. Appliance images configure these below `/var/lib/proaudio-player-alert/media`, which is backed by the persistent DATA partition. Factory copies remain read-only below `/usr/share/proaudio-player/announcements`.
 
