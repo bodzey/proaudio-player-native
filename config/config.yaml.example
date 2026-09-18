@@ -14,8 +14,8 @@ audio:
   duck_db: -12
   duck_fade_seconds: 1
   restore_fade_seconds: 3
-  alert_volume_percent: 100
-  default_restore_volume_percent: 100
+  alert_volume_percent: 89.12509381337456
+  default_restore_volume_percent: 89.12509381337456
   alert_repeat_interval_minutes: 0
   duck_only_during_announcement: false
   start_file: "/var/lib/proaudio-player-alert/media/alarm_start.mp3"
