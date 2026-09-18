@@ -387,14 +387,10 @@ impl WebController {
 
     fn mpd_has_session(mpd: &Value) -> bool {
         mpd.get("available").and_then(Value::as_bool) == Some(true)
-            && (matches!(
+            && matches!(
                 mpd.get("state").and_then(Value::as_str),
                 Some("playing" | "paused")
-            ) || mpd.get("queue_length").and_then(Value::as_u64).unwrap_or(0) > 0
-                || mpd
-                    .get("file")
-                    .and_then(Value::as_str)
-                    .is_some_and(|value| !value.is_empty()))
+            )
     }
 
     fn summarize_sources(
@@ -2200,6 +2196,27 @@ mod tests {
 
         assert!(sources.is_empty());
         assert!(!WebController::mpd_has_session(&mpd));
+    }
+
+    #[test]
+    fn stopped_remembered_mpd_queue_is_not_an_active_session() {
+        let mpd = serde_json::json!({
+            "available": true,
+            "state": "stopped",
+            "queue_length": 1,
+            "file": "https://online.kissfm.ua/KissFM_HD",
+            "is_stream": true,
+            "title": "KISS FM",
+        });
+
+        assert!(!WebController::mpd_has_session(&mpd));
+        assert!(WebController::summarize_sources(
+            vec![stream_at(41, "mpd", "Music Player Daemon", "700")],
+            1,
+            Some("mpd"),
+            &mpd,
+        )
+        .is_empty());
     }
 
     #[test]
