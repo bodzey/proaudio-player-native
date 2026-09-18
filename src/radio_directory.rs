@@ -236,7 +236,7 @@ pub async fn ukrainian_stations() -> Result<Vec<DirectoryStation>> {
             cache.loaded_at = Some(Instant::now());
             Ok(cache.items.clone())
         }
-        Err(err) if !cache.items.is_empty() => Ok(cache.items.clone()),
+        Err(_err) if !cache.items.is_empty() => Ok(cache.items.clone()),
         Err(err) => Err(err),
     }
 }
