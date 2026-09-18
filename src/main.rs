@@ -10,6 +10,7 @@ mod config;
 mod dlna;
 mod fourstream;
 mod media_time;
+mod mpd;
 mod output_gain;
 mod output_router;
 mod processing_domain;

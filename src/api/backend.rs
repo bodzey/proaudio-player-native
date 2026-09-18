@@ -34,6 +34,7 @@ use crate::config::{
 };
 use crate::dlna;
 use crate::fourstream;
+use crate::mpd::MpdMonitor;
 use crate::output_router::{OutputDescriptor, DEFAULT_MASTER_SINK};
 use crate::source_arbiter::SharedSourceState;
 
@@ -46,16 +47,6 @@ const PLAYER_ACTIONS: &[&str] = &["play", "pause", "stop", "next", "prev"];
 const MAX_ALERT_MEDIA_BYTES: usize = 16 * 1024 * 1024;
 const MIN_ALERT_MEDIA_BYTES: usize = 512;
 
-static MPD_STATE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[(playing|paused)\]").expect("valid MPD state regex"));
-static MPD_VOLUME_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"volume:\s*(\d+)%").expect("valid MPD volume regex"));
-static MPD_QUEUE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"#(\d+)/(\d+)").expect("valid MPD queue regex"));
-static MPD_PROGRESS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(\d+:\d+(?::\d+)?)/(\d+:\d+(?::\d+)?)\s+\((\d+)%\)")
-        .expect("valid MPD progress regex")
-});
 static ALSA_CARD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^\s*(\d+)\s+\[([^]]+)\]").expect("valid ALSA card regex")
 });
@@ -292,6 +283,7 @@ pub struct WebController {
     events: broadcast::Sender<String>,
     event_demand: Arc<Notify>,
     audio_control_lock: Arc<Mutex<()>>,
+    mpd: MpdMonitor,
 }
 
 impl WebController {
@@ -344,6 +336,7 @@ impl WebController {
             events,
             event_demand: Arc::new(Notify::new()),
             audio_control_lock: Arc::new(Mutex::new(())),
+            mpd: MpdMonitor::new(),
         }
     }
 
@@ -387,83 +380,7 @@ impl WebController {
     }
 
     pub async fn mpd_status(&self) -> Result<Value> {
-        let current = self
-            .run(
-                "mpc",
-                &[
-                    "--format",
-                    "%file%\t%title%\t%artist%\t%album%\t%name%",
-                    "current",
-                ],
-                false,
-                8,
-            )
-            .await?;
-        let status = self.run("mpc", &["status"], false, 8).await?;
-        if current.code != 0 || status.code != 0 {
-            return Ok(json!({
-                "available": false,
-                "state": "unavailable",
-                "error": if !current.stderr.is_empty() { current.stderr } else { status.stderr },
-            }));
-        }
-
-        let mut fields = current
-            .stdout
-            .split('\t')
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        fields.resize(5, String::new());
-        let state = MPD_STATE_RE
-            .captures(&status.stdout)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str())
-            .unwrap_or("stopped");
-        let volume = MPD_VOLUME_RE
-            .captures(&status.stdout)
-            .and_then(|c| c.get(1))
-            .and_then(|m| m.as_str().parse::<u32>().ok());
-        let queue = MPD_QUEUE_RE.captures(&status.stdout);
-        let progress = MPD_PROGRESS_RE.captures(&status.stdout);
-        let file = fields.first().cloned().unwrap_or_default();
-        let is_stream = file.starts_with("http://") || file.starts_with("https://");
-        let station = fields.get(4).cloned().unwrap_or_default();
-        let title = fields
-            .get(1)
-            .filter(|v| !v.is_empty())
-            .cloned()
-            .or_else(|| (!station.is_empty()).then(|| station.clone()))
-            .or_else(|| {
-                Path::new(&file)
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| {
-                if is_stream {
-                    "Мережевий потік".into()
-                } else {
-                    String::new()
-                }
-            });
-
-        Ok(json!({
-            "available": true,
-            "state": state,
-            "file": file,
-            "title": title,
-            "artist": fields.get(2).cloned().unwrap_or_default(),
-            "album": fields.get(3).cloned().unwrap_or_default(),
-            "station": station,
-            "is_stream": is_stream,
-            "stream_url": if is_stream { Some(file.clone()) } else { None },
-            "volume": volume,
-            "queue_position": queue.as_ref().and_then(|c| c.get(1)).and_then(|m| m.as_str().parse::<u32>().ok()),
-            "queue_length": queue.as_ref().and_then(|c| c.get(2)).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0),
-            "elapsed": progress.as_ref().and_then(|c| c.get(1)).map(|m| m.as_str()),
-            "duration": progress.as_ref().and_then(|c| c.get(2)).map(|m| m.as_str()),
-            "progress": progress.as_ref().and_then(|c| c.get(3)).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0),
-        }))
+        Ok(self.mpd.snapshot().await)
     }
 
     fn mpd_has_session(mpd: &Value) -> bool {
@@ -2250,6 +2167,7 @@ pub fn router(controller: WebController) -> Router {
 }
 
 pub async fn serve(controller: WebController) -> Result<()> {
+    controller.mpd.start();
     let host = controller.config.api.host.clone();
     let port = controller.config.api.port;
     let address = format!("{host}:{port}");

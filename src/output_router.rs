@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use tokio::sync::{watch, Mutex};
-use tokio::time::sleep;
+use tokio::time::timeout;
 
 use crate::atomic_file;
 use crate::audio_backend::{AudioBackend, BackendFuture, SinkDescriptor};
@@ -193,14 +193,29 @@ impl ExternalOutputRouter {
         }
     }
 
-    async fn wait_for_routed_output(&self, expected: &str) -> bool {
-        for _ in 0..100 {
-            if self.routed_output().await.as_deref() == Some(expected) {
-                return true;
-            }
-            sleep(Duration::from_millis(100)).await;
+    async fn wait_for_routed_output(
+        &self,
+        expected: &str,
+        changes: &mut watch::Receiver<u64>,
+    ) -> bool {
+        if self.routed_output().await.as_deref() == Some(expected) {
+            return true;
         }
-        false
+
+        let confirmed = timeout(Duration::from_secs(10), async {
+            loop {
+                if changes.changed().await.is_err() {
+                    return false;
+                }
+                if self.routed_output().await.as_deref() == Some(expected) {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        confirmed || self.routed_output().await.as_deref() == Some(expected)
     }
 }
 
@@ -262,8 +277,9 @@ impl OutputRouter for ExternalOutputRouter {
             // If AUTO was active before this request, a failed switch must keep AUTO
             // instead of silently pinning the currently routed physical sink.
             let previous_configured = self.configured_output().await;
+            let mut changes = self.backend.subscribe_changes();
             self.write_configured_output(Some(id)).await?;
-            if self.wait_for_routed_output(id).await {
+            if self.wait_for_routed_output(id, &mut changes).await {
                 return Ok(Self::describe(selected, true));
             }
 
