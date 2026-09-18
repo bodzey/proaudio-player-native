@@ -15,6 +15,7 @@ mod output_gain;
 mod output_router;
 mod processing_domain;
 mod provider;
+mod radio_directory;
 mod pulse;
 mod source_arbiter;
 mod state;
