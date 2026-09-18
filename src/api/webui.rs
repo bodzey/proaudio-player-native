@@ -113,6 +113,7 @@ fn cpu_temperature_celsius() -> Option<f64> {
 async fn system_info() -> Json<Value> {
     Json(json!({
         "temperature_celsius": cpu_temperature_celsius(),
+        "native_version": env!("CARGO_PKG_VERSION"),
         "release": release_info(),
     }))
 }
