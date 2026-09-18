@@ -19,6 +19,13 @@ jobs:
           bash -n scripts/audio-buses.sh
           bash -n scripts/proaudio-player-audioctl
           bash -n scripts/proaudio-player-output-watch
+      - name: Check hardware-neutral core
+        run: |
+          if grep -RniE 'raspberry|rpi[0-9]|bcm(27|28|43)|mmcblk|vc4|brcmfmac' src; then
+            echo 'board-specific logic belongs in proaudio-player-firmware, not native core' >&2
+            exit 1
+          fi
+
       - name: Check source gain policy
         run: |
           grep -Eq 'mixer_type[[:space:]]+"none"' config/mpd.conf
