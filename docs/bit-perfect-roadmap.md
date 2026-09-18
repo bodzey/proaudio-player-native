@@ -1,6 +1,6 @@
 # Direct / bit-perfect mode roadmap
 
-Normal appliance mode intentionally uses a fixed processing domain so MUSIC, ALERT, MASTER, source arbitration and announcements can coexist without rebuilding the graph.
+Normal appliance mode uses an adaptive mixed processing domain: MUSIC, ALERT and MASTER stay available while PipeWire may follow a compatible active-stream rate. The graph remains float32 and may resample when a source/device combination cannot share one rate.
 
 A future direct mode should be opt-in and mutually exclusive with mixed playback. Its contract should be:
 
