@@ -22,11 +22,13 @@ use tracing::debug;
 
 use super::backend::WebController;
 
-const METER_INTERVAL: Duration = Duration::from_millis(40);
-const METER_WINDOW_MILLIS: u64 = 40;
+const METER_INTERVAL: Duration = Duration::from_millis(20);
+const METER_WINDOW_MILLIS: u64 = 20;
+const CAPTURE_LATENCY_MILLIS: u64 = 20;
 const TOPOLOGY_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_DB: f64 = -60.0;
+const CLIP_AMPLITUDE: f64 = 0.9999;
 const BYTES_PER_STEREO_FRAME: usize = 8;
 
 struct EventStream {
@@ -156,7 +158,7 @@ impl MeterWindow {
             let absolute = value.abs();
             self.peak[channel] = self.peak[channel].max(absolute);
             self.sum_squares[channel] += value * value;
-            self.clip[channel] |= absolute >= 0.999;
+            self.clip[channel] |= absolute >= CLIP_AMPLITUDE;
         }
         self.samples += 1;
     }
@@ -206,7 +208,7 @@ fn spawn_recorder(device: &str, sample_rate: u32) -> Result<Child> {
             .arg("--format=float32le")
             .arg(format!("--rate={sample_rate}"))
             .arg("--channels=2")
-            .arg("--latency-msec=40")
+            .arg(format!("--latency-msec={CAPTURE_LATENCY_MILLIS}"))
             .arg(format!("--device={device}"))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -447,12 +449,38 @@ pub(super) fn router() -> Router<WebController> {
 
 #[cfg(test)]
 mod tests {
-    use super::meter_window_frames;
+    use super::{MeterWindow, amplitude_db, meter_window_frames};
 
     #[test]
-    fn meter_window_tracks_the_processing_rate() {
-        assert_eq!(meter_window_frames(44_100), 1_764);
-        assert_eq!(meter_window_frames(48_000), 1_920);
-        assert_eq!(meter_window_frames(96_000), 3_840);
+    fn meter_window_tracks_the_processing_rate_at_50_hz() {
+        assert_eq!(meter_window_frames(44_100), 882);
+        assert_eq!(meter_window_frames(48_000), 960);
+        assert_eq!(meter_window_frames(96_000), 1_920);
+    }
+
+    #[test]
+    fn amplitude_db_matches_digital_full_scale_math() {
+        assert!((amplitude_db(1.0) - 0.0).abs() < 1e-9);
+        assert!((amplitude_db(0.5) + 6.020_599_913).abs() < 1e-9);
+        assert!((amplitude_db(0.25) + 12.041_199_827).abs() < 1e-9);
+        assert_eq!(amplitude_db(0.0), MIN_DB);
+    }
+
+    #[test]
+    fn meter_window_reports_sample_peak_rms_and_full_scale_clip() {
+        let mut window = MeterWindow::default();
+        window.push(0.5, 0.25);
+        window.push(-0.5, -0.25);
+        let level = window.take().expect("meter level");
+
+        assert!((level.peak[0] + 6.020_599_913).abs() < 1e-9);
+        assert!((level.peak[1] + 12.041_199_827).abs() < 1e-9);
+        assert!((level.rms[0] + 6.020_599_913).abs() < 1e-9);
+        assert!((level.rms[1] + 12.041_199_827).abs() < 1e-9);
+        assert_eq!(level.clip, [false, false]);
+
+        window.push(1.0, 0.999);
+        let full_scale = window.take().expect("full-scale meter level");
+        assert_eq!(full_scale.clip, [true, false]);
     }
 }
