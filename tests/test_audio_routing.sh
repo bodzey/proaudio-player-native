@@ -15,6 +15,7 @@ new_case() {
     : >"$MOCK_PACTL_STATE/calls"
     ln -s "$repo_root/tests/fixtures/pactl" "$test_root/$name/bin/pactl"
     ln -s "$repo_root/tests/fixtures/pw-metadata" "$test_root/$name/bin/pw-metadata"
+    chmod +x "$repo_root/tests/fixtures/pw-metadata"
     export PATH="$test_root/$name/bin:/usr/bin:/bin"
 }
 
