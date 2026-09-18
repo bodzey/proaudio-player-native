@@ -155,8 +155,35 @@ async fn keep_user_mixer_restored(audio: AudioEngine) -> Result<()> {
     }
 }
 
+async fn normalize_mpd_startup() {
+    const ATTEMPTS: usize = 8;
+
+    for attempt in 1..=ATTEMPTS {
+        match command::run("mpc", &["stop"], false, 1).await {
+            Ok(output) if output.code == 0 => {
+                info!("Restored MPD transport normalized to stopped state");
+                return;
+            }
+            Ok(output) if attempt == ATTEMPTS => {
+                warn!(
+                    code = output.code,
+                    stderr = %output.stderr.trim(),
+                    "MPD startup state could not be normalized"
+                );
+            }
+            Err(err) if attempt == ATTEMPTS => {
+                warn!(error = %err, "MPD startup state could not be normalized");
+            }
+            _ => {}
+        }
+
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
 async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     let (store, state, audio, provider) = runtime(config.clone())?;
+    normalize_mpd_startup().await;
 
     let _mixer_state_writer = audio.start_mixer_state_writer();
 
