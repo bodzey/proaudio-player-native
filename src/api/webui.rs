@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 
 use axum::body::Body;
 use axum::extract::Path as AxumPath;
@@ -64,7 +65,7 @@ fn release_value(text: &str, key: &str) -> Option<String> {
     })
 }
 
-fn release_info() -> Value {
+static RELEASE_INFO: LazyLock<Value> = LazyLock::new(|| {
     let text = fs::read_to_string(RELEASE_FILE).unwrap_or_default();
     json!({
         "version": release_value(&text, "PROAUDIO_VERSION"),
@@ -75,6 +76,10 @@ fn release_info() -> Value {
         "native_sha": release_value(&text, "PROAUDIO_NATIVE_SHA"),
         "webui_sha": release_value(&text, "PROAUDIO_WEBUI_SHA"),
     })
+});
+
+fn release_info() -> Value {
+    RELEASE_INFO.clone()
 }
 
 fn temperature_celsius_from_millidegrees(text: &str) -> Option<f64> {
