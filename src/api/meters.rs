@@ -15,7 +15,7 @@ use axum::routing::get;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval, sleep};
 use tracing::debug;
@@ -49,6 +49,7 @@ impl futures_core::Stream for EventStream {
 struct MeterHub {
     sender: broadcast::Sender<String>,
     started: AtomicBool,
+    demand: Notify,
 }
 
 static METER_HUB: OnceLock<MeterHub> = OnceLock::new();
@@ -59,6 +60,7 @@ fn hub() -> &'static MeterHub {
         MeterHub {
             sender,
             started: AtomicBool::new(false),
+            demand: Notify::new(),
         }
     })
 }
@@ -336,19 +338,28 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
     topology.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        if sender.receiver_count() == 0 {
+            abort(&mut music_task);
+            abort(&mut alert_task);
+            abort(&mut master_task);
+            frame.reset();
+
+            // Metering is strictly demand-driven. With no WebUI/SSE subscribers
+            // there are no capture processes, no 50 Hz meter timer work and no
+            // topology polling. Notify is used instead of polling so the runtime
+            // sleeps until the next client subscribes.
+            let demanded = hub().demand.notified();
+            if sender.receiver_count() == 0 {
+                demanded.await;
+            }
+            continue;
+        }
+
         tokio::select! {
             Some(update) = receiver.recv() => {
                 frame.set(update.target, update.level);
             }
             _ = topology.tick() => {
-                if sender.receiver_count() == 0 {
-                    abort(&mut music_task);
-                    abort(&mut alert_task);
-                    abort(&mut master_task);
-                    frame.reset();
-                    continue;
-                }
-
                 if music_task.as_ref().is_none_or(|task| task.is_finished()) {
                     music_task = Some(spawn_monitor(
                         MeterTarget::Music,
@@ -376,9 +387,6 @@ async fn run_meter_runtime(controller: WebController, sender: broadcast::Sender<
                 }
             }
             _ = emit.tick() => {
-                if sender.receiver_count() == 0 {
-                    continue;
-                }
                 sequence = sequence.wrapping_add(1);
                 let payload = json!({
                     "sequence": sequence,
@@ -412,8 +420,9 @@ fn ensure_started(controller: WebController) {
 }
 
 async fn meter_events(State(controller): State<WebController>) -> impl IntoResponse {
-    ensure_started(controller);
     let mut receiver = hub().sender.subscribe();
+    hub().demand.notify_one();
+    ensure_started(controller);
     let (sender, stream) = mpsc::channel(8);
 
     tokio::spawn(async move {
