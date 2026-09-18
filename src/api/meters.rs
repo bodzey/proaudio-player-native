@@ -449,7 +449,7 @@ pub(super) fn router() -> Router<WebController> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MeterWindow, amplitude_db, meter_window_frames};
+    use super::{MIN_DB, MeterWindow, amplitude_db, meter_window_frames};
 
     #[test]
     fn meter_window_tracks_the_processing_rate_at_50_hz() {
