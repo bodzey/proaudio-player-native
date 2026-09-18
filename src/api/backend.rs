@@ -690,7 +690,7 @@ impl WebController {
                 } else if let Some(c) = ALSA_DB_SCALE_RE.captures(content_block) {
                     let min = c.get(1).and_then(|m| m.as_str().parse::<f64>().ok());
                     let step = c.get(2).and_then(|m| m.as_str().parse::<f64>().ok());
-                    let limits = limits_re.captures(&details.stdout);
+                    let limits = ALSA_LIMITS_RE.captures(&details.stdout);
                     let raw_min = limits
                         .as_ref()
                         .and_then(|v| v.get(1))
@@ -719,7 +719,7 @@ impl WebController {
                     _ if percent > 0.0 => (20.0 * (percent / 100.0).log10()).clamp(-60.0, 0.0),
                     _ => -60.0,
                 };
-                let limits = limits_re.captures(&details.stdout);
+                let limits = ALSA_LIMITS_RE.captures(&details.stdout);
                 result.push(json!({
                     "card": card,
                     "card_name": card_name,
