@@ -37,6 +37,7 @@ use crate::fourstream;
 use crate::mpd::MpdMonitor;
 use crate::output_router::{OutputDescriptor, DEFAULT_MASTER_SINK};
 use crate::source_arbiter::SharedSourceState;
+use crate::radio_directory;
 
 use super::webui;
 
@@ -1759,6 +1760,13 @@ fn validate_stream_url(value: &str) -> Result<String> {
     Ok(parsed.to_string())
 }
 
+async fn radio_stations() -> ApiResult {
+    radio_directory::ukrainian_stations()
+        .await
+        .map(|items| Json(json!({ "source": "radio-browser", "items": items })))
+        .map_err(map_internal)
+}
+
 async fn play_stream(
     State(controller): State<WebController>,
     Json(body): Json<StreamBody>,
@@ -1997,6 +2005,7 @@ fn api_routes() -> Router<WebController> {
         .route("/library/update", post(refresh_library))
         .route("/library/play", post(play_file))
         .route("/streams/play", post(play_stream))
+        .route("/radio/stations", get(radio_stations))
         .route("/playlists", get(playlists))
         .route("/playlists/load", post(load_playlist))
         .route("/queue", get(queue))
