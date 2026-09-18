@@ -20,7 +20,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 use tokio::time::sleep;
 use tracing::{debug, info};
 use url::Url;
@@ -290,6 +290,7 @@ pub struct WebController {
     pub state: SharedRuntimeState,
     pub source_state: SharedSourceState,
     events: broadcast::Sender<String>,
+    event_demand: Arc<Notify>,
     audio_control_lock: Arc<Mutex<()>>,
 }
 
@@ -341,6 +342,7 @@ impl WebController {
             state,
             source_state,
             events,
+            event_demand: Arc::new(Notify::new()),
             audio_control_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -1500,6 +1502,7 @@ async fn capabilities() -> Json<Value> {
 
 async fn events(State(controller): State<WebController>) -> impl IntoResponse {
     let mut receiver = controller.events.subscribe();
+    controller.event_demand.notify_one();
     let (sender, stream) = mpsc::channel(4);
     tokio::spawn(async move {
         loop {
@@ -2258,10 +2261,16 @@ pub async fn serve(controller: WebController) -> Result<()> {
     let event_controller = controller.clone();
     tokio::spawn(async move {
         loop {
-            if event_controller.events.receiver_count() > 0 {
-                if let Ok(status) = event_controller.status().await {
-                    let _ = event_controller.events.send(status.to_string());
+            if event_controller.events.receiver_count() == 0 {
+                let demanded = event_controller.event_demand.notified();
+                if event_controller.events.receiver_count() == 0 {
+                    demanded.await;
                 }
+                continue;
+            }
+
+            if let Ok(status) = event_controller.status().await {
+                let _ = event_controller.events.send(status.to_string());
             }
             sleep(Duration::from_secs(1)).await;
         }
