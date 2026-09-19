@@ -56,7 +56,12 @@ case "$command_name" in
         printf '%s|%s\n' "$command_name" "$*" >>"$state/calls"
         ;;
     subscribe)
-        exit 0
+        if [[ -f "$state/subscribe-events" ]]; then
+            cat "$state/subscribe-events"
+        fi
+        if [[ -f "$state/subscribe-hold" ]]; then
+            sleep "$(<"$state/subscribe-hold")"
+        fi
         ;;
     *)
         printf 'unsupported mock pactl command: %s %s\n' "$command_name" "$*" >&2
