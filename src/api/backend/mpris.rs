@@ -206,20 +206,6 @@ impl MprisMonitor {
         self.cache.read().await.get(source).map(CachedPlayer::snapshot)
     }
 
-    pub(super) async fn service(&self, source: &str) -> Option<String> {
-        self.cache
-            .read()
-            .await
-            .get(source)
-            .and_then(|player| {
-                player
-                    .value
-                    .get("_service")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-    }
-
     pub(super) async fn control(&self, service: &str, method: &str) -> Result<()> {
         let connection = self
             .connection
@@ -388,10 +374,6 @@ impl MprisMonitor {
 impl WebController {
     pub(super) async fn mpris_player(&self, source: &str) -> Option<Value> {
         self.mpris.snapshot(source).await
-    }
-
-    pub(super) async fn mpris_service(&self, source: &str) -> Option<String> {
-        self.mpris.service(source).await
     }
 
     pub(super) async fn mpris_control(&self, service: &str, method: &str) -> Result<()> {
