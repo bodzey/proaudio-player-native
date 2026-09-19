@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket as StdUdpSocket};
 use std::time::Duration;
@@ -32,6 +33,18 @@ const SERVER: &str = concat!("Linux UPnP/1.0 ProAudioPlayer/", env!("CARGO_PKG_V
 
 type UpnpError = (StatusCode, String);
 type UpnpResult = std::result::Result<Response, UpnpError>;
+
+pub fn public_enabled() -> bool {
+    env::var("PROAUDIO_UPNP_PUBLIC")
+        .ok()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true)
+}
 
 #[derive(Debug)]
 struct PlayerSnapshot {
@@ -504,6 +517,10 @@ async fn connection_manager_description() -> Response {
 }
 
 pub fn router() -> Router<WebController> {
+    if !public_enabled() {
+        return Router::new();
+    }
+
     Router::new()
         .route("/upnp/device.xml", get(description))
         .route("/description.xml", get(description))

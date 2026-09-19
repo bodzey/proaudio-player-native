@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::env;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -13,6 +14,13 @@ const AVTRANSPORT_ENDPOINTS: &[&str] = &[
     "http://169.254.253.1:49494/upnp/control/rendertransport1",
     "http://127.0.0.1:49494/upnp/control/rendertransport1",
 ];
+
+fn configured_endpoint() -> Option<String> {
+    env::var("PROAUDIO_DLNA_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 
 static CLIENT: OnceLock<DlnaClient> = OnceLock::new();
 
@@ -91,12 +99,24 @@ impl DlnaClient {
             return Ok(cached);
         }
 
-        // gmediarender is an internal decoder worker on a private dummy network.
-        // The legacy loopback endpoint remains a compatibility fallback for an
-        // already-running older image during an in-place native daemon upgrade.
-        for endpoint in AVTRANSPORT_ENDPOINTS {
-            if self.soap_at(endpoint, "GetTransportInfo", "").await.is_ok() {
-                let endpoint = (*endpoint).to_owned();
+        // Transport placement is an integration concern: firmware can use a
+        // private address while a single-container runtime can use loopback.
+        let mut endpoints = Vec::with_capacity(AVTRANSPORT_ENDPOINTS.len() + 1);
+        if let Some(endpoint) = configured_endpoint() {
+            endpoints.push(endpoint);
+        }
+        endpoints.extend(
+            AVTRANSPORT_ENDPOINTS
+                .iter()
+                .map(|value| (*value).to_owned()),
+        );
+
+        for endpoint in endpoints {
+            if self
+                .soap_at(&endpoint, "GetTransportInfo", "")
+                .await
+                .is_ok()
+            {
                 *self.endpoint.lock().await = Some(endpoint.clone());
                 return Ok(Some(endpoint));
             }
