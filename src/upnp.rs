@@ -533,40 +533,232 @@ async fn description(State(controller): State<WebController>, headers: HeaderMap
     )
 }
 
-fn scpd(actions: &[&str]) -> Response {
-    let action_list = actions
+fn argument_xml(name: &str, direction: &str, state_variable: &str) -> String {
+    format!(
+        "<argument><name>{}</name><direction>{}</direction><relatedStateVariable>{}</relatedStateVariable></argument>",
+        xml_escape(name),
+        xml_escape(direction),
+        xml_escape(state_variable)
+    )
+}
+
+fn action_xml(name: &str, arguments: &[(&str, &str, &str)]) -> String {
+    let arguments = arguments
         .iter()
-        .map(|name| format!("<action><name>{name}</name></action>"))
+        .map(|(name, direction, state)| argument_xml(name, direction, state))
+        .collect::<String>();
+    if arguments.is_empty() {
+        format!("<action><name>{}</name></action>", xml_escape(name))
+    } else {
+        format!(
+            "<action><name>{}</name><argumentList>{arguments}</argumentList></action>",
+            xml_escape(name)
+        )
+    }
+}
+
+fn state_variable_xml(name: &str, data_type: &str) -> String {
+    format!(
+        "<stateVariable sendEvents=\"no\"><name>{}</name><dataType>{}</dataType></stateVariable>",
+        xml_escape(name),
+        xml_escape(data_type)
+    )
+}
+
+fn scpd_response(actions: &[String], state_variables: &[(&str, &str)]) -> Response {
+    let action_list = actions.concat();
+    let state_table = state_variables
+        .iter()
+        .map(|(name, data_type)| state_variable_xml(name, data_type))
         .collect::<String>();
     text_response(
         format!(
-            "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList>{action_list}</actionList><serviceStateTable></serviceStateTable></scpd>"
+            "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList>{action_list}</actionList><serviceStateTable>{state_table}</serviceStateTable></scpd>"
         ),
         "text/xml; charset=utf-8",
     )
 }
 
 async fn avtransport_description() -> Response {
-    scpd(&[
-        "SetAVTransportURI",
-        "SetNextAVTransportURI",
-        "GetTransportInfo",
-        "GetPositionInfo",
-        "GetMediaInfo",
-        "GetDeviceCapabilities",
-        "GetTransportSettings",
-        "GetCurrentTransportActions",
-        "Play",
-        "Pause",
-        "Stop",
-        "Seek",
-        "Next",
-        "Previous",
-    ])
+    let actions = vec![
+        action_xml(
+            "SetAVTransportURI",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("CurrentURI", "in", "AVTransportURI"),
+                ("CurrentURIMetaData", "in", "AVTransportURIMetaData"),
+            ],
+        ),
+        action_xml(
+            "SetNextAVTransportURI",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("NextURI", "in", "NextAVTransportURI"),
+                ("NextURIMetaData", "in", "NextAVTransportURIMetaData"),
+            ],
+        ),
+        action_xml(
+            "GetTransportInfo",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("CurrentTransportState", "out", "TransportState"),
+                ("CurrentTransportStatus", "out", "TransportStatus"),
+                ("CurrentSpeed", "out", "TransportPlaySpeed"),
+            ],
+        ),
+        action_xml(
+            "GetPositionInfo",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("Track", "out", "CurrentTrack"),
+                ("TrackDuration", "out", "CurrentTrackDuration"),
+                ("TrackMetaData", "out", "CurrentTrackMetaData"),
+                ("TrackURI", "out", "CurrentTrackURI"),
+                ("RelTime", "out", "RelativeTimePosition"),
+                ("AbsTime", "out", "AbsoluteTimePosition"),
+                ("RelCount", "out", "RelativeCounterPosition"),
+                ("AbsCount", "out", "AbsoluteCounterPosition"),
+            ],
+        ),
+        action_xml(
+            "GetMediaInfo",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("NrTracks", "out", "NumberOfTracks"),
+                ("MediaDuration", "out", "CurrentMediaDuration"),
+                ("CurrentURI", "out", "AVTransportURI"),
+                ("CurrentURIMetaData", "out", "AVTransportURIMetaData"),
+                ("NextURI", "out", "NextAVTransportURI"),
+                ("NextURIMetaData", "out", "NextAVTransportURIMetaData"),
+                ("PlayMedium", "out", "PlaybackStorageMedium"),
+                ("RecordMedium", "out", "RecordStorageMedium"),
+                ("WriteStatus", "out", "RecordMediumWriteStatus"),
+            ],
+        ),
+        action_xml(
+            "GetDeviceCapabilities",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("PlayMedia", "out", "PossiblePlaybackStorageMedia"),
+                ("RecMedia", "out", "PossibleRecordStorageMedia"),
+                ("RecQualityModes", "out", "PossibleRecordQualityModes"),
+            ],
+        ),
+        action_xml(
+            "GetTransportSettings",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("PlayMode", "out", "CurrentPlayMode"),
+                ("RecQualityMode", "out", "CurrentRecordQualityMode"),
+            ],
+        ),
+        action_xml(
+            "GetCurrentTransportActions",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("Actions", "out", "CurrentTransportActions"),
+            ],
+        ),
+        action_xml(
+            "Play",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("Speed", "in", "TransportPlaySpeed"),
+            ],
+        ),
+        action_xml("Pause", &[("InstanceID", "in", "A_ARG_TYPE_InstanceID")]),
+        action_xml("Stop", &[("InstanceID", "in", "A_ARG_TYPE_InstanceID")]),
+        action_xml(
+            "Seek",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("Unit", "in", "A_ARG_TYPE_SeekMode"),
+                ("Target", "in", "A_ARG_TYPE_SeekTarget"),
+            ],
+        ),
+        action_xml("Next", &[("InstanceID", "in", "A_ARG_TYPE_InstanceID")]),
+        action_xml("Previous", &[("InstanceID", "in", "A_ARG_TYPE_InstanceID")]),
+    ];
+    scpd_response(
+        &actions,
+        &[
+            ("A_ARG_TYPE_InstanceID", "ui4"),
+            ("AVTransportURI", "string"),
+            ("AVTransportURIMetaData", "string"),
+            ("NextAVTransportURI", "string"),
+            ("NextAVTransportURIMetaData", "string"),
+            ("TransportState", "string"),
+            ("TransportStatus", "string"),
+            ("TransportPlaySpeed", "string"),
+            ("CurrentTrack", "ui4"),
+            ("CurrentTrackDuration", "string"),
+            ("CurrentTrackMetaData", "string"),
+            ("CurrentTrackURI", "string"),
+            ("RelativeTimePosition", "string"),
+            ("AbsoluteTimePosition", "string"),
+            ("RelativeCounterPosition", "i4"),
+            ("AbsoluteCounterPosition", "i4"),
+            ("NumberOfTracks", "ui4"),
+            ("CurrentMediaDuration", "string"),
+            ("PlaybackStorageMedium", "string"),
+            ("RecordStorageMedium", "string"),
+            ("RecordMediumWriteStatus", "string"),
+            ("PossiblePlaybackStorageMedia", "string"),
+            ("PossibleRecordStorageMedia", "string"),
+            ("PossibleRecordQualityModes", "string"),
+            ("CurrentPlayMode", "string"),
+            ("CurrentRecordQualityMode", "string"),
+            ("CurrentTransportActions", "string"),
+            ("A_ARG_TYPE_SeekMode", "string"),
+            ("A_ARG_TYPE_SeekTarget", "string"),
+        ],
+    )
 }
 
 async fn rendering_description() -> Response {
-    scpd(&["GetVolume", "SetVolume", "GetMute", "SetMute"])
+    let actions = vec![
+        action_xml(
+            "GetVolume",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("Channel", "in", "A_ARG_TYPE_Channel"),
+                ("CurrentVolume", "out", "Volume"),
+            ],
+        ),
+        action_xml(
+            "SetVolume",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("Channel", "in", "A_ARG_TYPE_Channel"),
+                ("DesiredVolume", "in", "Volume"),
+            ],
+        ),
+        action_xml(
+            "GetMute",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("Channel", "in", "A_ARG_TYPE_Channel"),
+                ("CurrentMute", "out", "Mute"),
+            ],
+        ),
+        action_xml(
+            "SetMute",
+            &[
+                ("InstanceID", "in", "A_ARG_TYPE_InstanceID"),
+                ("Channel", "in", "A_ARG_TYPE_Channel"),
+                ("DesiredMute", "in", "Mute"),
+            ],
+        ),
+    ];
+    scpd_response(
+        &actions,
+        &[
+            ("A_ARG_TYPE_InstanceID", "ui4"),
+            ("A_ARG_TYPE_Channel", "string"),
+            ("Volume", "ui2"),
+            ("Mute", "boolean"),
+        ],
+    )
 }
 
 async fn connection_manager_description() -> Response {
