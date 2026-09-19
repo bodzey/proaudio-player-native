@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Native ProAudio network audio player control plane"
-license = "MIT"
+publish = false
+license-file = "LICENSE"
 
 [dependencies]
 anyhow = "1.0"
@@ -28,3 +29,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5"
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = 0
+incremental = false
