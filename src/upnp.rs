@@ -277,13 +277,7 @@ async fn soap_control(
 
     let player = if matches!(
         action,
-        "GetTransportInfo"
-            | "GetPositionInfo"
-            | "GetMediaInfo"
-            | "GetDeviceCapabilities"
-            | "GetTransportSettings"
-            | "GetVolume"
-            | "GetMute"
+        "GetTransportInfo" | "GetPositionInfo" | "GetMediaInfo" | "GetVolume" | "GetMute"
     ) {
         Some(player_snapshot(&controller).await.map_err(service_error)?)
     } else {
