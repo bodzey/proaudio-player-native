@@ -485,20 +485,12 @@ async fn soap_control(
     ))
 }
 
-async fn description(State(controller): State<WebController>, headers: HeaderMap) -> Response {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("127.0.0.1:{}", controller.config.api.port));
-    let host = xml_escape(&host);
-    let udn = device_uuid();
-    let serial = device_serial(&udn);
+fn device_description_xml(host: &str, udn: &str) -> String {
+    let host = xml_escape(host);
+    let serial = device_serial(udn);
     let version = env!("CARGO_PKG_VERSION");
-
-    text_response(
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
  <specVersion><major>1</major><minor>0</minor></specVersion><URLBase>http://{host}/</URLBase>
  <device><deviceType>{DEVICE_TYPE}</deviceType><friendlyName>{NAME}</friendlyName>
@@ -509,7 +501,17 @@ async fn description(State(controller): State<WebController>, headers: HeaderMap
    <service><serviceType>{RENDERING_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId><SCPDURL>/upnp/renderingcontrol.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL></eventSubURL></service>
    <service><serviceType>{CONNECTION_MANAGER_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId><SCPDURL>/upnp/connectionmanager.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL></eventSubURL></service>
   </serviceList></device></root>"#
-        ),
+    )
+}
+
+async fn description(State(controller): State<WebController>, headers: HeaderMap) -> Response {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("127.0.0.1:{}", controller.config.api.port));
+    text_response(
+        device_description_xml(&host, &device_uuid()),
         "text/xml; charset=utf-8",
     )
 }
@@ -790,16 +792,12 @@ mod tests {
 
     #[test]
     fn device_description_contract_requires_connection_manager() {
-        let xml = format!(
-            r#"<serviceList>
-<service><serviceType>{AVTRANSPORT_SERVICE}</serviceType></service>
-<service><serviceType>{RENDERING_SERVICE}</serviceType></service>
-<service><serviceType>{CONNECTION_MANAGER_SERVICE}</serviceType></service>
-</serviceList>"#
-        );
-        assert!(xml.contains("ConnectionManager:1"));
-        assert!(xml.contains("AVTransport:1"));
-        assert!(xml.contains("RenderingControl:1"));
+        let xml = device_description_xml("192.0.2.20:8080", "uuid:test-renderer");
+        assert!(xml.contains(CONNECTION_MANAGER_SERVICE));
+        assert!(xml.contains("/upnp/connectionmanager.xml"));
+        assert!(xml.contains(AVTRANSPORT_SERVICE));
+        assert!(xml.contains(RENDERING_SERVICE));
+        assert!(xml.contains("<URLBase>http://192.0.2.20:8080/</URLBase>"));
     }
 
     #[test]
