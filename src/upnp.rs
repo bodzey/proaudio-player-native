@@ -26,6 +26,20 @@ const UPNP_BODY_LIMIT_BYTES: usize = 128 * 1024;
 const DEVICE_TYPE: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_SERVICE: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
+const CONNECTION_MANAGER_SERVICE: &str =
+    "urn:schemas-upnp-org:service:ConnectionManager:1";
+const SINK_PROTOCOL_INFO: &str = concat!(
+    "http-get:*:audio/mpeg:*,",
+    "http-get:*:audio/mp4:*,",
+    "http-get:*:audio/aac:*,",
+    "http-get:*:audio/flac:*,",
+    "http-get:*:audio/x-flac:*,",
+    "http-get:*:audio/ogg:*,",
+    "http-get:*:application/ogg:*,",
+    "http-get:*:audio/opus:*,",
+    "http-get:*:audio/wav:*,",
+    "http-get:*:audio/x-wav:*"
+);
 const NAME: &str = "ProAudio Player";
 const SERVER: &str = concat!("Linux UPnP/1.0 ProAudioPlayer/", env!("CARGO_PKG_VERSION"));
 
@@ -249,7 +263,10 @@ async fn soap_control(
     let (service, action) = action_header
         .split_once('#')
         .ok_or_else(|| bad_request("Missing SOAPACTION"))?;
-    if !matches!(service, AVTRANSPORT_SERVICE | RENDERING_SERVICE) {
+    if !matches!(
+        service,
+        AVTRANSPORT_SERVICE | RENDERING_SERVICE | CONNECTION_MANAGER_SERVICE
+    ) {
         return Err(bad_request("Unsupported UPnP service"));
     }
 
@@ -258,14 +275,27 @@ async fn soap_control(
         return Err(bad_request("Invalid SOAP XML"));
     }
 
-    let player = player_snapshot(&controller).await.map_err(service_error)?;
+    let player = if matches!(
+        action,
+        "GetTransportInfo"
+            | "GetPositionInfo"
+            | "GetMediaInfo"
+            | "GetCurrentTransportActions"
+            | "GetVolume"
+            | "GetMute"
+    ) {
+        Some(player_snapshot(&controller).await.map_err(service_error)?)
+    } else {
+        None
+    };
+    let player = player.as_ref();
     let mut values: Vec<(&str, String)> = Vec::new();
 
     match action {
         "GetTransportInfo" if service == AVTRANSPORT_SERVICE => values.extend([
             (
                 "CurrentTransportState",
-                match player.state.as_str() {
+                match player.expect("player snapshot for transport query").state.as_str() {
                     "playing" => "PLAYING",
                     "paused" => "PAUSED_PLAYBACK",
                     _ => "STOPPED",
@@ -277,18 +307,36 @@ async fn soap_control(
         ]),
         "GetPositionInfo" if service == AVTRANSPORT_SERVICE => values.extend([
             ("Track", "1".into()),
-            ("TrackDuration", clock(player.duration_ms)),
+            (
+                "TrackDuration",
+                clock(player.expect("player snapshot for position query").duration_ms),
+            ),
             ("TrackMetaData", String::new()),
-            ("TrackURI", player.track_uri.clone()),
-            ("RelTime", clock(player.position_ms)),
-            ("AbsTime", clock(player.position_ms)),
+            (
+                "TrackURI",
+                player.expect("player snapshot for position query").track_uri.clone(),
+            ),
+            (
+                "RelTime",
+                clock(player.expect("player snapshot for position query").position_ms),
+            ),
+            (
+                "AbsTime",
+                clock(player.expect("player snapshot for position query").position_ms),
+            ),
             ("RelCount", "0".into()),
             ("AbsCount", "0".into()),
         ]),
         "GetMediaInfo" if service == AVTRANSPORT_SERVICE => values.extend([
             ("NrTracks", "1".into()),
-            ("MediaDuration", clock(player.duration_ms)),
-            ("CurrentURI", player.track_uri.clone()),
+            (
+                "MediaDuration",
+                clock(player.expect("player snapshot for media query").duration_ms),
+            ),
+            (
+                "CurrentURI",
+                player.expect("player snapshot for media query").track_uri.clone(),
+            ),
             ("CurrentURIMetaData", String::new()),
             ("NextURI", String::new()),
             ("NextURIMetaData", String::new()),
@@ -344,10 +392,24 @@ async fn soap_control(
                 .map_err(service_error)?;
         }
         "GetVolume" if service == RENDERING_SERVICE => {
-            values.push(("CurrentVolume", format!("{:.0}", player.volume_percent)));
+            values.push((
+                "CurrentVolume",
+                format!(
+                    "{:.0}",
+                    player.expect("player snapshot for volume query").volume_percent
+                ),
+            ));
         }
         "GetMute" if service == RENDERING_SERVICE => {
-            values.push(("CurrentMute", if player.muted { "1" } else { "0" }.into()));
+            values.push((
+                "CurrentMute",
+                if player.expect("player snapshot for mute query").muted {
+                    "1"
+                } else {
+                    "0"
+                }
+                .into(),
+            ));
         }
         "SetVolume" if service == RENDERING_SERVICE => {
             set_volume(&controller, &soap_value(body, "DesiredVolume"))
@@ -358,6 +420,30 @@ async fn soap_control(
             set_mute(&controller, &soap_value(body, "DesiredMute"))
                 .await
                 .map_err(service_error)?;
+        }
+        "GetProtocolInfo" if service == CONNECTION_MANAGER_SERVICE => {
+            values.extend([
+                ("Source", String::new()),
+                ("Sink", SINK_PROTOCOL_INFO.to_owned()),
+            ]);
+        }
+        "GetCurrentConnectionIDs" if service == CONNECTION_MANAGER_SERVICE => {
+            values.push(("ConnectionIDs", "0".into()));
+        }
+        "GetCurrentConnectionInfo" if service == CONNECTION_MANAGER_SERVICE => {
+            let connection_id = soap_value(body, "ConnectionID");
+            if !connection_id.is_empty() && connection_id != "0" {
+                return Err(bad_request("Invalid ConnectionID"));
+            }
+            values.extend([
+                ("RcsID", "0".into()),
+                ("AVTransportID", "0".into()),
+                ("ProtocolInfo", "http-get:*:*:*".into()),
+                ("PeerConnectionManager", String::new()),
+                ("PeerConnectionID", "-1".into()),
+                ("Direction", "Input".into()),
+                ("Status", "OK".into()),
+            ]);
         }
         "Play" | "Pause" | "Stop" | "Next" | "Previous" if service == AVTRANSPORT_SERVICE => {
             let transport_action = if action == "Previous" {
@@ -447,12 +533,57 @@ async fn rendering_description() -> Response {
     scpd(&["GetVolume", "SetVolume", "GetMute", "SetMute"])
 }
 
+async fn connection_manager_description() -> Response {
+    text_response(
+        r#"<?xml version="1.0"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+ <specVersion><major>1</major><minor>0</minor></specVersion>
+ <actionList>
+  <action><name>GetProtocolInfo</name><argumentList>
+   <argument><name>Source</name><direction>out</direction><relatedStateVariable>SourceProtocolInfo</relatedStateVariable></argument>
+   <argument><name>Sink</name><direction>out</direction><relatedStateVariable>SinkProtocolInfo</relatedStateVariable></argument>
+  </argumentList></action>
+  <action><name>GetCurrentConnectionIDs</name><argumentList>
+   <argument><name>ConnectionIDs</name><direction>out</direction><relatedStateVariable>CurrentConnectionIDs</relatedStateVariable></argument>
+  </argumentList></action>
+  <action><name>GetCurrentConnectionInfo</name><argumentList>
+   <argument><name>ConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>
+   <argument><name>RcsID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RcsID</relatedStateVariable></argument>
+   <argument><name>AVTransportID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_AVTransportID</relatedStateVariable></argument>
+   <argument><name>ProtocolInfo</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ProtocolInfo</relatedStateVariable></argument>
+   <argument><name>PeerConnectionManager</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionManager</relatedStateVariable></argument>
+   <argument><name>PeerConnectionID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>
+   <argument><name>Direction</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Direction</relatedStateVariable></argument>
+   <argument><name>Status</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionStatus</relatedStateVariable></argument>
+  </argumentList></action>
+ </actionList>
+ <serviceStateTable>
+  <stateVariable sendEvents="yes"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>
+  <stateVariable sendEvents="yes"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable>
+  <stateVariable sendEvents="yes"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable>
+  <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionStatus</name><dataType>string</dataType><allowedValueList><allowedValue>OK</allowedValue><allowedValue>ContentFormatMismatch</allowedValue><allowedValue>InsufficientBandwidth</allowedValue><allowedValue>UnreliableChannel</allowedValue><allowedValue>Unknown</allowedValue></allowedValueList></stateVariable>
+  <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionManager</name><dataType>string</dataType></stateVariable>
+  <stateVariable sendEvents="no"><name>A_ARG_TYPE_Direction</name><dataType>string</dataType><allowedValueList><allowedValue>Input</allowedValue><allowedValue>Output</allowedValue></allowedValueList></stateVariable>
+  <stateVariable sendEvents="no"><name>A_ARG_TYPE_ProtocolInfo</name><dataType>string</dataType></stateVariable>
+  <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionID</name><dataType>i4</dataType></stateVariable>
+  <stateVariable sendEvents="no"><name>A_ARG_TYPE_AVTransportID</name><dataType>i4</dataType></stateVariable>
+  <stateVariable sendEvents="no"><name>A_ARG_TYPE_RcsID</name><dataType>i4</dataType></stateVariable>
+ </serviceStateTable>
+</scpd>"#,
+        "text/xml; charset=utf-8",
+    )
+}
+
 pub fn router() -> Router<WebController> {
     Router::new()
         .route("/upnp/device.xml", get(description))
         .route("/description.xml", get(description))
         .route("/upnp/avtransport.xml", get(avtransport_description))
         .route("/upnp/renderingcontrol.xml", get(rendering_description))
+        .route(
+            "/upnp/connectionmanager.xml",
+            get(connection_manager_description),
+        )
         .route("/upnp/control", post(soap_control))
         .layer(DefaultBodyLimit::max(UPNP_BODY_LIMIT_BYTES))
 }
@@ -473,6 +604,10 @@ fn alive_messages(port: u16, udn: &str) -> Vec<Vec<u8>> {
         (
             RENDERING_SERVICE.to_owned(),
             format!("{udn}::{RENDERING_SERVICE}"),
+        ),
+        (
+            CONNECTION_MANAGER_SERVICE.to_owned(),
+            format!("{udn}::{CONNECTION_MANAGER_SERVICE}"),
         ),
     ]
     .into_iter()
@@ -518,6 +653,7 @@ fn ssdp_response(message: &str, peer: SocketAddr, port: u16, udn: &str) -> Optio
         && requested != DEVICE_TYPE
         && requested != AVTRANSPORT_SERVICE
         && requested != RENDERING_SERVICE
+        && requested != CONNECTION_MANAGER_SERVICE
     {
         return None;
     }
@@ -619,5 +755,37 @@ mod tests {
         )
         .expect("AVTransport must be discoverable");
         assert!(String::from_utf8_lossy(&response).contains(AVTRANSPORT_SERVICE));
+    }
+
+    #[test]
+    fn ssdp_supports_required_connection_manager_service() {
+        let response = ssdp_response(
+            &format!(
+                "M-SEARCH * HTTP/1.1\r\nMAN: \"ssdp:discover\"\r\nST: {CONNECTION_MANAGER_SERVICE}\r\n\r\n"
+            ),
+            "192.0.2.10:1900".parse().expect("valid test peer"),
+            8080,
+            "uuid:test",
+        )
+        .expect("ConnectionManager must be discoverable");
+        assert!(String::from_utf8_lossy(&response).contains(CONNECTION_MANAGER_SERVICE));
+    }
+
+    #[test]
+    fn sink_protocol_info_covers_common_pc_and_android_audio_formats() {
+        for mime in [
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/aac",
+            "audio/flac",
+            "audio/ogg",
+            "audio/opus",
+            "audio/wav",
+        ] {
+            assert!(
+                SINK_PROTOCOL_INFO.contains(mime),
+                "missing renderer MIME capability: {mime}"
+            );
+        }
     }
 }
