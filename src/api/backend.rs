@@ -888,7 +888,7 @@ impl WebController {
                 .get("_service")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("MPRIS-сервіс активного джерела не знайдено"))?;
-            let method = match action {
+            let mpris_method = match action {
                 "play" => "Play",
                 "pause" => "Pause",
                 "stop" => "Stop",
@@ -896,7 +896,28 @@ impl WebController {
                 "prev" => "Previous",
                 _ => unreachable!(),
             };
-            self.mpris_control(service, method).await?;
+
+            if backend == "airplay-mpris" {
+                let airplay_method = match action {
+                    "play" => "Resume",
+                    "pause" => "Pause",
+                    "stop" => "Stop",
+                    "next" => "Next",
+                    "prev" => "Previous",
+                    _ => unreachable!(),
+                };
+                if let Err(error) = self.airplay_control(airplay_method).await {
+                    debug!(
+                        action,
+                        error = %error,
+                        "Shairport native control unavailable; falling back to MPRIS"
+                    );
+                    self.mpris_control(service, mpris_method).await?;
+                }
+            } else {
+                self.mpris_control(service, mpris_method).await?;
+            }
+
             if backend == "spotify-mpris" && action == "stop" {
                 // spotifyd can acknowledge MPRIS Stop while its existing audio
                 // stream keeps draining. Terminating the identified receiver is
