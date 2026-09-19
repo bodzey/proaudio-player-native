@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::env;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -15,12 +16,40 @@ const AVTRANSPORT_ENDPOINTS: &[&str] = &[
     "http://127.0.0.1:49494/upnp/control/rendertransport1",
 ];
 const PLAYER_CACHE_TTL: Duration = Duration::from_secs(5);
+const DEFAULT_DLNA_PORT: u16 = 49494;
+const SSDP_MULTICAST: &str = "239.255.255.250:1900";
 
 fn configured_endpoint() -> Option<String> {
     env::var("PROAUDIO_DLNA_ENDPOINT")
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn configured_port() -> u16 {
+    env::var("PROAUDIO_DLNA_PORT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(DEFAULT_DLNA_PORT)
+}
+
+fn transport_endpoint(ip: Ipv4Addr, port: u16) -> Option<String> {
+    if ip.is_loopback() || ip.is_unspecified() || port == 0 {
+        return None;
+    }
+    Some(format!(
+        "http://{ip}:{port}/upnp/control/rendertransport1"
+    ))
+}
+
+fn routed_transport_endpoint() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect(SSDP_MULTICAST).ok()?;
+    let IpAddr::V4(ip) = socket.local_addr().ok()?.ip() else {
+        return None;
+    };
+    transport_endpoint(ip, configured_port())
 }
 
 static CLIENT: OnceLock<DlnaClient> = OnceLock::new();
@@ -109,17 +138,26 @@ impl DlnaClient {
             return Ok(cached);
         }
 
-        // Transport placement is an integration concern: firmware can use a
-        // private address while a single-container runtime can use loopback.
-        let mut endpoints = Vec::with_capacity(AVTRANSPORT_ENDPOINTS.len() + 1);
+        // Transport placement is an integration concern. A deployment may
+        // provide an explicit endpoint, expose the renderer on the host's
+        // routed LAN address, or retain one of the legacy private/loopback
+        // placements. Prefer the explicit adapter contract, then the address
+        // selected by the kernel route to the SSDP multicast group.
+        let mut endpoints = Vec::with_capacity(AVTRANSPORT_ENDPOINTS.len() + 2);
         if let Some(endpoint) = configured_endpoint() {
             endpoints.push(endpoint);
         }
-        endpoints.extend(
-            AVTRANSPORT_ENDPOINTS
-                .iter()
-                .map(|value| (*value).to_owned()),
-        );
+        if let Some(endpoint) = routed_transport_endpoint() {
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+        for endpoint in AVTRANSPORT_ENDPOINTS {
+            let endpoint = (*endpoint).to_owned();
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
 
         for endpoint in endpoints {
             if self
@@ -485,6 +523,17 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
+    }
+
+    #[test]
+    fn transport_endpoint_rejects_loopback_and_unspecified_addresses() {
+        assert_eq!(
+            transport_endpoint(Ipv4Addr::new(192, 168, 88, 122), 49494).as_deref(),
+            Some("http://192.168.88.122:49494/upnp/control/rendertransport1")
+        );
+        assert_eq!(transport_endpoint(Ipv4Addr::LOCALHOST, 49494), None);
+        assert_eq!(transport_endpoint(Ipv4Addr::UNSPECIFIED, 49494), None);
+        assert_eq!(transport_endpoint(Ipv4Addr::new(192, 168, 1, 2), 0), None);
     }
 
     #[test]
