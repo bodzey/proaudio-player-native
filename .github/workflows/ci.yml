@@ -137,6 +137,14 @@ jobs:
         with:
           toolchain: "1.88"
           components: clippy
+      - name: Generate lockfile for dependency update
+        run: cargo generate-lockfile
+      - name: Emit generated lockfile
+        run: |
+          echo LOCKFILE_BEGIN
+          base64 -w0 Cargo.lock
+          echo
+          echo LOCKFILE_END
       - name: Run tests
         run: cargo test --locked
       - name: Run Clippy
