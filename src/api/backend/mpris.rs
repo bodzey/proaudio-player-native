@@ -22,6 +22,9 @@ const SPOTIFY_SOURCE: &str = "Spotify Connect";
 const AIRPLAY_SOURCE: &str = "AirPlay";
 const SPOTIFY_PREFIX: &str = "org.mpris.MediaPlayer2.spotifyd";
 const AIRPLAY_PREFIX: &str = "org.mpris.MediaPlayer2.ShairportSync";
+const AIRPLAY_DBUS_PREFIX: &str = "org.gnome.ShairportSync";
+const AIRPLAY_DBUS_PATH: &str = "/org/gnome/ShairportSync";
+const AIRPLAY_REMOTE_INTERFACE: &str = "org.gnome.ShairportSync.RemoteControl";
 
 fn source_prefix(source: &str) -> Option<&'static str> {
     match source {
@@ -74,12 +77,46 @@ fn microseconds(value: Option<i64>) -> Option<f64> {
     value.map(|value| value.max(0) as f64 / 1_000_000.0)
 }
 
+fn normalized_player_state(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "playing" => Some("playing"),
+        "paused" => Some("paused"),
+        "stopped" => Some("stopped"),
+        _ => None,
+    }
+}
+
+fn airplay_position_from_progress(progress: &str, duration_seconds: f64) -> Option<f64> {
+    if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+        return None;
+    }
+    let mut fields = progress.trim().split('/');
+    let start = fields.next()?.parse::<u32>().ok()?;
+    let current = fields.next()?.parse::<u32>().ok()?;
+    let end = fields.next()?.parse::<u32>().ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+
+    let total = end.wrapping_sub(start);
+    if total == 0 {
+        return None;
+    }
+    let elapsed = current.wrapping_sub(start);
+    if elapsed > total {
+        return None;
+    }
+
+    Some(duration_seconds * f64::from(elapsed) / f64::from(total))
+}
+
 #[derive(Clone)]
 struct CachedPlayer {
     value: Value,
     refreshed_at: Instant,
     position_seconds: Option<f64>,
     duration_seconds: Option<f64>,
+    airplay_progress: Option<String>,
 }
 
 impl CachedPlayer {
@@ -143,22 +180,59 @@ impl CachedPlayer {
             refreshed_at: Instant::now(),
             position_seconds: position,
             duration_seconds: duration,
+            airplay_progress: None,
+        }
+    }
+
+    fn position_at(&self, now: Instant) -> Option<f64> {
+        let mut position = self.position_seconds?;
+        if self.value.get("state").and_then(Value::as_str) == Some("playing") {
+            position += now
+                .saturating_duration_since(self.refreshed_at)
+                .as_secs_f64();
+        }
+        if let Some(duration) = self.duration_seconds {
+            position = position.min(duration);
+        }
+        Some(position)
+    }
+
+    fn apply_airplay_overlay(&mut self, properties: &HashMap<String, OwnedValue>) {
+        let now = Instant::now();
+
+        if let Some(state) = value_string(properties, "PlayerState")
+            .as_deref()
+            .and_then(normalized_player_state)
+        {
+            let previous_state = self.value.get("state").and_then(Value::as_str);
+            if previous_state != Some(state) {
+                self.position_seconds = self.position_at(now);
+                self.refreshed_at = now;
+                if let Some(object) = self.value.as_object_mut() {
+                    object.insert("state".into(), json!(state));
+                }
+            }
+        }
+
+        if let Some(progress) = value_string(properties, "ProgressString").filter(|v| !v.is_empty())
+        {
+            if self.airplay_progress.as_deref() != Some(progress.as_str()) {
+                if let Some(duration) = self.duration_seconds {
+                    if let Some(position) = airplay_position_from_progress(&progress, duration) {
+                        self.position_seconds = Some(position);
+                        self.refreshed_at = now;
+                    }
+                }
+                self.airplay_progress = Some(progress);
+            }
         }
     }
 
     fn snapshot(&self) -> Value {
         let mut value = self.value.clone();
-        if value.get("state").and_then(Value::as_str) != Some("playing") {
-            return value;
-        }
-
-        let Some(base_position) = self.position_seconds else {
+        let Some(position) = self.position_at(Instant::now()) else {
             return value;
         };
-        let mut position = base_position + self.refreshed_at.elapsed().as_secs_f64();
-        if let Some(duration) = self.duration_seconds {
-            position = position.min(duration);
-        }
         let progress = match self.duration_seconds {
             Some(duration) if duration > 0.0 => {
                 (position * 100.0 / duration).clamp(0.0, 100.0).round() as u32
@@ -201,6 +275,22 @@ impl MprisMonitor {
     }
 
     pub(super) async fn snapshot(&self, source: &str) -> Option<Value> {
+        if source == AIRPLAY_SOURCE {
+            match self.airplay_properties().await {
+                Ok(Some(properties)) => {
+                    let mut cache = self.cache.write().await;
+                    if let Some(player) = cache.get_mut(source) {
+                        player.apply_airplay_overlay(&properties);
+                        return Some(player.snapshot());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    debug!(error = %error, "Shairport native D-Bus state unavailable");
+                }
+            }
+        }
+
         self.cache
             .read()
             .await
@@ -227,6 +317,48 @@ impl MprisMonitor {
             .call_method(method, &())
             .await
             .with_context(|| format!("MPRIS command {method} failed for {service}"))?;
+        Ok(())
+    }
+
+    async fn airplay_service(&self) -> Result<Option<(Connection, String)>> {
+        let connection = self
+            .connection
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow!("System D-Bus connection is unavailable"))?;
+        let Some(service) = Self::discover_service(&connection, AIRPLAY_DBUS_PREFIX).await? else {
+            return Ok(None);
+        };
+        Ok(Some((connection, service)))
+    }
+
+    async fn airplay_properties(&self) -> Result<Option<HashMap<String, OwnedValue>>> {
+        let Some((connection, service)) = self.airplay_service().await? else {
+            return Ok(None);
+        };
+        let properties = PropertiesProxy::new(&connection, service, AIRPLAY_DBUS_PATH).await?;
+        let interface = InterfaceName::try_from(AIRPLAY_REMOTE_INTERFACE)?;
+        Ok(Some(properties.get_all(interface).await?))
+    }
+
+    pub(super) async fn airplay_control(&self, method: &str) -> Result<()> {
+        let (connection, service) = self
+            .airplay_service()
+            .await?
+            .ok_or_else(|| anyhow!("Shairport native D-Bus service is unavailable"))?;
+        let proxy = Proxy::new(
+            &connection,
+            service.to_owned(),
+            AIRPLAY_DBUS_PATH,
+            AIRPLAY_REMOTE_INTERFACE,
+        )
+        .await
+        .with_context(|| format!("failed to create Shairport D-Bus proxy for {service}"))?;
+        proxy
+            .call_method(method, &())
+            .await
+            .with_context(|| format!("Shairport D-Bus command {method} failed for {service}"))?;
         Ok(())
     }
 
@@ -378,6 +510,10 @@ impl WebController {
     pub(super) async fn mpris_control(&self, service: &str, method: &str) -> Result<()> {
         self.mpris.control(service, method).await
     }
+
+    pub(super) async fn airplay_control(&self, method: &str) -> Result<()> {
+        self.mpris.airplay_control(method).await
+    }
 }
 
 #[cfg(test)]
@@ -386,7 +522,10 @@ mod tests {
 
     use zbus::zvariant::{OwnedValue, Value as ZValue};
 
-    use super::{CachedPlayer, SPOTIFY_PREFIX, SPOTIFY_SOURCE};
+    use super::{
+        airplay_position_from_progress, normalized_player_state, CachedPlayer, SPOTIFY_PREFIX,
+        SPOTIFY_SOURCE,
+    };
 
     #[test]
     fn parses_mpris_properties_into_existing_player_shape() {
@@ -429,5 +568,25 @@ mod tests {
         assert_eq!(player["duration_seconds"], 200.0);
         assert_eq!(player["controls"]["next"], true);
         assert_eq!(player["controls"]["prev"], false);
+    }
+
+    #[test]
+    fn maps_shairport_player_states() {
+        assert_eq!(normalized_player_state("Playing"), Some("playing"));
+        assert_eq!(normalized_player_state("Paused"), Some("paused"));
+        assert_eq!(normalized_player_state("Stopped"), Some("stopped"));
+        assert_eq!(normalized_player_state("Not Available"), None);
+    }
+
+    #[test]
+    fn derives_airplay_position_from_wrapping_progress_timestamps() {
+        assert_eq!(
+            airplay_position_from_progress("100/150/300", 200.0),
+            Some(50.0)
+        );
+        assert_eq!(
+            airplay_position_from_progress("4294967270/10/74", 100.0),
+            Some(36.0)
+        );
     }
 }
