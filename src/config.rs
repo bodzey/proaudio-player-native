@@ -624,7 +624,9 @@ pub fn validate_audio(a: &AudioConfig, m: &MinuteSilenceConfig) -> Result<()> {
         bail!("audio.sample_rate має входити до audio.allowed_sample_rates");
     }
     if a.sample_rate_mode == SampleRateMode::Native {
-        bail!("audio.sample_rate_mode native зарезервовано для майбутнього direct/bit-perfect mode");
+        bail!(
+            "audio.sample_rate_mode native зарезервовано для майбутнього direct/bit-perfect mode"
+        );
     }
     for (name, value) in [
         ("duck_fade_seconds", a.duck_fade_seconds),

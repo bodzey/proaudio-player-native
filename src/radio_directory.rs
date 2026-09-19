@@ -148,12 +148,18 @@ async fn discover_servers(client: &Client) -> Vec<String> {
         }
     }
 
-    BOOTSTRAP_SERVERS.iter().map(|value| (*value).to_owned()).collect()
+    BOOTSTRAP_SERVERS
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect()
 }
 
 async fn fetch_directory() -> Result<Vec<DirectoryStation>> {
     let client = Client::builder()
-        .user_agent(concat!("proaudio-player-native/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            "proaudio-player-native/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .timeout(REQUEST_TIMEOUT)
         .build()
         .context("Не вдалося створити HTTP-клієнт каталогу радіо")?;
@@ -196,13 +202,21 @@ async fn fetch_directory() -> Result<Vec<DirectoryStation>> {
             }
         };
 
-        let mut items = raw.into_iter().filter_map(normalize_station).collect::<Vec<_>>();
+        let mut items = raw
+            .into_iter()
+            .filter_map(normalize_station)
+            .collect::<Vec<_>>();
         items.sort_by(|left, right| {
             right
                 .votes
                 .cmp(&left.votes)
                 .then_with(|| right.favicon.is_some().cmp(&left.favicon.is_some()))
-                .then_with(|| right.bitrate.unwrap_or_default().cmp(&left.bitrate.unwrap_or_default()))
+                .then_with(|| {
+                    right
+                        .bitrate
+                        .unwrap_or_default()
+                        .cmp(&left.bitrate.unwrap_or_default())
+                })
                 .then_with(|| left.name.cmp(&right.name))
         });
 
@@ -262,7 +276,10 @@ mod tests {
 
         assert_eq!(station.name, "Test Radio");
         assert_eq!(station.url, "https://stream.example.org/live");
-        assert_eq!(station.favicon.as_deref(), Some("https://example.org/logo.png"));
+        assert_eq!(
+            station.favicon.as_deref(),
+            Some("https://example.org/logo.png")
+        );
         assert_eq!(station.codec.as_deref(), Some("MP3"));
         assert_eq!(station.bitrate, Some(192));
     }

@@ -110,7 +110,9 @@ impl AudioEngine {
             .set_sink_mute(&cfg.music_sink, state.music_muted.unwrap_or(false))
             .await?;
 
-        let master_percent = state.master_percent.unwrap_or(cfg.default_restore_volume_percent);
+        let master_percent = state
+            .master_percent
+            .unwrap_or(cfg.default_restore_volume_percent);
         self.output_gain
             .set_percent(crate::output_router::DEFAULT_MASTER_SINK, master_percent)
             .await?;

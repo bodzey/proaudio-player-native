@@ -31,11 +31,11 @@ use crate::config::{
     save_provider_token, validate_audio, validate_provider, AppConfig, ProviderConfig,
 };
 use crate::dlna;
-use crate::upnp;
 use crate::mpd::MpdMonitor;
 use crate::output_router::{OutputDescriptor, DEFAULT_MASTER_SINK};
-use crate::source_arbiter::SharedSourceState;
 use crate::radio_directory;
+use crate::source_arbiter::SharedSourceState;
+use crate::upnp;
 
 use super::webui;
 
@@ -48,20 +48,17 @@ const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const PLAYER_ACTIONS: &[&str] = &["play", "pause", "stop", "next", "prev"];
 
-static ALSA_CARD_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*(\d+)\s+\[([^]]+)\]").expect("valid ALSA card regex")
-});
+static ALSA_CARD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*(\d+)\s+\[([^]]+)\]").expect("valid ALSA card regex"));
 static ALSA_CONTROL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Simple mixer control '([^']+)'").expect("valid ALSA control regex")
 });
-static ALSA_PERCENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Playback[^\n]*\[(\d+)%\]").expect("valid ALSA percent regex")
-});
+static ALSA_PERCENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Playback[^\n]*\[(\d+)%\]").expect("valid ALSA percent regex"));
 static ALSA_DB_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[(-?\d+(?:\.\d+)?)dB\]").expect("valid ALSA dB regex"));
 static ALSA_LIMITS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Limits:\s+Playback\s+(-?\d+)\s+-\s+(-?\d+)")
-        .expect("valid ALSA limits regex")
+    Regex::new(r"Limits:\s+Playback\s+(-?\d+)\s+-\s+(-?\d+)").expect("valid ALSA limits regex")
 });
 static ALSA_DB_SCALE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"dBscale-min=(-?\d+(?:\.\d+)?)dB,step=(-?\d+(?:\.\d+)?)dB")
@@ -160,8 +157,10 @@ impl WebController {
         let binary = stream.property("application.process.binary");
         let application = stream.property("application.name");
         let matches = match key {
-            "spotify" => binary.to_ascii_lowercase().contains("spotify")
-                || application.to_ascii_lowercase().contains("spotify"),
+            "spotify" => {
+                binary.to_ascii_lowercase().contains("spotify")
+                    || application.to_ascii_lowercase().contains("spotify")
+            }
             _ => false,
         };
         let pid = stream.property("application.process.id");
@@ -181,7 +180,10 @@ impl WebController {
         for pid in pids {
             let output = self.run("kill", &["-TERM", &pid], false, 3).await?;
             if output.code != 0 {
-                bail!("Не вдалося зупинити {key} receiver PID {pid}: {}", output.stderr);
+                bail!(
+                    "Не вдалося зупинити {key} receiver PID {pid}: {}",
+                    output.stderr
+                );
             }
         }
         Ok(())
@@ -659,7 +661,6 @@ impl WebController {
             "token_configured": config.resolve_token().is_ok(),
         }))
     }
-
 
     fn local_player(&self, mpd: &Value) -> Value {
         let state = mpd
@@ -1258,7 +1259,10 @@ async fn set_mixer(
     Json(body): Json<MixerBody>,
 ) -> ApiResult {
     if !matches!(body.target.as_str(), "master" | "music" | "alert") {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Невідомий канал мікшера"));
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Невідомий канал мікшера",
+        ));
     }
     if !body.db.is_finite() || !(-60.0..=0.0).contains(&body.db) {
         return Err(api_error(
@@ -1751,8 +1755,7 @@ fn api_routes() -> Router<WebController> {
         .route("/settings/alerts/media", get(alert_media::get_alert_media))
         .route(
             "/settings/alerts/media/{kind}",
-            axum::routing::put(alert_media::put_alert_media)
-                .delete(alert_media::reset_alert_media),
+            axum::routing::put(alert_media::put_alert_media).delete(alert_media::reset_alert_media),
         )
         .route("/player", post(player))
         .route("/library", get(library))
@@ -1848,8 +1851,7 @@ mod tests {
     #[test]
     fn audio_settings_accepts_canonical_and_legacy_air_raid_switches() {
         let canonical: AudioSettingsBody =
-            serde_json::from_value(serde_json::json!({"air_raid_alerts_enabled": false}))
-                .unwrap();
+            serde_json::from_value(serde_json::json!({"air_raid_alerts_enabled": false})).unwrap();
         assert_eq!(
             canonical.resolved_air_raid_alerts_enabled().unwrap(),
             Some(false)

@@ -215,7 +215,10 @@ mod tests {
     #[test]
     fn parses_release_identity_without_shelling_out() {
         let release = "PROAUDIO_VERSION=0.1.0\nPROAUDIO_CHANNEL=development\n";
-        assert_eq!(release_value(release, "PROAUDIO_VERSION").as_deref(), Some("0.1.0"));
+        assert_eq!(
+            release_value(release, "PROAUDIO_VERSION").as_deref(),
+            Some("0.1.0")
+        );
         assert_eq!(
             release_value(release, "PROAUDIO_CHANNEL").as_deref(),
             Some("development")
@@ -225,7 +228,10 @@ mod tests {
 
     #[test]
     fn converts_linux_thermal_millidegrees() {
-        assert_eq!(temperature_celsius_from_millidegrees("54530\n"), Some(54.53));
+        assert_eq!(
+            temperature_celsius_from_millidegrees("54530\n"),
+            Some(54.53)
+        );
         assert_eq!(temperature_celsius_from_millidegrees("invalid"), None);
     }
 }

@@ -26,8 +26,7 @@ const DEVICE_TYPE: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_SERVICE: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
 const NAME: &str = "ProAudio Player";
-const SERVER: &str =
-    concat!("Linux UPnP/1.0 ProAudioPlayer/", env!("CARGO_PKG_VERSION"));
+const SERVER: &str = concat!("Linux UPnP/1.0 ProAudioPlayer/", env!("CARGO_PKG_VERSION"));
 
 type UpnpError = (StatusCode, String);
 type UpnpResult = std::result::Result<Response, UpnpError>;
@@ -161,7 +160,10 @@ async fn player_snapshot(controller: &WebController) -> Result<PlayerSnapshot> {
         duration_ms: milliseconds(number(player.get("duration_seconds"))),
         track_uri,
         volume_percent: number(status.get("volume")).clamp(0.0, 100.0),
-        muted: status.get("muted").and_then(Value::as_bool).unwrap_or(false),
+        muted: status
+            .get("muted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -356,9 +358,7 @@ async fn soap_control(
                 .await
                 .map_err(service_error)?;
         }
-        "Play" | "Pause" | "Stop" | "Next" | "Previous"
-            if service == AVTRANSPORT_SERVICE =>
-        {
+        "Play" | "Pause" | "Stop" | "Next" | "Previous" if service == AVTRANSPORT_SERVICE => {
             let transport_action = if action == "Previous" {
                 "prev".to_owned()
             } else {
