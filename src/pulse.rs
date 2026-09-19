@@ -111,12 +111,14 @@ impl PulseControl {
         request: impl FnOnce(oneshot::Sender<Result<T>>) -> Request,
     ) -> Result<T> {
         let (reply, receiver) = oneshot::channel();
-        self.sender.try_send(request(reply)).map_err(|error| match error {
-            mpsc::TrySendError::Full(_) => anyhow!("PulseAudio control queue is full"),
-            mpsc::TrySendError::Disconnected(_) => {
-                anyhow!("PulseAudio control worker stopped")
-            }
-        })?;
+        self.sender
+            .try_send(request(reply))
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => anyhow!("PulseAudio control queue is full"),
+                mpsc::TrySendError::Disconnected(_) => {
+                    anyhow!("PulseAudio control worker stopped")
+                }
+            })?;
         receiver
             .await
             .map_err(|_| anyhow!("PulseAudio control worker dropped reply"))?

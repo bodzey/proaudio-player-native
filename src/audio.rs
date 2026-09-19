@@ -11,9 +11,7 @@ use tokio::time::sleep;
 use crate::audio_backend::{
     linear_to_percent, percent_to_linear, AudioBackend, SinkState, StreamState,
 };
-use crate::config::{
-    effective_audio, validate_audio, AppConfig, AudioConfig, MinuteSilenceConfig,
-};
+use crate::config::{effective_audio, validate_audio, AppConfig, AudioConfig, MinuteSilenceConfig};
 use crate::output_gain::{BackendOutputGain, OutputGain};
 use crate::output_router::{ExternalOutputRouter, OutputDescriptor, OutputRouter};
 use crate::state::{AudioSnapshot, MixerStateRuntime};
