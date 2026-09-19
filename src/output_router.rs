@@ -290,6 +290,6 @@ impl OutputRouter for ExternalOutputRouter {
     }
 
     fn subscribe_changes(&self) -> watch::Receiver<u64> {
-        self.backend.subscribe_changes()
+        self.backend.subscribe_topology_changes()
     }
 }
