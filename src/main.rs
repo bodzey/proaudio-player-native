@@ -188,8 +188,7 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
 
     let _mixer_state_writer = audio.start_mixer_state_writer();
 
-    let alert_controller =
-        AlertController::new(provider, audio.clone(), store, state.clone());
+    let alert_controller = AlertController::new(provider, audio.clone(), store, state.clone());
     let source_state = Arc::new(RwLock::new(None));
     let arbiter = SourceArbiter::new(config.clone(), audio.clone(), source_state.clone());
     let mixer_audio = audio.clone();

@@ -1551,7 +1551,9 @@ async fn play_stream(
     State(controller): State<WebController>,
     Json(body): Json<StreamBody>,
 ) -> ApiResult {
-    let url = validate_stream_url(&body.url).await.map_err(map_bad_request)?;
+    let url = validate_stream_url(&body.url)
+        .await
+        .map_err(map_bad_request)?;
     controller
         .ensure_controls_available()
         .await
