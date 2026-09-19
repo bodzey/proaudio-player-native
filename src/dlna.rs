@@ -328,7 +328,49 @@ fn parse_player(position: &str, transport: &str, actions: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::timeout;
+
     use super::*;
+
+    async fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+
+        loop {
+            let read = timeout(Duration::from_secs(2), stream.read(&mut buffer))
+                .await
+                .expect("mock transport read timeout")
+                .expect("mock transport read failed");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+
+            let Some(header_end) = request.windows(4).position(|chunk| chunk == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let header_end = header_end + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+
+            if request.len() >= header_end + content_length {
+                break;
+            }
+        }
+
+        String::from_utf8(request).expect("mock transport request must be UTF-8")
+    }
 
     #[test]
     fn parses_gmediarender_metadata_progress_and_controls() {
@@ -383,5 +425,48 @@ mod tests {
             Some(3723.0)
         );
         assert_eq!(crate::media_time::clock_to_seconds(Some("00:99:00")), None);
+    }
+
+    #[tokio::test]
+    async fn forwards_cast_uri_and_play_to_transport_worker() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock DLNA transport worker");
+        let address = listener.local_addr().expect("mock worker address");
+
+        let server = tokio::spawn(async move {
+            for action in ["SetAVTransportURI", "Play"] {
+                let (mut stream, _) = listener.accept().await.expect("accept mock SOAP request");
+                let request = read_http_request(&mut stream).await;
+                assert!(
+                    request.contains(action),
+                    "SOAP request does not contain expected action {action}: {request}"
+                );
+                if action == "SetAVTransportURI" {
+                    assert!(request.contains(
+                        "<CurrentURI>http://192.168.88.116:10246/music/test.mp3?x=1&amp;y=2</CurrentURI>"
+                    ));
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write mock SOAP response");
+            }
+        });
+
+        let client = DlnaClient::new();
+        *client.endpoint.lock().await = Some(format!("http://{address}/upnp/control"));
+        client
+            .set_uri(
+                "http://192.168.88.116:10246/music/test.mp3?x=1&y=2",
+                "",
+            )
+            .await
+            .expect("forward cast URI");
+        client.control("play").await.expect("forward play command");
+
+        server.await.expect("mock transport task");
     }
 }
