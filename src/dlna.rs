@@ -86,10 +86,18 @@ impl DlnaClient {
         if let Some(endpoint) = configured_endpoint() {
             endpoints.push(endpoint);
         }
-        endpoints.extend(AVTRANSPORT_ENDPOINTS.iter().map(|value| (*value).to_owned()));
+        endpoints.extend(
+            AVTRANSPORT_ENDPOINTS
+                .iter()
+                .map(|value| (*value).to_owned()),
+        );
 
         for endpoint in endpoints {
-            if self.soap_at(&endpoint, "GetTransportInfo", "").await.is_ok() {
+            if self
+                .soap_at(&endpoint, "GetTransportInfo", "")
+                .await
+                .is_ok()
+            {
                 *self.endpoint.lock().await = Some(endpoint.clone());
                 return Ok(Some(endpoint));
             }
