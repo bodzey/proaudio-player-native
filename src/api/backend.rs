@@ -41,6 +41,7 @@ use super::webui;
 
 mod alert_media;
 mod mpris;
+use mpris::MprisMonitor;
 
 const API_VERSION: &str = "1";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
@@ -105,45 +106,6 @@ fn map_conflict(err: anyhow::Error) -> ApiError {
     api_error(StatusCode::CONFLICT, err.to_string())
 }
 
-fn unwrap_dbus(value: Value) -> Value {
-    match value {
-        Value::Object(mut map) => {
-            if map.contains_key("type") && map.contains_key("data") {
-                return unwrap_dbus(map.remove("data").unwrap_or(Value::Null));
-            }
-            Value::Object(
-                map.into_iter()
-                    .map(|(key, value)| (key, unwrap_dbus(value)))
-                    .collect(),
-            )
-        }
-        Value::Array(values) => Value::Array(values.into_iter().map(unwrap_dbus).collect()),
-        other => other,
-    }
-}
-
-fn collapse_single(mut value: Value) -> Value {
-    loop {
-        match value {
-            Value::Array(mut items)
-                if items.len() == 1
-                    && matches!(items.first(), Some(Value::Array(_) | Value::Object(_))) =>
-            {
-                value = items.remove(0);
-            }
-            _ => return value,
-        }
-    }
-}
-
-fn microseconds_to_seconds(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(v) => v.as_f64().map(|n| (n / 1_000_000.0).max(0.0)),
-        Value::String(v) => v.parse::<f64>().ok().map(|n| (n / 1_000_000.0).max(0.0)),
-        _ => None,
-    }
-}
-
 fn format_seconds(value: Option<f64>) -> Option<String> {
     let total = value?.max(0.0) as u64;
     let hours = total / 3600;
@@ -187,6 +149,7 @@ pub struct WebController {
     event_demand: Arc<Notify>,
     audio_control_lock: Arc<Mutex<()>>,
     mpd: MpdMonitor,
+    mpris: MprisMonitor,
 }
 
 impl WebController {
@@ -240,6 +203,7 @@ impl WebController {
             event_demand: Arc::new(Notify::new()),
             audio_control_lock: Arc::new(Mutex::new(())),
             mpd: MpdMonitor::new(),
+            mpris: MprisMonitor::new(),
         }
     }
 
@@ -783,11 +747,8 @@ impl WebController {
         if let Some(external) = external {
             let source_type = external.get("type").and_then(Value::as_str).unwrap_or("");
             if matches!(source_type, "Spotify Connect" | "AirPlay") {
-                let names = self.mpris_names().await?;
-                if let Some(service) = self.mpris_service(source_type, &names).await {
-                    if let Some(player) = self.mpris_player(source_type, &service).await? {
-                        return Ok(player);
-                    }
+                if let Some(player) = self.mpris_player(source_type).await {
+                    return Ok(player);
                 }
             }
             if source_type == "DLNA / UPnP" {
@@ -800,16 +761,13 @@ impl WebController {
             return Ok(self.external_fallback(external));
         }
 
-        let names = self.mpris_names().await.unwrap_or_default();
         for source_type in ["Spotify Connect", "AirPlay"] {
-            if let Some(service) = self.mpris_service(source_type, &names).await {
-                if let Some(player) = self.mpris_player(source_type, &service).await? {
-                    if matches!(
-                        player.get("state").and_then(Value::as_str),
-                        Some("playing" | "paused")
-                    ) {
-                        return Ok(player);
-                    }
+            if let Some(player) = self.mpris_player(source_type).await {
+                if matches!(
+                    player.get("state").and_then(Value::as_str),
+                    Some("playing" | "paused")
+                ) {
+                    return Ok(player);
                 }
             }
         }
@@ -933,24 +891,7 @@ impl WebController {
                 "prev" => "Previous",
                 _ => unreachable!(),
             };
-            let output = self
-                .run(
-                    "busctl",
-                    &[
-                        "--system",
-                        "call",
-                        service,
-                        MPRIS_PATH,
-                        MPRIS_PLAYER_INTERFACE,
-                        method,
-                    ],
-                    false,
-                    4,
-                )
-                .await?;
-            if output.code != 0 {
-                bail!("MPRIS-команда {method} не виконана: {}", output.stderr);
-            }
+            self.mpris_control(service, method).await?;
             if backend == "spotify-mpris" && action == "stop" {
                 // spotifyd can acknowledge MPRIS Stop while its existing audio
                 // stream keeps draining. Terminating the identified receiver is
@@ -1845,6 +1786,7 @@ pub fn router(controller: WebController) -> Router {
 
 pub async fn serve(controller: WebController) -> Result<()> {
     controller.mpd.start();
+    controller.mpris.start();
     let host = controller.config.api.host.clone();
     let port = controller.config.api.port;
     let address = format!("{host}:{port}");
