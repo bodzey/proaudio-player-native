@@ -280,7 +280,8 @@ async fn soap_control(
         "GetTransportInfo"
             | "GetPositionInfo"
             | "GetMediaInfo"
-            | "GetCurrentTransportActions"
+            | "GetDeviceCapabilities"
+            | "GetTransportSettings"
             | "GetVolume"
             | "GetMute"
     ) {
@@ -344,6 +345,19 @@ async fn soap_control(
             ("RecordMedium", "NOT_IMPLEMENTED".into()),
             ("WriteStatus", "NOT_IMPLEMENTED".into()),
         ]),
+        "GetDeviceCapabilities" if service == AVTRANSPORT_SERVICE => {
+            values.extend([
+                ("PlayMedia", "NETWORK".into()),
+                ("RecMedia", "NOT_IMPLEMENTED".into()),
+                ("RecQualityModes", "NOT_IMPLEMENTED".into()),
+            ]);
+        }
+        "GetTransportSettings" if service == AVTRANSPORT_SERVICE => {
+            values.extend([
+                ("PlayMode", "NORMAL".into()),
+                ("RecQualityMode", "NOT_IMPLEMENTED".into()),
+            ]);
+        }
         "GetCurrentTransportActions" if service == AVTRANSPORT_SERVICE => {
             values.push(("Actions", "Play,Pause,Stop,Seek,Next,Previous".into()));
         }
@@ -493,6 +507,7 @@ async fn description(State(controller): State<WebController>, headers: HeaderMap
   <serialNumber>{serial}</serialNumber><UDN>{udn}</UDN><serviceList>
    <service><serviceType>{AVTRANSPORT_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:AVTransport</serviceId><SCPDURL>/upnp/avtransport.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL></eventSubURL></service>
    <service><serviceType>{RENDERING_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId><SCPDURL>/upnp/renderingcontrol.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL></eventSubURL></service>
+   <service><serviceType>{CONNECTION_MANAGER_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId><SCPDURL>/upnp/connectionmanager.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL></eventSubURL></service>
   </serviceList></device></root>"#
         ),
         "text/xml; charset=utf-8",
@@ -519,6 +534,8 @@ async fn avtransport_description() -> Response {
         "GetTransportInfo",
         "GetPositionInfo",
         "GetMediaInfo",
+        "GetDeviceCapabilities",
+        "GetTransportSettings",
         "GetCurrentTransportActions",
         "Play",
         "Pause",
@@ -769,6 +786,20 @@ mod tests {
         )
         .expect("ConnectionManager must be discoverable");
         assert!(String::from_utf8_lossy(&response).contains(CONNECTION_MANAGER_SERVICE));
+    }
+
+    #[test]
+    fn device_description_contract_requires_connection_manager() {
+        let xml = format!(
+            r#"<serviceList>
+<service><serviceType>{AVTRANSPORT_SERVICE}</serviceType></service>
+<service><serviceType>{RENDERING_SERVICE}</serviceType></service>
+<service><serviceType>{CONNECTION_MANAGER_SERVICE}</serviceType></service>
+</serviceList>"#
+        );
+        assert!(xml.contains("ConnectionManager:1"));
+        assert!(xml.contains("AVTransport:1"));
+        assert!(xml.contains("RenderingControl:1"));
     }
 
     #[test]
