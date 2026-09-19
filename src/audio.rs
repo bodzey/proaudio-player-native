@@ -1,5 +1,5 @@
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,7 +11,9 @@ use tokio::time::sleep;
 use crate::audio_backend::{
     linear_to_percent, percent_to_linear, AudioBackend, SinkState, StreamState,
 };
-use crate::config::{effective_audio, AppConfig};
+use crate::config::{
+    effective_audio, validate_audio, AppConfig, AudioConfig, MinuteSilenceConfig,
+};
 use crate::output_gain::{BackendOutputGain, OutputGain};
 use crate::output_router::{ExternalOutputRouter, OutputDescriptor, OutputRouter};
 use crate::state::{AudioSnapshot, MixerStateRuntime};
@@ -25,6 +27,7 @@ pub struct AudioEngine {
     output_gain: Arc<dyn OutputGain>,
     output_router: Arc<dyn OutputRouter>,
     mixer_state: MixerStateRuntime,
+    runtime_settings: Arc<RwLock<Option<(AudioConfig, MinuteSilenceConfig)>>>,
     mix_policy_lock: Arc<Mutex<()>>,
     alert_playback_cancel: watch::Sender<u64>,
 }
@@ -53,17 +56,55 @@ impl AudioEngine {
             output_gain,
             output_router,
             mixer_state: MixerStateRuntime::new(MIXER_STATE_FILE),
+            runtime_settings: Arc::new(RwLock::new(None)),
             mix_policy_lock: Arc::new(Mutex::new(())),
             alert_playback_cancel,
         }
     }
 
-    pub fn config(&self) -> Result<crate::config::AudioConfig> {
-        Ok(effective_audio(&self.config.audio, &self.config.minute_silence)?.0)
+    pub fn settings(&self) -> Result<(AudioConfig, MinuteSilenceConfig)> {
+        {
+            let cached = self
+                .runtime_settings
+                .read()
+                .map_err(|_| anyhow!("runtime audio settings lock poisoned"))?;
+            if let Some(settings) = cached.as_ref() {
+                return Ok(settings.clone());
+            }
+        }
+
+        let loaded = effective_audio(&self.config.audio, &self.config.minute_silence)?;
+        let mut cached = self
+            .runtime_settings
+            .write()
+            .map_err(|_| anyhow!("runtime audio settings lock poisoned"))?;
+        if let Some(settings) = cached.as_ref() {
+            return Ok(settings.clone());
+        }
+        *cached = Some(loaded.clone());
+        Ok(loaded)
     }
 
-    pub fn minute_config(&self) -> Result<crate::config::MinuteSilenceConfig> {
-        Ok(effective_audio(&self.config.audio, &self.config.minute_silence)?.1)
+    pub fn config(&self) -> Result<AudioConfig> {
+        Ok(self.settings()?.0)
+    }
+
+    pub fn minute_config(&self) -> Result<MinuteSilenceConfig> {
+        Ok(self.settings()?.1)
+    }
+
+    pub fn update_runtime_settings(
+        &self,
+        audio: AudioConfig,
+        minute: MinuteSilenceConfig,
+    ) -> Result<()> {
+        validate_audio(&audio, &minute)?;
+        let mut cached = self
+            .runtime_settings
+            .write()
+            .map_err(|_| anyhow!("runtime audio settings lock poisoned"))?;
+        *cached = Some((audio, minute));
+        Ok(())
     }
 
     pub fn backend_name(&self) -> &'static str {
