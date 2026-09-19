@@ -680,9 +680,7 @@ mod tests {
             CONNECTION_MANAGER_SERVICE,
         ] {
             let response = ssdp_response(
-                &format!(
-                    "M-SEARCH * HTTP/1.1\r\nMAN: \"ssdp:discover\"\r\nST: {service}\r\n\r\n"
-                ),
+                &format!("M-SEARCH * HTTP/1.1\r\nMAN: \"ssdp:discover\"\r\nST: {service}\r\n\r\n"),
                 "192.0.2.10:1900".parse().expect("valid test peer"),
                 8080,
                 "uuid:test",
