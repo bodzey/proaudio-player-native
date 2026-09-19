@@ -31,7 +31,7 @@ use crate::config::{
     save_provider_token, validate_audio, validate_provider, AppConfig, ProviderConfig,
 };
 use crate::dlna;
-use crate::fourstream;
+use crate::upnp;
 use crate::mpd::MpdMonitor;
 use crate::output_router::{OutputDescriptor, DEFAULT_MASTER_SINK};
 use crate::source_arbiter::SharedSourceState;
@@ -1779,7 +1779,7 @@ pub fn router(controller: WebController) -> Router {
     Router::new()
         .nest("/api", routes.clone())
         .nest("/api/v1", routes)
-        .merge(fourstream::router())
+        .merge(upnp::router())
         .merge(webui::router())
         .with_state(controller)
 }
@@ -1828,10 +1828,9 @@ pub async fn serve(controller: WebController) -> Result<()> {
         }
     });
 
-    let ssdp_controller = controller.clone();
     tokio::spawn(async move {
-        if let Err(err) = fourstream::run_ssdp(ssdp_controller, port).await {
-            debug!("4STREAM SSDP discovery unavailable: {err:#}");
+        if let Err(err) = upnp::run_ssdp(port).await {
+            debug!("UPnP/DLNA SSDP discovery unavailable: {err:#}");
         }
     });
     axum::serve(listener, router(controller)).await?;
