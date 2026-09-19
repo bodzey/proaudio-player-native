@@ -422,8 +422,11 @@ fn wait_for_context(mainloop: &mut Mainloop, context: &PulseContext) -> Result<(
 }
 
 struct PulseConnection {
-    mainloop: Mainloop,
+    // PulseContext owns I/O events registered against Mainloop. Rust drops
+    // struct fields in declaration order, so the context must be destroyed
+    // before the mainloop that backs those events.
     context: PulseContext,
+    mainloop: Mainloop,
     events: PulseEventQueue,
     cache: Arc<RwLock<HashMap<String, SinkState>>>,
     changes: watch::Sender<u64>,
@@ -477,8 +480,8 @@ impl PulseConnection {
 
         info!("Persistent PulseAudio control connection established");
         Ok(Self {
-            mainloop,
             context,
+            mainloop,
             events,
             cache,
             changes,
