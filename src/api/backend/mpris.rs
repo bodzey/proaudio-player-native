@@ -407,6 +407,14 @@ impl MprisMonitor {
         let mut changes = properties
             .receive_properties_changed_with_args(&[(0, MPRIS_PLAYER_INTERFACE)])
             .await?;
+        let player = Proxy::new(
+            connection,
+            service.to_owned(),
+            MPRIS_PATH,
+            MPRIS_PLAYER_INTERFACE,
+        )
+        .await?;
+        let mut seeks = player.receive_signal("Seeked").await?;
         let dbus = DBusProxy::new(connection).await?;
         let mut owners = dbus
             .receive_name_owner_changed_with_args(&[(0, service)])
@@ -423,6 +431,15 @@ impl MprisMonitor {
                     }
                     if let Err(error) = self.refresh(source, service, &properties).await {
                         debug!(source, service, error = %error, "MPRIS property refresh failed");
+                        break;
+                    }
+                }
+                seeked = seeks.next() => {
+                    if seeked.is_none() {
+                        break;
+                    }
+                    if let Err(error) = self.refresh(source, service, &properties).await {
+                        debug!(source, service, error = %error, "MPRIS seek refresh failed");
                         break;
                     }
                 }
