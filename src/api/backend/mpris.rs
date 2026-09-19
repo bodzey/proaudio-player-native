@@ -403,23 +403,23 @@ impl WebController {
 mod tests {
     use std::collections::HashMap;
 
-    use zbus::zvariant::OwnedValue;
+    use zbus::zvariant::{OwnedValue, Value as ZValue};
 
-    use super::CachedPlayer;
+    use super::{CachedPlayer, SPOTIFY_PREFIX, SPOTIFY_SOURCE};
 
     #[test]
     fn parses_mpris_properties_into_existing_player_shape() {
         let metadata = HashMap::from([
-            ("xesam:title".to_owned(), OwnedValue::from("Track")),
-            ("xesam:album".to_owned(), OwnedValue::from("Album")),
+            ("xesam:title".to_owned(), ZValue::new("Track").try_to_owned().unwrap()),
+            ("xesam:album".to_owned(), ZValue::new("Album").try_to_owned().unwrap()),
             (
                 "xesam:artist".to_owned(),
-                OwnedValue::from(vec!["Artist".to_owned()]),
+                ZValue::new(vec!["Artist"]).try_to_owned().unwrap(),
             ),
             ("mpris:length".to_owned(), OwnedValue::from(200_000_000_i64)),
         ]);
         let properties = HashMap::from([
-            ("PlaybackStatus".to_owned(), OwnedValue::from("Playing")),
+            ("PlaybackStatus".to_owned(), ZValue::new("Playing").try_to_owned().unwrap()),
             ("Position".to_owned(), OwnedValue::from(12_000_000_i64)),
             ("CanControl".to_owned(), OwnedValue::from(true)),
             ("CanPlay".to_owned(), OwnedValue::from(true)),
