@@ -59,7 +59,7 @@ The daemon exposes a standard UPnP MediaRenderer surface for DLNA clients:
 - `POST /upnp/control`
 - SSDP M-SEARCH and alive announcements on UDP 1900.
 
-Only AVTransport and RenderingControl are advertised. LinkPlay/4STREAM compatibility endpoints and discovery are not part of the native player.
+Only standard AVTransport and RenderingControl services are advertised; vendor-specific compatibility gateways are intentionally excluded.
 
 ## Errors
 
