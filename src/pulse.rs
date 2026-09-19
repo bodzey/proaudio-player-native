@@ -23,6 +23,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const IDLE_INTERVAL: Duration = Duration::from_millis(50);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
+const REQUEST_QUEUE_CAPACITY: usize = 64;
 
 const STREAM_PROPERTIES: &[&str] = &[
     "application.name",
@@ -80,14 +81,14 @@ enum Request {
 
 #[derive(Clone)]
 pub struct PulseControl {
-    sender: mpsc::Sender<Request>,
+    sender: mpsc::SyncSender<Request>,
     cache: Arc<RwLock<HashMap<String, SinkState>>>,
     changes: watch::Sender<u64>,
 }
 
 impl PulseControl {
     pub fn new() -> Result<Self> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
         let cache = Arc::new(RwLock::new(HashMap::new()));
         let worker_cache = cache.clone();
         let (changes, _) = watch::channel(0_u64);
@@ -110,9 +111,12 @@ impl PulseControl {
         request: impl FnOnce(oneshot::Sender<Result<T>>) -> Request,
     ) -> Result<T> {
         let (reply, receiver) = oneshot::channel();
-        self.sender
-            .send(request(reply))
-            .map_err(|_| anyhow!("PulseAudio control worker stopped"))?;
+        self.sender.try_send(request(reply)).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => anyhow!("PulseAudio control queue is full"),
+            mpsc::TrySendError::Disconnected(_) => {
+                anyhow!("PulseAudio control worker stopped")
+            }
+        })?;
         receiver
             .await
             .map_err(|_| anyhow!("PulseAudio control worker dropped reply"))?
