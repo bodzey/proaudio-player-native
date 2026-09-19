@@ -27,15 +27,15 @@ use crate::alerts::SharedRuntimeState;
 use crate::audio::AudioEngine;
 use crate::command;
 use crate::config::{
-    effective_audio, effective_provider, save_audio_settings, save_provider_settings,
-    save_provider_token, validate_audio, validate_provider, AppConfig, ProviderConfig,
+    effective_provider, save_audio_settings, save_provider_settings, save_provider_token,
+    validate_audio, validate_provider, AppConfig, ProviderConfig,
 };
 use crate::dlna;
-use crate::fourstream;
 use crate::mpd::MpdMonitor;
 use crate::output_router::{OutputDescriptor, DEFAULT_MASTER_SINK};
-use crate::source_arbiter::SharedSourceState;
 use crate::radio_directory;
+use crate::source_arbiter::SharedSourceState;
+use crate::upnp;
 
 use super::webui;
 
@@ -47,21 +47,19 @@ const API_VERSION: &str = "1";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const PLAYER_ACTIONS: &[&str] = &["play", "pause", "stop", "next", "prev"];
+const API_CONTROL_BODY_BYTES: usize = 64 * 1024;
 
-static ALSA_CARD_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*(\d+)\s+\[([^]]+)\]").expect("valid ALSA card regex")
-});
+static ALSA_CARD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*(\d+)\s+\[([^]]+)\]").expect("valid ALSA card regex"));
 static ALSA_CONTROL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Simple mixer control '([^']+)'").expect("valid ALSA control regex")
 });
-static ALSA_PERCENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Playback[^\n]*\[(\d+)%\]").expect("valid ALSA percent regex")
-});
+static ALSA_PERCENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Playback[^\n]*\[(\d+)%\]").expect("valid ALSA percent regex"));
 static ALSA_DB_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[(-?\d+(?:\.\d+)?)dB\]").expect("valid ALSA dB regex"));
 static ALSA_LIMITS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Limits:\s+Playback\s+(-?\d+)\s+-\s+(-?\d+)")
-        .expect("valid ALSA limits regex")
+    Regex::new(r"Limits:\s+Playback\s+(-?\d+)\s+-\s+(-?\d+)").expect("valid ALSA limits regex")
 });
 static ALSA_DB_SCALE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"dBscale-min=(-?\d+(?:\.\d+)?)dB,step=(-?\d+(?:\.\d+)?)dB")
@@ -160,8 +158,10 @@ impl WebController {
         let binary = stream.property("application.process.binary");
         let application = stream.property("application.name");
         let matches = match key {
-            "spotify" => binary.to_ascii_lowercase().contains("spotify")
-                || application.to_ascii_lowercase().contains("spotify"),
+            "spotify" => {
+                binary.to_ascii_lowercase().contains("spotify")
+                    || application.to_ascii_lowercase().contains("spotify")
+            }
             _ => false,
         };
         let pid = stream.property("application.process.id");
@@ -181,7 +181,10 @@ impl WebController {
         for pid in pids {
             let output = self.run("kill", &["-TERM", &pid], false, 3).await?;
             if output.code != 0 {
-                bail!("Не вдалося зупинити {key} receiver PID {pid}: {}", output.stderr);
+                bail!(
+                    "Не вдалося зупинити {key} receiver PID {pid}: {}",
+                    output.stderr
+                );
             }
         }
         Ok(())
@@ -208,10 +211,12 @@ impl WebController {
     }
 
     pub async fn priority_state(&self) -> Value {
-        let state = self.state.lock().await;
-        let talkover = effective_audio(&self.config.audio, &self.config.minute_silence)
-            .map(|(audio, _)| audio.duck_only_during_announcement)
+        let talkover = self
+            .audio
+            .config()
+            .map(|audio| audio.duck_only_during_announcement)
             .unwrap_or(false);
+        let state = self.state.lock().await;
         json!({
             "mode": state.mode,
             "active": state.mode == "alert" || state.minute_silence_active,
@@ -227,9 +232,7 @@ impl WebController {
 
     pub async fn ensure_controls_available(&self) -> Result<()> {
         let state = self.state.lock().await;
-        let talkover = effective_audio(&self.config.audio, &self.config.minute_silence)?
-            .0
-            .duck_only_during_announcement;
+        let talkover = self.audio.config()?.duck_only_during_announcement;
         if state.minute_silence_active || (state.mode == "alert" && !talkover) {
             bail!("Керування музикою заблоковано пріоритетним оповіщенням");
         }
@@ -579,7 +582,7 @@ impl WebController {
     }
 
     pub fn audio_settings(&self) -> Result<Value> {
-        let (audio, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
+        let (audio, minute) = self.audio.settings()?;
         Ok(json!({
             "air_raid_alerts_enabled": audio.notifications_enabled,
             "notifications_enabled": audio.notifications_enabled,
@@ -659,7 +662,6 @@ impl WebController {
             "token_configured": config.resolve_token().is_ok(),
         }))
     }
-
 
     fn local_player(&self, mpd: &Value) -> Value {
         let state = mpd
@@ -1258,7 +1260,10 @@ async fn set_mixer(
     Json(body): Json<MixerBody>,
 ) -> ApiResult {
     if !matches!(body.target.as_str(), "master" | "music" | "alert") {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Невідомий канал мікшера"));
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Невідомий канал мікшера",
+        ));
     }
     if !body.db.is_finite() || !(-60.0..=0.0).contains(&body.db) {
         return Err(api_error(
@@ -1335,9 +1340,7 @@ async fn put_audio_settings(
     State(controller): State<WebController>,
     Json(body): Json<AudioSettingsBody>,
 ) -> ApiResult {
-    let (mut audio, mut minute) =
-        effective_audio(&controller.config.audio, &controller.config.minute_silence)
-            .map_err(map_internal)?;
+    let (mut audio, mut minute) = controller.audio.settings().map_err(map_internal)?;
     if let Some(v) = body
         .resolved_air_raid_alerts_enabled()
         .map_err(map_bad_request)?
@@ -1390,6 +1393,10 @@ async fn put_audio_settings(
     }
     validate_audio(&audio, &minute).map_err(map_bad_request)?;
     save_audio_settings(&audio, &minute).map_err(map_internal)?;
+    controller
+        .audio
+        .update_runtime_settings(audio.clone(), minute.clone())
+        .map_err(map_internal)?;
     if !audio.notifications_enabled {
         controller.audio.cancel_alert_playback();
     }
@@ -1469,7 +1476,28 @@ async fn play_file(
     Ok(Json(json!({ "playing": path })))
 }
 
-fn validate_stream_url(value: &str) -> Result<String> {
+fn unsafe_stream_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(value) => {
+            value.is_private()
+                || value.is_loopback()
+                || value.is_link_local()
+                || value.is_multicast()
+                || value == Ipv4Addr::UNSPECIFIED
+                || value.octets()[0] == 0
+        }
+        IpAddr::V6(value) => {
+            value.is_loopback()
+                || value.is_unspecified()
+                || value.is_multicast()
+                || value.is_unique_local()
+                || value.is_unicast_link_local()
+                || value == Ipv6Addr::UNSPECIFIED
+        }
+    }
+}
+
+async fn validate_stream_url(value: &str) -> Result<String> {
     let value = value.trim();
     let parsed = Url::parse(value).context("Некоректна адреса потоку")?;
     if !matches!(parsed.scheme(), "http" | "https")
@@ -1479,37 +1507,36 @@ fn validate_stream_url(value: &str) -> Result<String> {
     {
         bail!("Підтримуються лише HTTP/HTTPS-потоки без облікових даних у URL");
     }
+
     let host = parsed.host_str().unwrap_or_default();
-    if matches!(
-        host.to_ascii_lowercase().as_str(),
-        "localhost" | "localhost.localdomain"
-    ) || host.to_ascii_lowercase().ends_with(".local")
+    let host_lower = host.to_ascii_lowercase();
+    if matches!(host_lower.as_str(), "localhost" | "localhost.localdomain")
+        || host_lower.ends_with(".local")
     {
         bail!("Локальні адреси потоків заборонені");
     }
+
     if let Ok(address) = host.parse::<IpAddr>() {
-        let unsafe_address = match address {
-            IpAddr::V4(value) => {
-                value.is_private()
-                    || value.is_loopback()
-                    || value.is_link_local()
-                    || value.is_multicast()
-                    || value == Ipv4Addr::UNSPECIFIED
-                    || value.octets()[0] == 0
-            }
-            IpAddr::V6(value) => {
-                value.is_loopback()
-                    || value.is_unspecified()
-                    || value.is_multicast()
-                    || value.is_unique_local()
-                    || value.is_unicast_link_local()
-                    || value == Ipv6Addr::UNSPECIFIED
-            }
-        };
-        if unsafe_address {
+        if unsafe_stream_address(address) {
             bail!("Локальні та службові IP-адреси потоків заборонені");
         }
+    } else {
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| anyhow!("Не вдалося визначити порт потоку"))?;
+        let addresses = tokio::net::lookup_host((host, port))
+            .await
+            .context("Не вдалося визначити IP-адресу потоку")?
+            .map(|socket| socket.ip())
+            .collect::<BTreeSet<_>>();
+        if addresses.is_empty() {
+            bail!("Домен потоку не має IP-адрес");
+        }
+        if addresses.into_iter().any(unsafe_stream_address) {
+            bail!("Домен потоку резолвиться у локальну або службову IP-адресу");
+        }
     }
+
     Ok(parsed.to_string())
 }
 
@@ -1524,7 +1551,9 @@ async fn play_stream(
     State(controller): State<WebController>,
     Json(body): Json<StreamBody>,
 ) -> ApiResult {
-    let url = validate_stream_url(&body.url).map_err(map_bad_request)?;
+    let url = validate_stream_url(&body.url)
+        .await
+        .map_err(map_bad_request)?;
     controller
         .ensure_controls_available()
         .await
@@ -1729,7 +1758,7 @@ async fn test_alert_settings(
 }
 
 fn api_routes() -> Router<WebController> {
-    Router::new()
+    let control = Router::new()
         .route("/health", get(health))
         .route("/capabilities", get(capabilities))
         .route("/status", get(status))
@@ -1748,12 +1777,6 @@ fn api_routes() -> Router<WebController> {
             "/settings/audio",
             get(get_audio_settings).put(put_audio_settings),
         )
-        .route("/settings/alerts/media", get(alert_media::get_alert_media))
-        .route(
-            "/settings/alerts/media/{kind}",
-            axum::routing::put(alert_media::put_alert_media)
-                .delete(alert_media::reset_alert_media),
-        )
         .route("/player", post(player))
         .route("/library", get(library))
         .route("/library/update", post(refresh_library))
@@ -1771,7 +1794,17 @@ fn api_routes() -> Router<WebController> {
             get(get_alert_settings).put(put_alert_settings),
         )
         .route("/settings/alerts/test", post(test_alert_settings))
-        .layer(DefaultBodyLimit::max(alert_media::MAX_ALERT_MEDIA_BYTES))
+        .layer(DefaultBodyLimit::max(API_CONTROL_BODY_BYTES));
+
+    let alert_media = Router::new()
+        .route("/settings/alerts/media", get(alert_media::get_alert_media))
+        .route(
+            "/settings/alerts/media/{kind}",
+            axum::routing::put(alert_media::put_alert_media).delete(alert_media::reset_alert_media),
+        )
+        .layer(DefaultBodyLimit::max(alert_media::MAX_ALERT_MEDIA_BYTES));
+
+    control.merge(alert_media)
 }
 
 pub fn router(controller: WebController) -> Router {
@@ -1779,7 +1812,7 @@ pub fn router(controller: WebController) -> Router {
     Router::new()
         .nest("/api", routes.clone())
         .nest("/api/v1", routes)
-        .merge(fourstream::router())
+        .merge(upnp::router())
         .merge(webui::router())
         .with_state(controller)
 }
@@ -1828,10 +1861,9 @@ pub async fn serve(controller: WebController) -> Result<()> {
         }
     });
 
-    let ssdp_controller = controller.clone();
     tokio::spawn(async move {
-        if let Err(err) = fourstream::run_ssdp(ssdp_controller, port).await {
-            debug!("4STREAM SSDP discovery unavailable: {err:#}");
+        if let Err(err) = upnp::run_ssdp(port).await {
+            debug!("UPnP/DLNA SSDP discovery unavailable: {err:#}");
         }
     });
     axum::serve(listener, router(controller)).await?;
@@ -1849,8 +1881,7 @@ mod tests {
     #[test]
     fn audio_settings_accepts_canonical_and_legacy_air_raid_switches() {
         let canonical: AudioSettingsBody =
-            serde_json::from_value(serde_json::json!({"air_raid_alerts_enabled": false}))
-                .unwrap();
+            serde_json::from_value(serde_json::json!({"air_raid_alerts_enabled": false})).unwrap();
         assert_eq!(
             canonical.resolved_air_raid_alerts_enabled().unwrap(),
             Some(false)

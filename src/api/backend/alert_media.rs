@@ -74,11 +74,9 @@ fn looks_like_mp3(bytes: &[u8]) -> bool {
     }
 
     let start = if bytes.starts_with(b"ID3") && bytes.len() >= 10 {
-        let size = bytes[6..10]
-            .iter()
-            .try_fold(0usize, |value, byte| {
-                (*byte < 0x80).then_some((value << 7) | usize::from(*byte))
-            });
+        let size = bytes[6..10].iter().try_fold(0usize, |value, byte| {
+            (*byte < 0x80).then_some((value << 7) | usize::from(*byte))
+        });
         match size.and_then(|value| value.checked_add(10)) {
             Some(value) if value < bytes.len() => value,
             _ => return false,
@@ -142,7 +140,12 @@ pub(super) async fn put_alert_media(
     if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
         let content_type = content_type
             .to_str()
-            .map_err(|_| api_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Некоректний Content-Type"))?
+            .map_err(|_| {
+                api_error(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "Некоректний Content-Type",
+                )
+            })?
             .split(';')
             .next()
             .unwrap_or_default()

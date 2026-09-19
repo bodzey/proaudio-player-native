@@ -8,17 +8,17 @@ mod audio_backend;
 mod command;
 mod config;
 mod dlna;
-mod fourstream;
 mod media_time;
 mod mpd;
 mod output_gain;
 mod output_router;
 mod processing_domain;
 mod provider;
-mod radio_directory;
 mod pulse;
+mod radio_directory;
 mod source_arbiter;
 mod state;
+mod upnp;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -188,13 +188,7 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
 
     let _mixer_state_writer = audio.start_mixer_state_writer();
 
-    let alert_controller = AlertController::new(
-        config.clone(),
-        provider,
-        audio.clone(),
-        store,
-        state.clone(),
-    );
+    let alert_controller = AlertController::new(provider, audio.clone(), store, state.clone());
     let source_state = Arc::new(RwLock::new(None));
     let arbiter = SourceArbiter::new(config.clone(), audio.clone(), source_state.clone());
     let mixer_audio = audio.clone();
@@ -232,7 +226,7 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
 
 async fn run_once(config: Arc<AppConfig>) -> Result<()> {
     let (store, state, audio, provider) = runtime(config.clone())?;
-    let mut controller = AlertController::new(config, provider, audio, store, state);
+    let mut controller = AlertController::new(provider, audio, store, state);
     controller.recover().await?;
     controller.run_once().await?;
     Ok(())

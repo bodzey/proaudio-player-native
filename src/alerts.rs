@@ -9,14 +9,12 @@ use tokio::time::sleep;
 use tracing::{error, warn};
 
 use crate::audio::AudioEngine;
-use crate::config::{effective_audio, AppConfig};
 use crate::provider::{AlertStatus, AlertsProvider};
 use crate::state::{AudioSnapshot, RuntimeState, StateStore};
 
 pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
 
 pub struct AlertController {
-    config: Arc<AppConfig>,
     provider: AlertsProvider,
     audio: AudioEngine,
     store: StateStore,
@@ -27,14 +25,12 @@ pub struct AlertController {
 
 impl AlertController {
     pub fn new(
-        config: Arc<AppConfig>,
         provider: AlertsProvider,
         audio: AudioEngine,
         store: StateStore,
         state: SharedRuntimeState,
     ) -> Self {
         Self {
-            config,
             provider,
             audio,
             store,
@@ -151,7 +147,7 @@ impl AlertController {
         if state.mode == "alert" {
             return Ok(false);
         }
-        let (_, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
+        let minute = self.audio.minute_config()?;
         if !minute.enabled {
             return Ok(false);
         }
@@ -186,7 +182,7 @@ impl AlertController {
         }
 
         let snapshot = self.audio.snapshot().await?;
-        let (audio_cfg, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
+        let (audio_cfg, minute) = self.audio.settings()?;
         let talkover = audio_cfg.duck_only_during_announcement;
         let tz: chrono_tz::Tz = minute.timezone.parse()?;
         let date = Utc::now().with_timezone(&tz).date_naive().to_string();
@@ -489,8 +485,7 @@ impl AlertController {
         }
         let mut next_poll = Instant::now();
         loop {
-            let (audio_config, minute_config) =
-                effective_audio(&self.config.audio, &self.config.minute_silence)?;
+            let (audio_config, minute_config) = self.audio.settings()?;
             if audio_config.notifications_enabled {
                 if Instant::now() >= next_poll {
                     let poll = self.run_once().await.unwrap_or_else(|err| {

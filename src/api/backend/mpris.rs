@@ -46,9 +46,7 @@ fn value_bool(values: &HashMap<String, OwnedValue>, key: &str) -> bool {
 }
 
 fn value_i64(values: &HashMap<String, OwnedValue>, key: &str) -> Option<i64> {
-    values
-        .get(key)
-        .and_then(|value| i64::try_from(value).ok())
+    values.get(key).and_then(|value| i64::try_from(value).ok())
 }
 
 fn metadata_map(values: &HashMap<String, OwnedValue>) -> HashMap<String, OwnedValue> {
@@ -203,7 +201,11 @@ impl MprisMonitor {
     }
 
     pub(super) async fn snapshot(&self, source: &str) -> Option<Value> {
-        self.cache.read().await.get(source).map(CachedPlayer::snapshot)
+        self.cache
+            .read()
+            .await
+            .get(source)
+            .map(CachedPlayer::snapshot)
     }
 
     pub(super) async fn control(&self, service: &str, method: &str) -> Result<()> {
@@ -312,10 +314,7 @@ impl MprisMonitor {
         loop {
             match Self::discover_service(&connection, prefix).await {
                 Ok(Some(service)) => {
-                    if let Err(error) = self
-                        .watch_service(&connection, source, &service)
-                        .await
-                    {
+                    if let Err(error) = self.watch_service(&connection, source, &service).await {
                         debug!(source, service, error = %error, "MPRIS monitor disconnected");
                     }
                     self.clear(source).await;
@@ -392,8 +391,14 @@ mod tests {
     #[test]
     fn parses_mpris_properties_into_existing_player_shape() {
         let metadata = HashMap::from([
-            ("xesam:title".to_owned(), ZValue::new("Track").try_to_owned().unwrap()),
-            ("xesam:album".to_owned(), ZValue::new("Album").try_to_owned().unwrap()),
+            (
+                "xesam:title".to_owned(),
+                ZValue::new("Track").try_to_owned().unwrap(),
+            ),
+            (
+                "xesam:album".to_owned(),
+                ZValue::new("Album").try_to_owned().unwrap(),
+            ),
             (
                 "xesam:artist".to_owned(),
                 ZValue::new(vec!["Artist"]).try_to_owned().unwrap(),
@@ -401,7 +406,10 @@ mod tests {
             ("mpris:length".to_owned(), OwnedValue::from(200_000_000_i64)),
         ]);
         let properties = HashMap::from([
-            ("PlaybackStatus".to_owned(), ZValue::new("Playing").try_to_owned().unwrap()),
+            (
+                "PlaybackStatus".to_owned(),
+                ZValue::new("Playing").try_to_owned().unwrap(),
+            ),
             ("Position".to_owned(), OwnedValue::from(12_000_000_i64)),
             ("CanControl".to_owned(), OwnedValue::from(true)),
             ("CanPlay".to_owned(), OwnedValue::from(true)),

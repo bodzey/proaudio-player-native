@@ -1,23 +1,23 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
-use axum::Router;
+use anyhow::{anyhow, Result};
 use axum::extract::State;
-use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::get;
+use axum::Router;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
-use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 use tokio::task::JoinHandle;
-use tokio::time::{MissedTickBehavior, interval, sleep};
+use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::debug;
 
 use super::backend::WebController;
@@ -458,7 +458,7 @@ pub(super) fn router() -> Router<WebController> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_DB, MeterWindow, amplitude_db, meter_window_frames};
+    use super::{amplitude_db, meter_window_frames, MeterWindow, MIN_DB};
 
     #[test]
     fn meter_window_tracks_the_processing_rate_at_50_hz() {
