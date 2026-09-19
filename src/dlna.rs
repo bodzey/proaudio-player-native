@@ -166,8 +166,7 @@ impl DlnaClient {
 
     pub async fn connection_manager(&self, action: &str, body: &str) -> Result<String> {
         let transport_endpoint = self.endpoint().await?;
-        let endpoint =
-            Self::related_endpoint(&transport_endpoint, "/upnp/control/renderconnmgr1")?;
+        let endpoint = Self::related_endpoint(&transport_endpoint, "/upnp/control/renderconnmgr1")?;
         match self
             .soap_body_at(&endpoint, CONNECTION_MANAGER_SERVICE, action, body)
             .await
