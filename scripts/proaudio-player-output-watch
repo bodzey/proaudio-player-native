@@ -143,6 +143,16 @@ reconcile_output() {
     "$BUS_SCRIPT" switch
 }
 
+configured_snapshot() {
+    if [[ ! -f "$OUTPUT_ENV" ]]; then
+        printf '%s\n' AUTO
+        return 0
+    fi
+    local configured
+    configured="$(awk -F= '$1 == "PHYSICAL_SINK" { print substr($0, index($0, "=") + 1); exit }' "$OUTPUT_ENV")"
+    printf '%s\n' "${configured:-AUTO}"
+}
+
 export LC_ALL=C
 reconcile_output || true
 
@@ -150,13 +160,36 @@ if [[ "${1:-watch}" == "once" ]]; then
     exit 0
 fi
 
-# PulseAudio/PipeWire-Pulse subscriptions are event driven. If the server itself
-# restarts the subscription exits; systemd restarts this watcher and reconciliation
-# happens again from the current graph state.
-pactl subscribe | while IFS= read -r event; do
-    case "$event" in
-        *" on sink "*|*" on server "*|*" on card "*)
-            reconcile_output || true
-            ;;
-    esac
-done
+# A physical sink/card/server event and a user selection persisted through the
+# control API are both routing inputs. pactl does not emit an event when
+# audio-output.env changes, so the subscription is sampled with a short timeout
+# and the tiny one-line selection file is checked between events. This keeps the
+# watcher dependency-free while making UI output changes deterministic.
+last_config="$(configured_snapshot)"
+while true; do
+    event=""
+    event_requires_reconcile=0
+
+    if IFS= read -r -t 1 event; then
+        case "$event" in
+            *" on sink "*|*" on server "*|*" on card "*)
+                event_requires_reconcile=1
+                ;;
+        esac
+    else
+        read_status=$?
+        if ((read_status == 1)); then
+            break
+        fi
+    fi
+
+    current_config="$(configured_snapshot)"
+    if [[ "$current_config" != "$last_config" ]]; then
+        event_requires_reconcile=1
+    fi
+
+    if ((event_requires_reconcile)); then
+        reconcile_output || true
+        last_config="$(configured_snapshot)"
+    fi
+done < <(pactl subscribe)
