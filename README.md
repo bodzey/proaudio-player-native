@@ -79,7 +79,7 @@ test-cycle --hold 5
 
 ```text
 /etc/proaudio-player-alert/config.yaml
-/etc/proaudio-player-alert/alerts-token
+/var/lib/proaudio-player-alert/alerts-token
 /var/lib/proaudio-player-alert/provider-settings.yaml
 /var/lib/proaudio-player-alert/audio-settings.yaml
 /var/lib/proaudio-player-alert/state.json
