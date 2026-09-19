@@ -27,8 +27,8 @@ use crate::alerts::SharedRuntimeState;
 use crate::audio::AudioEngine;
 use crate::command;
 use crate::config::{
-    effective_audio, effective_provider, save_audio_settings, save_provider_settings,
-    save_provider_token, validate_audio, validate_provider, AppConfig, ProviderConfig,
+    effective_provider, save_audio_settings, save_provider_settings, save_provider_token,
+    validate_audio, validate_provider, AppConfig, ProviderConfig,
 };
 use crate::dlna;
 use crate::mpd::MpdMonitor;
@@ -210,10 +210,12 @@ impl WebController {
     }
 
     pub async fn priority_state(&self) -> Value {
-        let state = self.state.lock().await;
-        let talkover = effective_audio(&self.config.audio, &self.config.minute_silence)
-            .map(|(audio, _)| audio.duck_only_during_announcement)
+        let talkover = self
+            .audio
+            .config()
+            .map(|audio| audio.duck_only_during_announcement)
             .unwrap_or(false);
+        let state = self.state.lock().await;
         json!({
             "mode": state.mode,
             "active": state.mode == "alert" || state.minute_silence_active,
@@ -229,9 +231,7 @@ impl WebController {
 
     pub async fn ensure_controls_available(&self) -> Result<()> {
         let state = self.state.lock().await;
-        let talkover = effective_audio(&self.config.audio, &self.config.minute_silence)?
-            .0
-            .duck_only_during_announcement;
+        let talkover = self.audio.config()?.duck_only_during_announcement;
         if state.minute_silence_active || (state.mode == "alert" && !talkover) {
             bail!("Керування музикою заблоковано пріоритетним оповіщенням");
         }
@@ -581,7 +581,7 @@ impl WebController {
     }
 
     pub fn audio_settings(&self) -> Result<Value> {
-        let (audio, minute) = effective_audio(&self.config.audio, &self.config.minute_silence)?;
+        let (audio, minute) = self.audio.settings()?;
         Ok(json!({
             "air_raid_alerts_enabled": audio.notifications_enabled,
             "notifications_enabled": audio.notifications_enabled,
@@ -1339,9 +1339,7 @@ async fn put_audio_settings(
     State(controller): State<WebController>,
     Json(body): Json<AudioSettingsBody>,
 ) -> ApiResult {
-    let (mut audio, mut minute) =
-        effective_audio(&controller.config.audio, &controller.config.minute_silence)
-            .map_err(map_internal)?;
+    let (mut audio, mut minute) = controller.audio.settings().map_err(map_internal)?;
     if let Some(v) = body
         .resolved_air_raid_alerts_enabled()
         .map_err(map_bad_request)?
@@ -1394,6 +1392,10 @@ async fn put_audio_settings(
     }
     validate_audio(&audio, &minute).map_err(map_bad_request)?;
     save_audio_settings(&audio, &minute).map_err(map_internal)?;
+    controller
+        .audio
+        .update_runtime_settings(audio.clone(), minute.clone())
+        .map_err(map_internal)?;
     if !audio.notifications_enabled {
         controller.audio.cancel_alert_playback();
     }
