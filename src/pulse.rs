@@ -934,11 +934,8 @@ fn worker_loop(
 
     loop {
         if connection.is_none() && Instant::now() >= next_reconnect {
-            match PulseConnection::connect(
-                cache.clone(),
-                changes.clone(),
-                topology_changes.clone(),
-            ) {
+            match PulseConnection::connect(cache.clone(), changes.clone(), topology_changes.clone())
+            {
                 Ok(new_connection) => {
                     connection = Some(new_connection);
                     changes.send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -958,8 +955,7 @@ fn worker_loop(
                 clear_cache(&cache);
                 connection = None;
                 changes.send_modify(|generation| *generation = generation.wrapping_add(1));
-                topology_changes
-                    .send_modify(|generation| *generation = generation.wrapping_add(1));
+                topology_changes.send_modify(|generation| *generation = generation.wrapping_add(1));
                 next_reconnect = Instant::now() + RECONNECT_INTERVAL;
             }
         }
