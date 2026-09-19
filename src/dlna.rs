@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use url::Url;
 
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
+const CONNECTION_MANAGER_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 const AVTRANSPORT_ENDPOINTS: &[&str] = &[
     "http://169.254.253.1:49494/upnp/control/rendertransport1",
     "http://127.0.0.1:49494/upnp/control/rendertransport1",
@@ -32,6 +33,34 @@ impl DlnaClient {
         }
     }
 
+    async fn soap_body_at(
+        &self,
+        endpoint: &str,
+        service: &str,
+        action: &str,
+        body: &str,
+    ) -> Result<String> {
+        let response = self
+            .client
+            .post(endpoint)
+            .header("Content-Type", "text/xml; charset=\"utf-8\"")
+            .header("SOAPACTION", format!("\"{service}#{action}\""))
+            .body(body.to_owned())
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .with_context(|| format!("DLNA SOAP {service}#{action} недоступний"))?;
+        let status = response.status();
+        let payload = response
+            .text()
+            .await
+            .with_context(|| format!("Не вдалося прочитати DLNA SOAP {service}#{action}"))?;
+        if !status.is_success() {
+            bail!("DLNA SOAP {service}#{action} повернув HTTP {status}");
+        }
+        Ok(payload)
+    }
+
     async fn soap_at(&self, endpoint: &str, action: &str, arguments: &str) -> Result<String> {
         let body = format!(
             r#"<?xml version="1.0" encoding="utf-8"?>
@@ -44,25 +73,16 @@ impl DlnaClient {
   </s:Body>
 </s:Envelope>"#
         );
-        let response = self
-            .client
-            .post(endpoint)
-            .header("Content-Type", "text/xml; charset=\"utf-8\"")
-            .header("SOAPACTION", format!("\"{AVTRANSPORT_SERVICE}#{action}\""))
-            .body(body)
-            .timeout(Duration::from_secs(2))
-            .send()
+        self.soap_body_at(endpoint, AVTRANSPORT_SERVICE, action, &body)
             .await
-            .with_context(|| format!("DLNA AVTransport {action} недоступний"))?;
-        let status = response.status();
-        let payload = response
-            .text()
-            .await
-            .with_context(|| format!("Не вдалося прочитати DLNA AVTransport {action}"))?;
-        if !status.is_success() {
-            bail!("DLNA AVTransport {action} повернув HTTP {status}");
-        }
-        Ok(payload)
+    }
+
+    fn related_endpoint(endpoint: &str, path: &str) -> Result<String> {
+        let mut url = Url::parse(endpoint).context("Некоректний внутрішній DLNA endpoint")?;
+        url.set_path(path);
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url.to_string())
     }
 
     async fn discover_endpoint(&self) -> Result<Option<String>> {
@@ -142,6 +162,52 @@ impl DlnaClient {
                 Err(error)
             }
         }
+    }
+
+    pub async fn connection_manager(&self, action: &str, body: &str) -> Result<String> {
+        let transport_endpoint = self.endpoint().await?;
+        let endpoint =
+            Self::related_endpoint(&transport_endpoint, "/upnp/control/renderconnmgr1")?;
+        match self
+            .soap_body_at(&endpoint, CONNECTION_MANAGER_SERVICE, action, body)
+            .await
+        {
+            Ok(payload) => Ok(payload),
+            Err(error) => {
+                self.invalidate_endpoint(&transport_endpoint).await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn service_description(&self, path: &str) -> Result<String> {
+        if !matches!(
+            path,
+            "/upnp/rendertransportSCPD.xml"
+                | "/upnp/rendercontrolSCPD.xml"
+                | "/upnp/renderconnmgrSCPD.xml"
+        ) {
+            bail!("Невідомий внутрішній DLNA service descriptor");
+        }
+
+        let transport_endpoint = self.endpoint().await?;
+        let endpoint = Self::related_endpoint(&transport_endpoint, path)?;
+        let response = self
+            .client
+            .get(&endpoint)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .with_context(|| format!("DLNA service descriptor недоступний: {path}"))?;
+        let status = response.status();
+        let payload = response
+            .text()
+            .await
+            .with_context(|| format!("Не вдалося прочитати DLNA service descriptor: {path}"))?;
+        if !status.is_success() {
+            bail!("DLNA service descriptor {path} повернув HTTP {status}");
+        }
+        Ok(payload)
     }
 
     pub async fn set_uri(&self, uri: &str, metadata: &str) -> Result<()> {
