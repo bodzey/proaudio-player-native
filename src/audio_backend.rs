@@ -85,6 +85,9 @@ pub trait AudioBackend: Send + Sync {
     fn set_sink_input_percent(&self, index: u32, percent: f64) -> BackendFuture<'_, StreamState>;
     fn set_sink_input_mute(&self, index: u32, muted: bool) -> BackendFuture<'_, StreamState>;
     fn subscribe_changes(&self) -> watch::Receiver<u64>;
+    fn subscribe_topology_changes(&self) -> watch::Receiver<u64> {
+        self.subscribe_changes()
+    }
 }
 
 pub fn percent_to_linear(percent: f64) -> f64 {

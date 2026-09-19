@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -14,6 +14,7 @@ const AVTRANSPORT_ENDPOINTS: &[&str] = &[
     "http://169.254.253.1:49494/upnp/control/rendertransport1",
     "http://127.0.0.1:49494/upnp/control/rendertransport1",
 ];
+const PLAYER_CACHE_TTL: Duration = Duration::from_secs(5);
 
 fn configured_endpoint() -> Option<String> {
     env::var("PROAUDIO_DLNA_ENDPOINT")
@@ -28,9 +29,16 @@ pub fn client() -> &'static DlnaClient {
     CLIENT.get_or_init(DlnaClient::new)
 }
 
+struct CachedPlayer {
+    value: Value,
+    updated_at: Instant,
+}
+
 pub struct DlnaClient {
     client: reqwest::Client,
     endpoint: Arc<Mutex<Option<String>>>,
+    player_query: Mutex<()>,
+    player_cache: Mutex<Option<CachedPlayer>>,
 }
 
 impl DlnaClient {
@@ -38,6 +46,8 @@ impl DlnaClient {
         Self {
             client: reqwest::Client::new(),
             endpoint: Arc::new(Mutex::new(None)),
+            player_query: Mutex::new(()),
+            player_cache: Mutex::new(None),
         }
     }
 
@@ -157,12 +167,32 @@ impl DlnaClient {
         Ok(parse_player(&position, &transport, &actions))
     }
 
+    async fn remember_player(&self, player: &Value) {
+        *self.player_cache.lock().await = Some(CachedPlayer {
+            value: player.clone(),
+            updated_at: Instant::now(),
+        });
+    }
+
+    pub async fn cached_player(&self) -> Option<Value> {
+        self.player_cache
+            .lock()
+            .await
+            .as_ref()
+            .filter(|cached| cached.updated_at.elapsed() <= PLAYER_CACHE_TTL)
+            .map(|cached| cached.value.clone())
+    }
+
     pub async fn player(&self) -> Result<Option<Value>> {
+        let _query_guard = self.player_query.lock().await;
         let Some(endpoint) = self.discover_endpoint().await? else {
             return Ok(None);
         };
         match self.player_at(&endpoint).await {
-            Ok(player) => Ok(Some(player)),
+            Ok(player) => {
+                self.remember_player(&player).await;
+                Ok(Some(player))
+            }
             Err(error) => {
                 self.invalidate_endpoint(&endpoint).await;
                 Err(error)
@@ -171,12 +201,16 @@ impl DlnaClient {
     }
 
     pub async fn known_player(&self) -> Result<Option<Value>> {
+        let _query_guard = self.player_query.lock().await;
         let cached = { self.endpoint.lock().await.clone() };
         let Some(endpoint) = cached else {
             return Ok(None);
         };
         match self.player_at(&endpoint).await {
-            Ok(player) => Ok(Some(player)),
+            Ok(player) => {
+                self.remember_player(&player).await;
+                Ok(Some(player))
+            }
             Err(error) => {
                 self.invalidate_endpoint(&endpoint).await;
                 Err(error)

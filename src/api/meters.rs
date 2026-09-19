@@ -28,7 +28,7 @@ const CAPTURE_LATENCY_MILLIS: u64 = 20;
 const TOPOLOGY_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_DB: f64 = -60.0;
-const CLIP_AMPLITUDE: f64 = 0.9999;
+const DIGITAL_FULL_SCALE_AMPLITUDE: f64 = 1.0;
 const BYTES_PER_STEREO_FRAME: usize = 8;
 
 struct EventStream {
@@ -160,7 +160,7 @@ impl MeterWindow {
             let absolute = value.abs();
             self.peak[channel] = self.peak[channel].max(absolute);
             self.sum_squares[channel] += value * value;
-            self.clip[channel] |= absolute >= CLIP_AMPLITUDE;
+            self.clip[channel] |= absolute > DIGITAL_FULL_SCALE_AMPLITUDE;
         }
         self.samples += 1;
     }
@@ -188,7 +188,7 @@ fn amplitude_db(value: f64) -> f64 {
     if !value.is_finite() || value <= 0.001 {
         MIN_DB
     } else {
-        (20.0 * value.log10()).clamp(MIN_DB, 0.0)
+        (20.0 * value.log10()).max(MIN_DB)
     }
 }
 
@@ -490,6 +490,11 @@ mod tests {
 
         window.push(1.0, 0.999);
         let full_scale = window.take().expect("full-scale meter level");
-        assert_eq!(full_scale.clip, [true, false]);
+        assert_eq!(full_scale.clip, [false, false]);
+
+        window.push(1.0001, 1.0);
+        let over_full_scale = window.take().expect("over-full-scale meter level");
+        assert!(over_full_scale.peak[0] > 0.0);
+        assert_eq!(over_full_scale.clip, [true, false]);
     }
 }
