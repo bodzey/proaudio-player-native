@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -22,6 +22,7 @@ use crate::dlna;
 
 const SSDP_ADDRESS: &str = "239.255.255.250";
 const SSDP_PORT: u16 = 1900;
+const UPNP_BODY_LIMIT_BYTES: usize = 128 * 1024;
 const DEVICE_TYPE: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_SERVICE: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
@@ -453,6 +454,7 @@ pub fn router() -> Router<WebController> {
         .route("/upnp/avtransport.xml", get(avtransport_description))
         .route("/upnp/renderingcontrol.xml", get(rendering_description))
         .route("/upnp/control", post(soap_control))
+        .layer(DefaultBodyLimit::max(UPNP_BODY_LIMIT_BYTES))
 }
 
 fn alive_messages(port: u16, udn: &str) -> Vec<Vec<u8>> {
