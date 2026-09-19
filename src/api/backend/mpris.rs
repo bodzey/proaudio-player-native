@@ -187,7 +187,9 @@ impl CachedPlayer {
     fn position_at(&self, now: Instant) -> Option<f64> {
         let mut position = self.position_seconds?;
         if self.value.get("state").and_then(Value::as_str) == Some("playing") {
-            position += now.saturating_duration_since(self.refreshed_at).as_secs_f64();
+            position += now
+                .saturating_duration_since(self.refreshed_at)
+                .as_secs_f64();
         }
         if let Some(duration) = self.duration_seconds {
             position = position.min(duration);
@@ -335,8 +337,7 @@ impl MprisMonitor {
         let Some((connection, service)) = self.airplay_service().await? else {
             return Ok(None);
         };
-        let properties =
-            PropertiesProxy::new(&connection, service, AIRPLAY_DBUS_PATH).await?;
+        let properties = PropertiesProxy::new(&connection, service, AIRPLAY_DBUS_PATH).await?;
         let interface = InterfaceName::try_from(AIRPLAY_REMOTE_INTERFACE)?;
         Ok(Some(properties.get_all(interface).await?))
     }
