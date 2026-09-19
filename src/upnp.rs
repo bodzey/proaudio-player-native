@@ -26,8 +26,7 @@ const UPNP_BODY_LIMIT_BYTES: usize = 128 * 1024;
 const DEVICE_TYPE: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_SERVICE: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
-const CONNECTION_MANAGER_SERVICE: &str =
-    "urn:schemas-upnp-org:service:ConnectionManager:1";
+const CONNECTION_MANAGER_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 const SINK_PROTOCOL_INFO: &str = concat!(
     "http-get:*:audio/mpeg:*,",
     "http-get:*:audio/mp4:*,",
@@ -290,7 +289,11 @@ async fn soap_control(
         "GetTransportInfo" if service == AVTRANSPORT_SERVICE => values.extend([
             (
                 "CurrentTransportState",
-                match player.expect("player snapshot for transport query").state.as_str() {
+                match player
+                    .expect("player snapshot for transport query")
+                    .state
+                    .as_str()
+                {
                     "playing" => "PLAYING",
                     "paused" => "PAUSED_PLAYBACK",
                     _ => "STOPPED",
@@ -304,20 +307,35 @@ async fn soap_control(
             ("Track", "1".into()),
             (
                 "TrackDuration",
-                clock(player.expect("player snapshot for position query").duration_ms),
+                clock(
+                    player
+                        .expect("player snapshot for position query")
+                        .duration_ms,
+                ),
             ),
             ("TrackMetaData", String::new()),
             (
                 "TrackURI",
-                player.expect("player snapshot for position query").track_uri.clone(),
+                player
+                    .expect("player snapshot for position query")
+                    .track_uri
+                    .clone(),
             ),
             (
                 "RelTime",
-                clock(player.expect("player snapshot for position query").position_ms),
+                clock(
+                    player
+                        .expect("player snapshot for position query")
+                        .position_ms,
+                ),
             ),
             (
                 "AbsTime",
-                clock(player.expect("player snapshot for position query").position_ms),
+                clock(
+                    player
+                        .expect("player snapshot for position query")
+                        .position_ms,
+                ),
             ),
             ("RelCount", "0".into()),
             ("AbsCount", "0".into()),
@@ -330,7 +348,10 @@ async fn soap_control(
             ),
             (
                 "CurrentURI",
-                player.expect("player snapshot for media query").track_uri.clone(),
+                player
+                    .expect("player snapshot for media query")
+                    .track_uri
+                    .clone(),
             ),
             ("CurrentURIMetaData", String::new()),
             ("NextURI", String::new()),
@@ -404,7 +425,9 @@ async fn soap_control(
                 "CurrentVolume",
                 format!(
                     "{:.0}",
-                    player.expect("player snapshot for volume query").volume_percent
+                    player
+                        .expect("player snapshot for volume query")
+                        .volume_percent
                 ),
             ));
         }

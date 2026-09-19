@@ -348,8 +348,7 @@ mod tests {
             }
             request.extend_from_slice(&buffer[..read]);
 
-            let Some(header_end) = request.windows(4).position(|chunk| chunk == b"\r\n\r\n")
-            else {
+            let Some(header_end) = request.windows(4).position(|chunk| chunk == b"\r\n\r\n") else {
                 continue;
             };
             let header_end = header_end + 4;
@@ -448,9 +447,7 @@ mod tests {
                     ));
                 }
                 stream
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     .await
                     .expect("write mock SOAP response");
             }
@@ -459,10 +456,7 @@ mod tests {
         let client = DlnaClient::new();
         *client.endpoint.lock().await = Some(format!("http://{address}/upnp/control"));
         client
-            .set_uri(
-                "http://192.168.88.116:10246/music/test.mp3?x=1&y=2",
-                "",
-            )
+            .set_uri("http://192.168.88.116:10246/music/test.mp3?x=1&y=2", "")
             .await
             .expect("forward cast URI");
         client.control("play").await.expect("forward play command");
