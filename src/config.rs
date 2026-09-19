@@ -12,7 +12,7 @@ fn default_endpoint() -> String {
     "http://192.168.88.122/v1/iot/active_air_raid_alerts/{uid}.json".into()
 }
 fn default_token_file() -> PathBuf {
-    "/etc/proaudio-player-alert/alerts-token".into()
+    "/var/lib/proaudio-player-alert/alerts-token".into()
 }
 fn default_provider_settings() -> PathBuf {
     "/var/lib/proaudio-player-alert/provider-settings.yaml".into()
@@ -660,6 +660,15 @@ mod tests {
         let to_db = |percent: f64| 60.0 * (percent / 100.0).log10();
         assert!((to_db(audio.default_restore_volume_percent) + 3.0).abs() < 1.0e-9);
         assert!((to_db(audio.alert_volume_percent) + 3.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn default_provider_token_is_persistent_runtime_state() {
+        let provider = ProviderConfig::default();
+        assert_eq!(
+            provider.token_file,
+            PathBuf::from("/var/lib/proaudio-player-alert/alerts-token")
+        );
     }
 
     #[test]
