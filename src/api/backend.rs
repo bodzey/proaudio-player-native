@@ -106,45 +106,6 @@ fn map_conflict(err: anyhow::Error) -> ApiError {
     api_error(StatusCode::CONFLICT, err.to_string())
 }
 
-fn unwrap_dbus(value: Value) -> Value {
-    match value {
-        Value::Object(mut map) => {
-            if map.contains_key("type") && map.contains_key("data") {
-                return unwrap_dbus(map.remove("data").unwrap_or(Value::Null));
-            }
-            Value::Object(
-                map.into_iter()
-                    .map(|(key, value)| (key, unwrap_dbus(value)))
-                    .collect(),
-            )
-        }
-        Value::Array(values) => Value::Array(values.into_iter().map(unwrap_dbus).collect()),
-        other => other,
-    }
-}
-
-fn collapse_single(mut value: Value) -> Value {
-    loop {
-        match value {
-            Value::Array(mut items)
-                if items.len() == 1
-                    && matches!(items.first(), Some(Value::Array(_) | Value::Object(_))) =>
-            {
-                value = items.remove(0);
-            }
-            _ => return value,
-        }
-    }
-}
-
-fn microseconds_to_seconds(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(v) => v.as_f64().map(|n| (n / 1_000_000.0).max(0.0)),
-        Value::String(v) => v.parse::<f64>().ok().map(|n| (n / 1_000_000.0).max(0.0)),
-        _ => None,
-    }
-}
-
 fn format_seconds(value: Option<f64>) -> Option<String> {
     let total = value?.max(0.0) as u64;
     let hours = total / 3600;
