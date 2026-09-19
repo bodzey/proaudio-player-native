@@ -38,6 +38,10 @@ impl AlertsProvider {
         effective_provider(&self.config.provider)
     }
 
+    pub fn token_configured(&self) -> Result<bool> {
+        Ok(self.current_config()?.resolve_token().is_ok())
+    }
+
     pub async fn fetch(&self) -> Result<FetchResult> {
         let config = self.current_config()?;
         let token = config.resolve_token()?;
