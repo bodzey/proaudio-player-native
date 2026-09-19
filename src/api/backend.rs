@@ -759,6 +759,9 @@ impl WebController {
                     Ok(None) => {}
                     Err(err) => debug!(error = %err, "DLNA AVTransport metadata unavailable"),
                 }
+                if let Some(player) = dlna::client().cached_player().await {
+                    return Ok(player);
+                }
             }
             return Ok(self.external_fallback(external));
         }
