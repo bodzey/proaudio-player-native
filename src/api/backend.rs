@@ -41,6 +41,7 @@ use super::webui;
 
 mod alert_media;
 mod mpris;
+use mpris::MprisMonitor;
 
 const API_VERSION: &str = "1";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
@@ -187,6 +188,7 @@ pub struct WebController {
     event_demand: Arc<Notify>,
     audio_control_lock: Arc<Mutex<()>>,
     mpd: MpdMonitor,
+    mpris: MprisMonitor,
 }
 
 impl WebController {
@@ -240,6 +242,7 @@ impl WebController {
             event_demand: Arc::new(Notify::new()),
             audio_control_lock: Arc::new(Mutex::new(())),
             mpd: MpdMonitor::new(),
+            mpris: MprisMonitor::new(),
         }
     }
 
@@ -783,11 +786,8 @@ impl WebController {
         if let Some(external) = external {
             let source_type = external.get("type").and_then(Value::as_str).unwrap_or("");
             if matches!(source_type, "Spotify Connect" | "AirPlay") {
-                let names = self.mpris_names().await?;
-                if let Some(service) = self.mpris_service(source_type, &names).await {
-                    if let Some(player) = self.mpris_player(source_type, &service).await? {
-                        return Ok(player);
-                    }
+                if let Some(player) = self.mpris_player(source_type).await {
+                    return Ok(player);
                 }
             }
             if source_type == "DLNA / UPnP" {
@@ -800,16 +800,13 @@ impl WebController {
             return Ok(self.external_fallback(external));
         }
 
-        let names = self.mpris_names().await.unwrap_or_default();
         for source_type in ["Spotify Connect", "AirPlay"] {
-            if let Some(service) = self.mpris_service(source_type, &names).await {
-                if let Some(player) = self.mpris_player(source_type, &service).await? {
-                    if matches!(
-                        player.get("state").and_then(Value::as_str),
-                        Some("playing" | "paused")
-                    ) {
-                        return Ok(player);
-                    }
+            if let Some(player) = self.mpris_player(source_type).await {
+                if matches!(
+                    player.get("state").and_then(Value::as_str),
+                    Some("playing" | "paused")
+                ) {
+                    return Ok(player);
                 }
             }
         }
@@ -933,24 +930,7 @@ impl WebController {
                 "prev" => "Previous",
                 _ => unreachable!(),
             };
-            let output = self
-                .run(
-                    "busctl",
-                    &[
-                        "--system",
-                        "call",
-                        service,
-                        MPRIS_PATH,
-                        MPRIS_PLAYER_INTERFACE,
-                        method,
-                    ],
-                    false,
-                    4,
-                )
-                .await?;
-            if output.code != 0 {
-                bail!("MPRIS-команда {method} не виконана: {}", output.stderr);
-            }
+            self.mpris_control(service, method).await?;
             if backend == "spotify-mpris" && action == "stop" {
                 // spotifyd can acknowledge MPRIS Stop while its existing audio
                 // stream keeps draining. Terminating the identified receiver is
@@ -1845,6 +1825,7 @@ pub fn router(controller: WebController) -> Router {
 
 pub async fn serve(controller: WebController) -> Result<()> {
     controller.mpd.start();
+    controller.mpris.start();
     let host = controller.config.api.host.clone();
     let port = controller.config.api.port;
     let address = format!("{host}:{port}");
