@@ -9,14 +9,12 @@ use tokio::time::sleep;
 use tracing::{error, warn};
 
 use crate::audio::AudioEngine;
-use crate::config::AppConfig;
 use crate::provider::{AlertStatus, AlertsProvider};
 use crate::state::{AudioSnapshot, RuntimeState, StateStore};
 
 pub type SharedRuntimeState = Arc<Mutex<RuntimeState>>;
 
 pub struct AlertController {
-    config: Arc<AppConfig>,
     provider: AlertsProvider,
     audio: AudioEngine,
     store: StateStore,
@@ -27,14 +25,12 @@ pub struct AlertController {
 
 impl AlertController {
     pub fn new(
-        config: Arc<AppConfig>,
         provider: AlertsProvider,
         audio: AudioEngine,
         store: StateStore,
         state: SharedRuntimeState,
     ) -> Self {
         Self {
-            config,
             provider,
             audio,
             store,
