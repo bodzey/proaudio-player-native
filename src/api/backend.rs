@@ -1861,11 +1861,13 @@ pub async fn serve(controller: WebController) -> Result<()> {
         }
     });
 
-    tokio::spawn(async move {
-        if let Err(err) = upnp::run_ssdp(port).await {
-            debug!("UPnP/DLNA SSDP discovery unavailable: {err:#}");
-        }
-    });
+    if upnp::public_enabled() {
+        tokio::spawn(async move {
+            if let Err(err) = upnp::run_ssdp(port).await {
+                debug!("UPnP/DLNA SSDP discovery unavailable: {err:#}");
+            }
+        });
+    }
     axum::serve(listener, router(controller)).await?;
     Ok(())
 }
