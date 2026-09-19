@@ -495,16 +495,10 @@ impl AlertController {
                     match self.provider.token_configured() {
                         Ok(false) => {
                             if provider_configured != Some(false) {
-                                info!(
-                                    "alerts.in.ua polling призупинено: API-токен не налаштовано"
-                                );
-                                let clear_legacy_error = self
-                                    .state
-                                    .lock()
-                                    .await
-                                    .last_error
-                                    .as_deref()
-                                    == Some(MISSING_TOKEN_ERROR);
+                                info!("alerts.in.ua polling призупинено: API-токен не налаштовано");
+                                let clear_legacy_error =
+                                    self.state.lock().await.last_error.as_deref()
+                                        == Some(MISSING_TOKEN_ERROR);
                                 if clear_legacy_error {
                                     self.state.lock().await.last_error = None;
                                     self.persist().await?;
@@ -515,17 +509,14 @@ impl AlertController {
                         }
                         Ok(true) => {
                             if provider_configured == Some(false) {
-                                info!(
-                                    "alerts.in.ua polling відновлено: API-токен налаштовано"
-                                );
+                                info!("alerts.in.ua polling відновлено: API-токен налаштовано");
                             }
                             provider_configured = Some(true);
                             let poll = self.run_once().await.unwrap_or_else(|err| {
                                 error!("alert controller: {err:#}");
                                 8.0
                             });
-                            next_poll =
-                                Instant::now() + Duration::from_secs_f64(poll.max(0.25));
+                            next_poll = Instant::now() + Duration::from_secs_f64(poll.max(0.25));
                         }
                         Err(err) => {
                             error!("не вдалося перевірити конфігурацію alerts.in.ua: {err:#}");
