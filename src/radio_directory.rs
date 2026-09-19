@@ -153,7 +153,7 @@ async fn discover_servers(client: &Client) -> Vec<String> {
 
 async fn fetch_directory() -> Result<Vec<DirectoryStation>> {
     let client = Client::builder()
-        .user_agent("proaudio-player-native/0.1")
+        .user_agent(concat!("proaudio-player-native/", env!("CARGO_PKG_VERSION")))
         .timeout(REQUEST_TIMEOUT)
         .build()
         .context("Не вдалося створити HTTP-клієнт каталогу радіо")?;
