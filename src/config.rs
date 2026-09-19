@@ -9,7 +9,7 @@ use url::Url;
 use crate::atomic_file;
 
 fn default_endpoint() -> String {
-    "http://192.168.88.122/v1/iot/active_air_raid_alerts/{uid}.json".into()
+    "https://api.alerts.in.ua/v1/iot/active_air_raid_alerts/{uid}.json".into()
 }
 fn default_token_file() -> PathBuf {
     "/var/lib/proaudio-player-alert/alerts-token".into()
