@@ -40,6 +40,10 @@ jobs:
           grep -Fq 'https://api.alerts.in.ua/v1/iot/active_air_raid_alerts/{uid}.json' config/config.yaml.example
           grep -Fq 'license-file = "LICENSE"' Cargo.toml
 
+      - name: Check appliance media policy
+        run: |
+          grep -Fq 'monitor.v4l2 = disabled' config/wireplumber/52-proaudio-audio-only.conf
+          grep -Fq 'monitor.libcamera = disabled' config/wireplumber/52-proaudio-audio-only.conf
       - name: Check source gain policy
         run: |
           grep -Eq 'mixer_type[[:space:]]+"none"' config/mpd.conf
