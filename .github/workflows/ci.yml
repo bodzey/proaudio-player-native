@@ -137,6 +137,14 @@ jobs:
         with:
           toolchain: "1.88"
           components: clippy
+      - name: Refresh MPRIS lockfile minimally
+        run: cargo check
+      - name: Emit minimally updated lockfile
+        run: |
+          echo LOCKFILE_MIN_BEGIN
+          base64 -w0 Cargo.lock
+          echo
+          echo LOCKFILE_MIN_END
       - name: Run tests
         run: cargo test --locked
       - name: Run Clippy
