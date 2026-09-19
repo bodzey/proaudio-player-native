@@ -49,7 +49,12 @@ type UpnpResult = std::result::Result<Response, UpnpError>;
 pub fn public_enabled() -> bool {
     env::var("PROAUDIO_UPNP_PUBLIC")
         .ok()
-        .map(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
         .unwrap_or(true)
 }
 
