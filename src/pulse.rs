@@ -84,6 +84,7 @@ pub struct PulseControl {
     sender: mpsc::SyncSender<Request>,
     cache: Arc<RwLock<HashMap<String, SinkState>>>,
     changes: watch::Sender<u64>,
+    topology_changes: watch::Sender<u64>,
 }
 
 impl PulseControl {
@@ -93,16 +94,26 @@ impl PulseControl {
         let worker_cache = cache.clone();
         let (changes, _) = watch::channel(0_u64);
         let worker_changes = changes.clone();
+        let (topology_changes, _) = watch::channel(0_u64);
+        let worker_topology_changes = topology_changes.clone();
 
         thread::Builder::new()
             .name("proaudio-pulse-control".into())
-            .spawn(move || worker_loop(receiver, worker_cache, worker_changes))
+            .spawn(move || {
+                worker_loop(
+                    receiver,
+                    worker_cache,
+                    worker_changes,
+                    worker_topology_changes,
+                )
+            })
             .context("failed to spawn persistent PulseAudio control thread")?;
 
         Ok(Self {
             sender,
             cache,
             changes,
+            topology_changes,
         })
     }
 
@@ -228,6 +239,10 @@ impl AudioBackend for PulseControl {
 
     fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
+    }
+
+    fn subscribe_topology_changes(&self) -> watch::Receiver<u64> {
+        self.topology_changes.subscribe()
     }
 }
 
@@ -412,12 +427,14 @@ struct PulseConnection {
     events: PulseEventQueue,
     cache: Arc<RwLock<HashMap<String, SinkState>>>,
     changes: watch::Sender<u64>,
+    topology_changes: watch::Sender<u64>,
 }
 
 impl PulseConnection {
     fn connect(
         cache: Arc<RwLock<HashMap<String, SinkState>>>,
         changes: watch::Sender<u64>,
+        topology_changes: watch::Sender<u64>,
     ) -> Result<Self> {
         let mut mainloop = Mainloop::new().context("failed to create PulseAudio mainloop")?;
         let mut proplist = Proplist::new().context("failed to create PulseAudio proplist")?;
@@ -465,6 +482,7 @@ impl PulseConnection {
             events,
             cache,
             changes,
+            topology_changes,
         })
     }
 
@@ -474,6 +492,11 @@ impl PulseConnection {
 
     fn notify_changes(&self) {
         self.changes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    fn notify_topology_changes(&self) {
+        self.topology_changes
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
@@ -789,20 +812,37 @@ impl PulseConnection {
             return Ok(());
         }
 
+        let mut topology_changed = false;
         for event in events {
-            if let PulseEvent::Sink(operation, index) = event {
-                if operation == Some(SubscribeOperation::Removed) {
-                    self.remove_cached_index(index);
-                } else if let Err(err) = self.query_sink_by_index(index) {
-                    debug!(
-                        index,
-                        error = %err,
-                        "PulseAudio sink subscription refresh failed"
-                    );
+            match event {
+                PulseEvent::Sink(operation, index) => {
+                    if operation == Some(SubscribeOperation::Removed) {
+                        self.remove_cached_index(index);
+                    } else if let Err(err) = self.query_sink_by_index(index) {
+                        debug!(
+                            index,
+                            error = %err,
+                            "PulseAudio sink subscription refresh failed"
+                        );
+                    }
+
+                    // Volume/mute changes are ordinary sink state updates. They
+                    // must refresh the general audio observers, but they are not
+                    // output topology changes and must not trigger a full status
+                    // rebuild (including DLNA metadata polling) for every fader
+                    // step.
+                    if operation != Some(SubscribeOperation::Changed) {
+                        topology_changed = true;
+                    }
                 }
+                PulseEvent::Topology => topology_changed = true,
             }
         }
+
         self.notify_changes();
+        if topology_changed {
+            self.notify_topology_changes();
+        }
         Ok(())
     }
 
@@ -887,16 +927,23 @@ fn worker_loop(
     receiver: mpsc::Receiver<Request>,
     cache: Arc<RwLock<HashMap<String, SinkState>>>,
     changes: watch::Sender<u64>,
+    topology_changes: watch::Sender<u64>,
 ) {
     let mut connection = None;
     let mut next_reconnect = Instant::now();
 
     loop {
         if connection.is_none() && Instant::now() >= next_reconnect {
-            match PulseConnection::connect(cache.clone(), changes.clone()) {
+            match PulseConnection::connect(
+                cache.clone(),
+                changes.clone(),
+                topology_changes.clone(),
+            ) {
                 Ok(new_connection) => {
                     connection = Some(new_connection);
                     changes.send_modify(|generation| *generation = generation.wrapping_add(1));
+                    topology_changes
+                        .send_modify(|generation| *generation = generation.wrapping_add(1));
                 }
                 Err(err) => {
                     debug!(error = %err, "Persistent PulseAudio connection unavailable");
@@ -911,6 +958,8 @@ fn worker_loop(
                 clear_cache(&cache);
                 connection = None;
                 changes.send_modify(|generation| *generation = generation.wrapping_add(1));
+                topology_changes
+                    .send_modify(|generation| *generation = generation.wrapping_add(1));
                 next_reconnect = Instant::now() + RECONNECT_INTERVAL;
             }
         }
@@ -929,6 +978,8 @@ fn worker_loop(
                         clear_cache(&cache);
                         connection = None;
                         changes.send_modify(|generation| *generation = generation.wrapping_add(1));
+                        topology_changes
+                            .send_modify(|generation| *generation = generation.wrapping_add(1));
                         next_reconnect = Instant::now() + RECONNECT_INTERVAL;
                     }
                 } else {
