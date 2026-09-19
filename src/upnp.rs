@@ -26,6 +26,7 @@ const UPNP_BODY_LIMIT_BYTES: usize = 128 * 1024;
 const DEVICE_TYPE: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
 const AVTRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_SERVICE: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
+const CONNECTION_MANAGER_SERVICE: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 const NAME: &str = "ProAudio Player";
 const SERVER: &str = concat!("Linux UPnP/1.0 ProAudioPlayer/", env!("CARGO_PKG_VERSION"));
 
@@ -249,13 +250,36 @@ async fn soap_control(
     let (service, action) = action_header
         .split_once('#')
         .ok_or_else(|| bad_request("Missing SOAPACTION"))?;
-    if !matches!(service, AVTRANSPORT_SERVICE | RENDERING_SERVICE) {
+    if !matches!(
+        service,
+        AVTRANSPORT_SERVICE | RENDERING_SERVICE | CONNECTION_MANAGER_SERVICE
+    ) {
         return Err(bad_request("Unsupported UPnP service"));
     }
 
     let body = std::str::from_utf8(&body).map_err(|_| bad_request("Invalid SOAP XML"))?;
     if !body.contains('<') || !body.contains('>') {
         return Err(bad_request("Invalid SOAP XML"));
+    }
+
+    if service == CONNECTION_MANAGER_SERVICE {
+        if !matches!(
+            action,
+            "GetProtocolInfo"
+                | "GetCurrentConnectionIDs"
+                | "GetCurrentConnectionInfo"
+                | "PrepareForConnection"
+        ) {
+            return Err(bad_request(format!(
+                "Unsupported ConnectionManager action: {action}"
+            )));
+        }
+
+        let payload = dlna::client()
+            .connection_manager(action, body)
+            .await
+            .map_err(service_error)?;
+        return Ok(text_response(payload, "text/xml; charset=utf-8"));
     }
 
     let player = player_snapshot(&controller).await.map_err(service_error)?;
@@ -399,12 +423,13 @@ async fn description(State(controller): State<WebController>, headers: HeaderMap
     text_response(
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
-<root xmlns="urn:schemas-upnp-org:device-1-0">
+<root xmlns="urn:schemas-upnp-org:device-1-0" xmlns:dlna="urn:schemas-dlna-org:device-1-0">
  <specVersion><major>1</major><minor>0</minor></specVersion><URLBase>http://{host}/</URLBase>
  <device><deviceType>{DEVICE_TYPE}</deviceType><friendlyName>{NAME}</friendlyName>
   <manufacturer>ProAudio Player</manufacturer>
   <modelDescription>ProAudio network audio renderer</modelDescription><modelName>ProAudio Player</modelName><modelNumber>{version}</modelNumber>
-  <serialNumber>{serial}</serialNumber><UDN>{udn}</UDN><serviceList>
+  <serialNumber>{serial}</serialNumber><UDN>{udn}</UDN><dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC><serviceList>
+   <service><serviceType>{CONNECTION_MANAGER_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId><SCPDURL>/upnp/connectionmanager.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL></eventSubURL></service>
    <service><serviceType>{AVTRANSPORT_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:AVTransport</serviceId><SCPDURL>/upnp/avtransport.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL></eventSubURL></service>
    <service><serviceType>{RENDERING_SERVICE}</serviceType><serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId><SCPDURL>/upnp/renderingcontrol.xml</SCPDURL><controlURL>/upnp/control</controlURL><eventSubURL></eventSubURL></service>
   </serviceList></device></root>"#
@@ -426,25 +451,56 @@ fn scpd(actions: &[&str]) -> Response {
     )
 }
 
+async fn proxied_scpd(path: &'static str, fallback_actions: &'static [&'static str]) -> Response {
+    match dlna::client().service_description(path).await {
+        Ok(payload) => text_response(payload, "text/xml; charset=utf-8"),
+        Err(err) => {
+            warn!(path, error = %err, "DLNA worker SCPD unavailable; using fallback descriptor");
+            scpd(fallback_actions)
+        }
+    }
+}
+
 async fn avtransport_description() -> Response {
-    scpd(&[
-        "SetAVTransportURI",
-        "SetNextAVTransportURI",
-        "GetTransportInfo",
-        "GetPositionInfo",
-        "GetMediaInfo",
-        "GetCurrentTransportActions",
-        "Play",
-        "Pause",
-        "Stop",
-        "Seek",
-        "Next",
-        "Previous",
-    ])
+    proxied_scpd(
+        "/upnp/rendertransportSCPD.xml",
+        &[
+            "SetAVTransportURI",
+            "SetNextAVTransportURI",
+            "GetTransportInfo",
+            "GetPositionInfo",
+            "GetMediaInfo",
+            "GetCurrentTransportActions",
+            "Play",
+            "Pause",
+            "Stop",
+            "Seek",
+            "Next",
+            "Previous",
+        ],
+    )
+    .await
 }
 
 async fn rendering_description() -> Response {
-    scpd(&["GetVolume", "SetVolume", "GetMute", "SetMute"])
+    proxied_scpd(
+        "/upnp/rendercontrolSCPD.xml",
+        &["GetVolume", "SetVolume", "GetMute", "SetMute"],
+    )
+    .await
+}
+
+async fn connection_manager_description() -> Response {
+    proxied_scpd(
+        "/upnp/renderconnmgrSCPD.xml",
+        &[
+            "GetProtocolInfo",
+            "GetCurrentConnectionIDs",
+            "GetCurrentConnectionInfo",
+            "PrepareForConnection",
+        ],
+    )
+    .await
 }
 
 pub fn router() -> Router<WebController> {
@@ -453,6 +509,10 @@ pub fn router() -> Router<WebController> {
         .route("/description.xml", get(description))
         .route("/upnp/avtransport.xml", get(avtransport_description))
         .route("/upnp/renderingcontrol.xml", get(rendering_description))
+        .route(
+            "/upnp/connectionmanager.xml",
+            get(connection_manager_description),
+        )
         .route("/upnp/control", post(soap_control))
         .layer(DefaultBodyLimit::max(UPNP_BODY_LIMIT_BYTES))
 }
@@ -473,6 +533,10 @@ fn alive_messages(port: u16, udn: &str) -> Vec<Vec<u8>> {
         (
             RENDERING_SERVICE.to_owned(),
             format!("{udn}::{RENDERING_SERVICE}"),
+        ),
+        (
+            CONNECTION_MANAGER_SERVICE.to_owned(),
+            format!("{udn}::{CONNECTION_MANAGER_SERVICE}"),
         ),
     ]
     .into_iter()
@@ -518,6 +582,7 @@ fn ssdp_response(message: &str, peer: SocketAddr, port: u16, udn: &str) -> Optio
         && requested != DEVICE_TYPE
         && requested != AVTRANSPORT_SERVICE
         && requested != RENDERING_SERVICE
+        && requested != CONNECTION_MANAGER_SERVICE
     {
         return None;
     }
@@ -609,15 +674,21 @@ mod tests {
 
     #[test]
     fn ssdp_supports_renderer_services() {
-        let response = ssdp_response(
-            &format!(
-                "M-SEARCH * HTTP/1.1\r\nMAN: \"ssdp:discover\"\r\nST: {AVTRANSPORT_SERVICE}\r\n\r\n"
-            ),
-            "192.0.2.10:1900".parse().expect("valid test peer"),
-            8080,
-            "uuid:test",
-        )
-        .expect("AVTransport must be discoverable");
-        assert!(String::from_utf8_lossy(&response).contains(AVTRANSPORT_SERVICE));
+        for service in [
+            AVTRANSPORT_SERVICE,
+            RENDERING_SERVICE,
+            CONNECTION_MANAGER_SERVICE,
+        ] {
+            let response = ssdp_response(
+                &format!(
+                    "M-SEARCH * HTTP/1.1\r\nMAN: \"ssdp:discover\"\r\nST: {service}\r\n\r\n"
+                ),
+                "192.0.2.10:1900".parse().expect("valid test peer"),
+                8080,
+                "uuid:test",
+            )
+            .expect("renderer service must be discoverable");
+            assert!(String::from_utf8_lossy(&response).contains(service));
+        }
     }
 }
