@@ -9,7 +9,7 @@ license-file = "LICENSE"
 
 [dependencies]
 anyhow = "1.0"
-axum = { version = "0.8", features = ["json", "http1", "ws"] }
+axum = { version = "0.8", features = ["json", "http1"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10"
 futures-core = "0.3"
