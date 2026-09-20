@@ -42,8 +42,14 @@ jobs:
 
       - name: Check appliance media policy
         run: |
+          grep -Fq 'hardware.video-capture = disabled' config/wireplumber/52-proaudio-audio-only.conf
           grep -Fq 'monitor.v4l2 = disabled' config/wireplumber/52-proaudio-audio-only.conf
           grep -Fq 'monitor.libcamera = disabled' config/wireplumber/52-proaudio-audio-only.conf
+          grep -Fq 'hardware.bluetooth = disabled' config/wireplumber/52-proaudio-audio-only.conf
+          grep -Fq 'monitor.bluez = disabled' config/wireplumber/52-proaudio-audio-only.conf
+          grep -Fq 'monitor.bluez-midi = disabled' config/wireplumber/52-proaudio-audio-only.conf
+          grep -Fq 'rtportal.enabled = false' config/wireplumber/52-proaudio-audio-only.conf
+          grep -Fq 'rtkit.enabled = false' config/wireplumber/52-proaudio-audio-only.conf
       - name: Check source gain policy
         run: |
           grep -Eq 'mixer_type[[:space:]]+"none"' config/mpd.conf
