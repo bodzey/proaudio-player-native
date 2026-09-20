@@ -1947,6 +1947,22 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_network_audio_as_one_programme_source() {
+        let mpd = serde_json::json!({
+            "available": true,
+            "state": "stopped"
+        });
+        let mut network = stream_at(61, "pacat", "ProAudioNetworkInput", "901");
+        network.name = "proaudio-network-input".into();
+
+        let sources = WebController::summarize_sources(vec![network], 1, Some("network"), &mpd);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["key"], "network");
+        assert_eq!(sources[0]["active"], true);
+        assert_eq!(sources[0]["type"], "Network Audio");
+    }
+
+    #[test]
     fn stopped_empty_mpd_sink_input_is_not_an_active_source() {
         let mpd = serde_json::json!({
             "available": true,
