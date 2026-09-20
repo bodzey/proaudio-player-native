@@ -2,6 +2,8 @@
 
 Physical PipeWire sinks are fixed at software unity. WirePlumber is configured with `api.alsa.soft-mixer = true`, so user-facing sink volume does not silently manipulate arbitrary ALSA hardware controls.
 
-When `HARDWARE_MIXER_MODE=unity`, the routing helper inspects playback-only ALSA controls with a reported dB scale. It attempts 0 dB and, if the control reports positive gain, backs off below 0 dB. Capture/input/boost/gain/tone controls and controls without a usable dB scale are not guessed. If a safe value cannot be verified, the original raw value is restored.
+The generic player defaults to `HARDWARE_MIXER_MODE=off`: it does not write ALSA hardware mixer controls during runtime routing. This keeps the core hardware-neutral and avoids analogue transients caused by changing arbitrary mixer controls while an amplifier is connected.
 
-Device-specific quirks belong in firmware hardware profiles rather than in the generic player core.
+`HARDWARE_MIXER_MODE=unity` remains available only as an explicit, validated firmware/hardware-profile opt-in. In that mode the routing helper inspects playback-only ALSA controls with a reported dB scale, targets a safe value at or below 0 dB, and restores the original raw level when the mapping is not trustworthy.
+
+Physical ALSA playback nodes use `session.suspend-timeout-seconds = 0`, so switching the final PipeWire route does not repeatedly close and reopen the DAC. Device-specific mixer or power-sequencing quirks belong in firmware hardware profiles rather than in the generic player core.
