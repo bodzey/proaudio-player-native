@@ -56,6 +56,7 @@ jobs:
           grep -Fq 'OUTPUT_SWITCH_SETTLE_MSEC=150' config/audio.env.example
           grep -Fq 'session.suspend-timeout-seconds = 0' config/wireplumber/51-proaudio-soft-mixer.conf
           grep -Fq 'node.pause-on-idle = false' config/wireplumber/51-proaudio-soft-mixer.conf
+          grep -Fq 'node.always-process = true' config/wireplumber/51-proaudio-soft-mixer.conf
           if grep -Fq 'pactl set-sink-mute "$physical" 1' scripts/audio-buses.sh; then
             echo 'physical sink must not be toggled as part of route preparation' >&2
             exit 1

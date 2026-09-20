@@ -48,7 +48,7 @@ parking instead of tearing down the audio graph.
 - The selected physical PipeWire sink is fixed at 100%/unity and is not used as a user gain control.
 - WirePlumber uses a software mixer for physical ALSA devices so desktop-style sink volume cannot silently move an arbitrary hardware mixer.
 - Generic runtime does not write ALSA hardware mixer controls. Hardware normalization is an explicit validated firmware-profile opt-in only.
-- Physical ALSA playback nodes are kept out of suspend while the appliance is running, avoiding DAC/amplifier close-open transients during output switching.
+- Physical ALSA playback nodes are kept processing and out of suspend while the appliance is running, avoiding idle/run and close/open DAC or amplifier transients during output switching.
 - Output replacement is make-before-break while MASTER is muted, with a short settling interval before the old final link is removed and user mute state is restored.
 - Graph construction is transactional: a failed module load or gain setup unloads every module created by that attempt instead of leaving a partial parallel route.
 
