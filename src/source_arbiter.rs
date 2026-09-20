@@ -140,10 +140,13 @@ impl SourceArbiter {
             .map(|(key, _)| key.clone())
     }
 
-    fn audible_stream_index(&self, streams: &[StreamState]) -> Option<u32> {
+    fn audible_stream_index(
+        streams: &[StreamState],
+        suppressed_streams: &HashSet<u32>,
+    ) -> Option<u32> {
         streams
             .iter()
-            .filter(|stream| !self.suppressed_streams.contains(&stream.index))
+            .filter(|stream| !suppressed_streams.contains(&stream.index))
             .map(|stream| stream.index)
             .max()
     }
@@ -236,7 +239,7 @@ impl SourceArbiter {
             .winner
             .as_ref()
             .and_then(|winner| grouped.get(winner))
-            .and_then(|streams| self.audible_stream_index(streams));
+            .and_then(|streams| Self::audible_stream_index(streams, &self.suppressed_streams));
 
         for (key, items) in &grouped {
             let is_winner = Some(key) == self.winner.as_ref();
@@ -343,30 +346,21 @@ mod tests {
         }
     }
 
-    fn arbiter() -> SourceArbiter {
-        let config = Arc::new(AppConfig::default());
-        let backend: Arc<dyn crate::audio_backend::AudioBackend> =
-            Arc::new(crate::pulse::PulseControl::new().expect("Pulse backend construction"));
-        let audio = AudioEngine::new(config.clone(), backend);
-        SourceArbiter::new(config, audio, Arc::new(RwLock::new(None)))
-    }
-
     #[test]
     fn newest_stream_is_the_only_audible_stream_for_a_source() {
-        let arbiter = arbiter();
+        let suppressed = HashSet::new();
         assert_eq!(
-            arbiter.audible_stream_index(&[stream(7), stream(12), stream(9)]),
+            SourceArbiter::audible_stream_index(&[stream(7), stream(12), stream(9)], &suppressed),
             Some(12)
         );
-        assert_eq!(arbiter.audible_stream_index(&[]), None);
+        assert_eq!(SourceArbiter::audible_stream_index(&[], &suppressed), None);
     }
 
     #[test]
     fn suppressed_stream_is_not_selected_again() {
-        let mut arbiter = arbiter();
-        arbiter.suppressed_streams.insert(12);
+        let suppressed = HashSet::from([12]);
         assert_eq!(
-            arbiter.audible_stream_index(&[stream(7), stream(12), stream(9)]),
+            SourceArbiter::audible_stream_index(&[stream(7), stream(12), stream(9)], &suppressed),
             Some(9)
         );
     }
