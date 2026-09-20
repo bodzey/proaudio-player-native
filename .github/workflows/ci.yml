@@ -131,6 +131,18 @@ jobs:
             echo 'MASTER meter must follow the logical MASTER bus, not a physical DAC' >&2
             exit 1
           fi
+      - name: Check network audio ingress
+        run: |
+          grep -Fq '"/audio/network"' src/api/network_audio.rs
+          grep -Fq 'application/x-proaudio-pcm' src/api/network_audio.rs
+          grep -Fq 'ProAudioNetworkInput' src/api/network_audio.rs
+          grep -Fq -- '--device=' src/api/network_audio.rs
+          grep -Fq 'network_audio_ingest' src/api/backend.rs
+          grep -Fq 'return "network".into();' src/source_arbiter.rs
+          if grep -RniE 'command::run\("kill"|self\.run\("kill"' src; then
+            echo 'control plane must not terminate receiver PIDs from stream metadata' >&2
+            exit 1
+          fi
       - name: Install native build dependencies
         run: |
           sudo apt-get update
