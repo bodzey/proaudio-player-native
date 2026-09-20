@@ -11,6 +11,7 @@ use crate::audio::AudioEngine;
 use crate::audio_backend::StreamState;
 use crate::command;
 use crate::config::AppConfig;
+use crate::dlna;
 
 pub type SharedSourceState = Arc<RwLock<Option<String>>>;
 
@@ -19,6 +20,7 @@ pub struct SourceArbiter {
     config: Arc<AppConfig>,
     audio: AudioEngine,
     active_streams: HashSet<u32>,
+    suppressed_streams: HashSet<u32>,
     winner: Option<String>,
     shared_winner: SharedSourceState,
 }
@@ -33,6 +35,7 @@ impl SourceArbiter {
             config,
             audio,
             active_streams: HashSet::new(),
+            suppressed_streams: HashSet::new(),
             winner: None,
             shared_winner,
         }
@@ -41,7 +44,8 @@ impl SourceArbiter {
     fn source_key(stream: &StreamState) -> String {
         let get = |key: &str| stream.property(key);
         let identity = format!(
-            "{} {} {}",
+            "{} {} {} {}",
+            stream.name,
             get("application.name"),
             get("application.process.binary"),
             get("media.role")
@@ -62,6 +66,9 @@ impl SourceArbiter {
         }
         if identity.contains("mpd") {
             return "mpd".into();
+        }
+        if identity.contains("bluetooth") || identity.contains("bluez") {
+            return "bluetooth".into();
         }
 
         let identity = [
@@ -92,14 +99,17 @@ impl SourceArbiter {
     }
 
     fn choose_winner(&self, grouped: &HashMap<String, Vec<StreamState>>) -> Option<String> {
+        let eligible = |item: &StreamState| !self.suppressed_streams.contains(&item.index);
+
         let newcomers = grouped.iter().filter(|(_, items)| {
             items
                 .iter()
-                .any(|item| !self.active_streams.contains(&item.index))
+                .any(|item| eligible(item) && !self.active_streams.contains(&item.index))
         });
         let newest = newcomers.max_by_key(|(_, items)| {
             items
                 .iter()
+                .filter(|item| eligible(item))
                 .map(|item| item.index)
                 .max()
                 .unwrap_or_default()
@@ -108,19 +118,21 @@ impl SourceArbiter {
             return Some(key.clone());
         }
 
-        if self
-            .winner
-            .as_ref()
-            .is_some_and(|winner| grouped.contains_key(winner))
-        {
+        if self.winner.as_ref().is_some_and(|winner| {
+            grouped
+                .get(winner)
+                .is_some_and(|items| items.iter().any(eligible))
+        }) {
             return self.winner.clone();
         }
 
         grouped
             .iter()
+            .filter(|(_, items)| items.iter().any(eligible))
             .max_by_key(|(_, items)| {
                 items
                     .iter()
+                    .filter(|item| eligible(item))
                     .map(|item| item.index)
                     .max()
                     .unwrap_or_default()
@@ -128,16 +140,25 @@ impl SourceArbiter {
             .map(|(key, _)| key.clone())
     }
 
-    fn audible_stream_index(streams: &[StreamState]) -> Option<u32> {
-        streams.iter().map(|stream| stream.index).max()
+    fn audible_stream_index(&self, streams: &[StreamState]) -> Option<u32> {
+        streams
+            .iter()
+            .filter(|stream| !self.suppressed_streams.contains(&stream.index))
+            .map(|stream| stream.index)
+            .max()
     }
 
-    async fn stop_source(&self, key: &str, streams: &[StreamState]) -> Result<()> {
+    async fn stop_source(&self, key: &str) -> Result<()> {
         if key == "mpd" {
             let out = command::run("mpc", &["stop"], false, 8).await?;
             if out.code != 0 {
                 debug!("Не вдалося зупинити MPD: {}", out.stderr);
             }
+            return Ok(());
+        }
+
+        if key == "dlna" {
+            dlna::client().control("stop").await?;
             return Ok(());
         }
 
@@ -179,24 +200,6 @@ impl SourceArbiter {
                 }
             }
         }
-
-        // Network receivers are transport endpoints. Once another source wins,
-        // terminate the losing receiver so stale transport state cannot become
-        // audible again later. systemd immediately starts a clean receiver.
-        if matches!(key, "spotify" | "airplay" | "dlna") {
-            for stream in streams {
-                let pid = stream.property("application.process.id");
-                if !pid.is_empty() && pid.chars().all(|character| character.is_ascii_digit()) {
-                    let out = command::run("kill", &["-TERM", pid], false, 3).await?;
-                    if out.code != 0 {
-                        debug!(
-                            source = key,
-                            pid, "Не вдалося завершити receiver: {}", out.stderr
-                        );
-                    }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -213,6 +216,14 @@ impl SourceArbiter {
                 .push(stream);
         }
 
+        let present_streams = grouped
+            .values()
+            .flatten()
+            .map(|stream| stream.index)
+            .collect::<HashSet<_>>();
+        self.suppressed_streams
+            .retain(|index| present_streams.contains(index));
+
         let previous = self.winner.clone();
         self.winner = self.choose_winner(&grouped);
         let changed = self.winner != previous;
@@ -225,7 +236,7 @@ impl SourceArbiter {
             .winner
             .as_ref()
             .and_then(|winner| grouped.get(winner))
-            .and_then(|streams| Self::audible_stream_index(streams));
+            .and_then(|streams| self.audible_stream_index(streams));
 
         for (key, items) in &grouped {
             let is_winner = Some(key) == self.winner.as_ref();
@@ -268,24 +279,22 @@ impl SourceArbiter {
         }
 
         if changed && self.winner.is_some() {
-            for key in grouped.keys() {
+            for (key, items) in &grouped {
                 if Some(key) != self.winner.as_ref() {
-                    if let Err(err) = self.stop_source(key, &grouped[key]).await {
+                    self.suppressed_streams
+                        .extend(items.iter().map(|stream| stream.index));
+                    if let Err(err) = self.stop_source(key).await {
                         debug!(
                             source = key,
                             error = %err,
-                            "Не вдалося завершити неактивне джерело"
+                            "Не вдалося зупинити неактивний transport; потік лишено приглушеним"
                         );
                     }
                 }
             }
         }
 
-        self.active_streams = grouped
-            .values()
-            .flatten()
-            .map(|stream| stream.index)
-            .collect();
+        self.active_streams = present_streams;
         Ok(())
     }
 
@@ -334,12 +343,38 @@ mod tests {
         }
     }
 
+    fn arbiter() -> SourceArbiter {
+        let config = Arc::new(AppConfig::default());
+        let backend: Arc<dyn crate::audio_backend::AudioBackend> =
+            Arc::new(crate::pulse::PulseControl::new().expect("Pulse backend construction"));
+        let audio = AudioEngine::new(config.clone(), backend);
+        SourceArbiter::new(config, audio, Arc::new(RwLock::new(None)))
+    }
+
     #[test]
     fn newest_stream_is_the_only_audible_stream_for_a_source() {
+        let arbiter = arbiter();
         assert_eq!(
-            SourceArbiter::audible_stream_index(&[stream(7), stream(12), stream(9)]),
+            arbiter.audible_stream_index(&[stream(7), stream(12), stream(9)]),
             Some(12)
         );
-        assert_eq!(SourceArbiter::audible_stream_index(&[]), None);
+        assert_eq!(arbiter.audible_stream_index(&[]), None);
+    }
+
+    #[test]
+    fn suppressed_stream_is_not_selected_again() {
+        let mut arbiter = arbiter();
+        arbiter.suppressed_streams.insert(12);
+        assert_eq!(
+            arbiter.audible_stream_index(&[stream(7), stream(12), stream(9)]),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn bluetooth_bridge_is_classified_as_bluetooth() {
+        let mut bluetooth = stream(5);
+        bluetooth.name = "proaudio-player-bluetooth-to-music".into();
+        assert_eq!(SourceArbiter::source_key(&bluetooth), "bluetooth");
     }
 }
