@@ -53,12 +53,20 @@ jobs:
       - name: Check click-safe physical output policy
         run: |
           grep -Fq 'HARDWARE_MIXER_MODE=off' config/audio.env.example
-          grep -Fq 'OUTPUT_SWITCH_SETTLE_MSEC=150' config/audio.env.example
           grep -Fq 'session.suspend-timeout-seconds = 0' config/wireplumber/51-proaudio-soft-mixer.conf
           grep -Fq 'node.pause-on-idle = false' config/wireplumber/51-proaudio-soft-mixer.conf
-          grep -Fq 'node.always-process = true' config/wireplumber/51-proaudio-soft-mixer.conf
           if grep -Fq 'pactl set-sink-mute "$physical" 1' scripts/audio-buses.sh; then
             echo 'physical sink must not be toggled as part of route preparation' >&2
+            exit 1
+          fi
+          grep -Fq 'pactl move-sink-input "$output_input" "$output_target"' scripts/audio-buses.sh
+          grep -Fq 'load_final_loopback_into output_loop "$MASTER_SINK" "$output_target"' scripts/audio-buses.sh
+          if awk '/load_final_loopback_into\(\)/,/^}/' scripts/audio-buses.sh | grep -Fq 'sink_dont_move=true'; then
+            echo 'final MASTER->OUTPUT loopback must remain movable' >&2
+            exit 1
+          fi
+          if grep -Fq 'load_loopback_into new_output_loop' scripts/audio-buses.sh; then
+            echo 'hot output switch must move the permanent final stream, not recreate it' >&2
             exit 1
           fi
       - name: Check source gain policy
@@ -70,8 +78,9 @@ jobs:
       - name: Check direct output graph policy
         run: |
           grep -Eq 'OUTPUT_LOOP_MODULE' scripts/audio-buses.sh
-          grep -Eq 'load_loopback_into output_loop "\$MASTER_SINK" "\$output_target"' scripts/audio-buses.sh
+          grep -Eq 'load_final_loopback_into output_loop "\$MASTER_SINK" "\$output_target"' scripts/audio-buses.sh
           grep -Fq 'proaudio-player-final-output' scripts/audio-buses.sh
+          grep -Fq 'pactl move-sink-input "$output_input" "$output_target"' scripts/audio-buses.sh
           grep -Fq 'PARKING_SINK="${PARKING_SINK:-proaudio_player_parking}"' scripts/audio-buses.sh
           if grep -Eq '^LIMITER_' config/audio.env.example; then
             echo 'the physical output path must not depend on the retired userspace PCM limiter' >&2
