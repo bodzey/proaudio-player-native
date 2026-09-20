@@ -67,6 +67,9 @@ impl SourceArbiter {
         if identity.contains("mpd") {
             return "mpd".into();
         }
+        if identity.contains("proaudio-network") || identity.contains("proaudionetworkinput") {
+            return "network".into();
+        }
         let identity = [
             get("application.process.binary"),
             get("application.name"),
