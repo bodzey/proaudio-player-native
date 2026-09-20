@@ -166,21 +166,45 @@ fi
 # and the tiny one-line selection file is checked between events. This keeps the
 # watcher dependency-free while making UI output changes deterministic.
 last_config="$(configured_snapshot)"
+
+subscription_pid=""
+subscription_fd=""
+
+stop_subscription() {
+    if [[ -n "$subscription_pid" ]]; then
+        kill "$subscription_pid" >/dev/null 2>&1 || true
+        wait "$subscription_pid" 2>/dev/null || true
+        subscription_pid=""
+    fi
+}
+
+shutdown() {
+    trap - INT TERM
+    stop_subscription
+    exit 0
+}
+
+trap stop_subscription EXIT
+trap shutdown INT TERM
+
+coproc PACTL_SUBSCRIPTION { exec pactl subscribe; }
+subscription_pid="$PACTL_SUBSCRIPTION_PID"
+subscription_fd="${PACTL_SUBSCRIPTION[0]}"
+
 while true; do
     event=""
     event_requires_reconcile=0
 
-    if IFS= read -r -t 1 event; then
+    if IFS= read -r -t 1 -u "$subscription_fd" event; then
         case "$event" in
             *" on sink "*|*" on server "*|*" on card "*)
                 event_requires_reconcile=1
                 ;;
         esac
-    else
-        read_status=$?
-        if ((read_status == 1)); then
-            break
-        fi
+    elif ! kill -0 "$subscription_pid" >/dev/null 2>&1; then
+        wait "$subscription_pid" 2>/dev/null || true
+        subscription_pid=""
+        break
     fi
 
     current_config="$(configured_snapshot)"
@@ -192,4 +216,4 @@ while true; do
         reconcile_output || true
         last_config="$(configured_snapshot)"
     fi
-done < <(pactl subscribe)
+done

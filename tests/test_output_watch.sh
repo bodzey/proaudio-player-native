@@ -76,3 +76,30 @@ wait "$watch_pid"
 grep -Fq 'onboard_output' "$apply_log"
 
 printf 'output watcher runtime selection test passed\n'
+
+
+# TERM must stop the explicit pactl subscription child promptly. A leaked
+# process-substitution child would make s6 wait until timeout-kill.
+printf '30\n' >"$MOCK_PACTL_STATE/subscribe-hold"
+MOCK_APPLY_LOG="$apply_log" AUDIO_ENV=/nonexistent OUTPUT_ENV="$output_env" BUS_SCRIPT="$bus_script" \
+    bash "$repo_root/scripts/proaudio-player-output-watch" >"$test_root/watch-term.log" 2>&1 &
+watch_pid=$!
+sleep 0.2
+kill -TERM "$watch_pid"
+
+for _ in {1..20}; do
+    if ! kill -0 "$watch_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+if kill -0 "$watch_pid" 2>/dev/null; then
+    echo 'output watcher did not terminate promptly after TERM' >&2
+    kill -KILL "$watch_pid" 2>/dev/null || true
+    wait "$watch_pid" 2>/dev/null || true
+    exit 1
+fi
+wait "$watch_pid"
+
+printf 'output watcher TERM cleanup test passed\n'

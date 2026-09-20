@@ -165,6 +165,12 @@ jobs:
           grep -Fq 'physical_sink_is_unity' scripts/proaudio-player-output-watch
           grep -Fq 'loopback_exists "$output_loop"' scripts/proaudio-player-output-watch
           grep -Fq 'desired_target="${desired_physical:-${PARKING_SINK:-proaudio_player_parking}}"' scripts/proaudio-player-output-watch
+          grep -Fq 'coproc PACTL_SUBSCRIPTION' scripts/proaudio-player-output-watch
+          grep -Fq 'stop_subscription' scripts/proaudio-player-output-watch
+          if grep -Fq 'done < <(pactl subscribe)' scripts/proaudio-player-output-watch; then
+            echo 'output watcher must own and terminate the pactl subscription child explicitly' >&2
+            exit 1
+          fi
       - name: Check transactional graph construction
         run: |
           grep -Fq 'BUILD_MODULES=()' scripts/audio-buses.sh
