@@ -5,7 +5,7 @@ ProAudio Player treats PipeWire as the realtime audio engine and the Rust daemon
 The normal playback path is:
 
 ```text
-Spotify / AirPlay / MPD / DLNA
+Spotify / AirPlay / Network / MPD / DLNA
             |
             v
      proaudio_player_music
@@ -28,7 +28,7 @@ alerts -> proaudio_player_alert|
                               DAC
 ```
 
-The MUSIC, ALERT and MASTER buses and the final MASTER-to-device connection are PipeWire/Pulse graph links. There is no polling userspace PCM relay in the permanent output path.
+The MUSIC, ALERT and MASTER buses and the final MASTER-to-device connection are PipeWire/Pulse graph links. There is no polling userspace PCM relay in the permanent output path. Network senders enter through a transient `pacat` sink-input on MUSIC; when the sender disconnects that process exits and no additional graph object remains.
 
 If no physical output exists, the final link terminates at `proaudio_player_parking`,
 a silent null sink. The logical buses and control API remain alive. When a DAC
