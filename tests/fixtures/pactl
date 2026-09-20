@@ -52,7 +52,7 @@ case "$command_name" in
     get-sink-mute)
         printf 'Mute: no\n'
         ;;
-    set-default-sink|set-sink-volume|set-sink-mute|set-sink-input-volume)
+    set-default-sink|set-sink-volume|set-sink-mute|set-sink-input-volume|move-sink-input)
         printf '%s|%s\n' "$command_name" "$*" >>"$state/calls"
         ;;
     subscribe)
