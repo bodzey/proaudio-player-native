@@ -1500,17 +1500,22 @@ async fn play_file(
     Ok(Json(json!({ "playing": path })))
 }
 
+fn unsafe_ipv4_stream_address(value: Ipv4Addr) -> bool {
+    value.is_private()
+        || value.is_loopback()
+        || value.is_link_local()
+        || value.is_multicast()
+        || value == Ipv4Addr::UNSPECIFIED
+        || value.octets()[0] == 0
+}
+
 fn unsafe_stream_address(address: IpAddr) -> bool {
     match address {
-        IpAddr::V4(value) => {
-            value.is_private()
-                || value.is_loopback()
-                || value.is_link_local()
-                || value.is_multicast()
-                || value == Ipv4Addr::UNSPECIFIED
-                || value.octets()[0] == 0
-        }
+        IpAddr::V4(value) => unsafe_ipv4_stream_address(value),
         IpAddr::V6(value) => {
+            if let Some(mapped) = value.to_ipv4_mapped() {
+                return unsafe_ipv4_stream_address(mapped);
+            }
             value.is_loopback()
                 || value.is_unspecified()
                 || value.is_multicast()
@@ -1903,6 +1908,19 @@ mod tests {
     use crate::audio_backend::StreamState;
 
     use super::{AudioSettingsBody, WebController};
+
+    #[test]
+    fn stream_url_guard_rejects_ipv4_mapped_private_ipv6() {
+        assert!(super::unsafe_stream_address(
+            "::ffff:192.168.1.10".parse().unwrap()
+        ));
+        assert!(super::unsafe_stream_address(
+            "::ffff:127.0.0.1".parse().unwrap()
+        ));
+        assert!(!super::unsafe_stream_address(
+            "::ffff:8.8.8.8".parse().unwrap()
+        ));
+    }
 
     #[test]
     fn audio_settings_accepts_canonical_and_legacy_air_raid_switches() {
