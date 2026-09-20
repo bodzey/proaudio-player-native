@@ -153,45 +153,6 @@ pub struct WebController {
 }
 
 impl WebController {
-    fn receiver_process_id<'a>(
-        stream: &'a crate::audio_backend::StreamState,
-        key: &str,
-    ) -> Option<&'a str> {
-        let binary = stream.property("application.process.binary");
-        let application = stream.property("application.name");
-        let matches = match key {
-            "spotify" => {
-                binary.to_ascii_lowercase().contains("spotify")
-                    || application.to_ascii_lowercase().contains("spotify")
-            }
-            _ => false,
-        };
-        let pid = stream.property("application.process.id");
-        (matches && !pid.is_empty() && pid.bytes().all(|value| value.is_ascii_digit()))
-            .then_some(pid)
-    }
-
-    async fn terminate_receiver_streams(&self, key: &str) -> Result<()> {
-        let pids = self
-            .audio
-            .list_sink_inputs()
-            .await?
-            .iter()
-            .filter_map(|stream| Self::receiver_process_id(stream, key).map(str::to_owned))
-            .collect::<BTreeSet<_>>();
-
-        for pid in pids {
-            let output = self.run("kill", &["-TERM", &pid], false, 3).await?;
-            if output.code != 0 {
-                bail!(
-                    "Не вдалося зупинити {key} receiver PID {pid}: {}",
-                    output.stderr
-                );
-            }
-        }
-        Ok(())
-    }
-
     pub fn new(
         config: Arc<AppConfig>,
         audio: AudioEngine,
@@ -310,7 +271,8 @@ impl WebController {
                 }
             };
 
-            let identity = format!("{application} {binary}").to_ascii_lowercase();
+            let identity =
+                format!("{application} {binary} {media} {}", item.name).to_ascii_lowercase();
             let (source_key, mut source_type) = if identity.contains("spotify") {
                 ("spotify".to_owned(), "Spotify Connect".to_owned())
             } else if identity.contains("shairport") || identity.contains("airplay") {
@@ -322,6 +284,8 @@ impl WebController {
                 ("dlna".to_owned(), "DLNA / UPnP".to_owned())
             } else if identity.contains("mpd") {
                 ("mpd".to_owned(), "Локальна бібліотека".to_owned())
+            } else if identity.contains("bluetooth") || identity.contains("bluez") {
+                ("bluetooth".to_owned(), "Bluetooth".to_owned())
             } else {
                 (format!("other:{binary}"), application.clone())
             };
@@ -922,12 +886,6 @@ impl WebController {
                 self.mpris_control(service, mpris_method).await?;
             }
 
-            if backend == "spotify-mpris" && action == "stop" {
-                // spotifyd can acknowledge MPRIS Stop while its existing audio
-                // stream keeps draining. Terminating the identified receiver is
-                // the only deterministic Stop; systemd starts a clean endpoint.
-                self.terminate_receiver_streams("spotify").await?;
-            }
         } else if backend == "dlna-upnp" {
             dlna::client().control(action).await?;
         } else {
@@ -1983,27 +1941,6 @@ mod tests {
 
     fn stream(binary: &str, application: &str, pid: &str) -> StreamState {
         stream_at(1, binary, application, pid)
-    }
-
-    #[test]
-    fn identifies_only_numeric_spotify_receiver_pid() {
-        let spotify = stream("spotifyd", "Spotify", "1234");
-        assert_eq!(
-            WebController::receiver_process_id(&spotify, "spotify"),
-            Some("1234")
-        );
-
-        assert_eq!(
-            WebController::receiver_process_id(&stream("mpd", "MPD", "22"), "spotify"),
-            None
-        );
-        assert_eq!(
-            WebController::receiver_process_id(
-                &stream("spotifyd", "Spotify", "1234; reboot"),
-                "spotify"
-            ),
-            None
-        );
     }
 
     #[test]
