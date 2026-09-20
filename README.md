@@ -11,7 +11,7 @@ The native daemon owns:
 - alerts.in.ua polling through the official HTTPS API, Bearer-token authentication, `A/P/N` semantics, rate-limit handling and configurable clear confirmations;
 - alert start/end announcements, ducking, mixer-state restoration and crash recovery;
 - the daily minute-of-silence scheduler;
-- exclusive arbitration between Spotify Connect, AirPlay, DLNA/UPnP and MPD/local playback;
+- exclusive arbitration between Spotify Connect, AirPlay, network audio, DLNA/UPnP and MPD/local playback;
 - a unified player model and transport controls across MPD, MPRIS and DLNA;
 - MPD library, playlists, queue and HTTP(S) stream playback;
 - logical MUSIC, ALERT and MASTER gain control;
@@ -30,7 +30,7 @@ The native daemon is one Rust executable:
 proaudio-player-native
 ```
 
-External media engines remain independent services. The current appliance uses Spotifyd, Shairport Sync, MPD, the DLNA transport worker, PipeWire with its Pulse compatibility server, ALSA and mpv. Keeping media engines outside the control process isolates protocol/decoder failures while the orchestration, state machine, API and scheduling remain native.
+External media engines remain independent services. The current appliance uses Spotifyd, Shairport Sync, MPD, a UPnP/DLNA renderer engine, PipeWire with its Pulse compatibility server, ALSA, pacat and mpv. Keeping media engines outside the control process isolates protocol/decoder failures while the orchestration, state machine, API and scheduling remain native.
 
 The control plane does not depend on a browser frontend. The WebUI is developed separately in `bodzey/proaudio-player-webui` and may be installed under `/usr/share/proaudio-player/webui`. If no frontend is installed, the control API and audio runtime continue to operate normally.
 
@@ -97,7 +97,7 @@ https://api.alerts.in.ua/v1/iot/active_air_raid_alerts/{uid}.json
 
 ## Audio boundary
 
-The current stable runtime controls PipeWire through the Pulse compatibility API. Source receivers remain transport endpoints at unity gain; user gain belongs to the logical MUSIC/ALERT/MASTER buses. Output hot-plug is isolated behind the logical MASTER bus and the parking sink so loss of a physical DAC does not destroy the control plane.
+The current stable runtime controls PipeWire through the Pulse compatibility API. Source receivers remain transport endpoints at unity gain; user gain belongs to the logical MUSIC/ALERT/MASTER buses. Output hot-plug is isolated behind the logical MASTER bus and the parking sink so loss of a physical DAC does not destroy the control plane. Network audio senders can stream 48 kHz stereo float32 PCM into the MUSIC bus through `/api/v1/audio/network`; this ingress is transient and does not replace the permanent PipeWire graph.
 
 See `docs/audio-architecture.md`, `docs/gain-safety.md` and `docs/verification.md` for the detailed audio contract.
 
