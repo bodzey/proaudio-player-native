@@ -42,6 +42,7 @@ use super::webui;
 
 mod alert_media;
 mod mpris;
+mod network_audio;
 use mpris::MprisMonitor;
 
 const API_VERSION: &str = "1";
@@ -284,6 +285,10 @@ impl WebController {
                 ("dlna".to_owned(), "DLNA / UPnP".to_owned())
             } else if identity.contains("mpd") {
                 ("mpd".to_owned(), "Локальна бібліотека".to_owned())
+            } else if identity.contains("proaudio-network")
+                || identity.contains("proaudionetworkinput")
+            {
+                ("network".to_owned(), "Network Audio".to_owned())
             } else {
                 (format!("other:{binary}"), application.clone())
             };
@@ -1095,7 +1100,7 @@ async fn capabilities() -> Json<Value> {
         "features": [
             "status", "player_control", "audio_mixer", "audio_outputs", "audio_diagnostics",
             "audio_hardware_read_only", "audio_settings", "meters", "library", "playlists",
-            "queue", "network_streams", "alert_settings", "alert_media"
+            "queue", "network_streams", "network_audio_ingest", "alert_settings", "alert_media"
         ]
     }))
 }
@@ -1793,7 +1798,7 @@ fn api_routes() -> Router<WebController> {
         )
         .layer(DefaultBodyLimit::max(alert_media::MAX_ALERT_MEDIA_BYTES));
 
-    control.merge(alert_media)
+    control.merge(alert_media).merge(network_audio::router())
 }
 
 pub fn router(controller: WebController) -> Router {
