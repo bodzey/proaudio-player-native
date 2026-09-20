@@ -284,8 +284,6 @@ impl WebController {
                 ("dlna".to_owned(), "DLNA / UPnP".to_owned())
             } else if identity.contains("mpd") {
                 ("mpd".to_owned(), "Локальна бібліотека".to_owned())
-            } else if identity.contains("bluetooth") || identity.contains("bluez") {
-                ("bluetooth".to_owned(), "Bluetooth".to_owned())
             } else {
                 (format!("other:{binary}"), application.clone())
             };
