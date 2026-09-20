@@ -32,6 +32,7 @@ The following paths are relative to `/api/v1`:
 
 - `POST /volume`, `POST /mute`, `POST /player`
 - `GET|POST /audio/mixer`, `GET|POST /audio/outputs`
+- `POST /audio/network` — one live network PCM programme stream
 - `GET /audio/hardware`, `GET /audio/diagnostics`, `POST /audio/level`
 - `GET|PUT /settings/audio`, `GET|PUT /settings/alerts`
 - `POST /settings/alerts/test`
@@ -47,6 +48,28 @@ The following paths are relative to `/api/v1`:
 Alert-media uploads accept the raw MP3 body for `alarm_start`, `alarm_end` or `minute_silence`, up to 16 MiB. Runtime replacements are stored at the configured persistent paths; factory copies remain read-only below `/usr/share/proaudio-player/announcements`.
 
 `GET|PUT /settings/audio` controls the independent air-raid and minute-of-silence features. Runtime changes are persisted atomically and observed without restarting the daemon.
+
+## Network audio ingress
+
+`POST /api/v1/audio/network` accepts one live PCM programme stream at a time.
+It is intended for trusted local senders such as the ProAudio Player Android app
+or Chrome extension.
+
+The wire format is fixed and deliberately simple:
+
+- `Content-Type: application/x-proaudio-pcm`
+- `X-ProAudio-Sample-Format: float32le`
+- `X-ProAudio-Sample-Rate: 48000`
+- `X-ProAudio-Channels: 2`
+- request body: interleaved little-endian stereo float32 PCM
+
+The daemon forwards the body to a unity-gain `pacat` playback stream targeting
+the logical MUSIC sink. Source arbitration, alert ducking, MUSIC gain, MASTER gain
+and physical output routing therefore remain identical to the other programme
+transports. A second simultaneous network stream returns `409 Conflict`.
+
+Disconnecting the HTTP request terminates the transient playback stream. The
+runtime image must provide `pacat` from the PulseAudio client utilities.
 
 ## UPnP/DLNA
 
