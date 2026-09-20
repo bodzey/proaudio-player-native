@@ -78,8 +78,9 @@ jobs:
       - name: Check direct output graph policy
         run: |
           grep -Eq 'OUTPUT_LOOP_MODULE' scripts/audio-buses.sh
-          grep -Eq 'load_loopback_into output_loop "\$MASTER_SINK" "\$output_target"' scripts/audio-buses.sh
+          grep -Eq 'load_final_loopback_into output_loop "\$MASTER_SINK" "\$output_target"' scripts/audio-buses.sh
           grep -Fq 'proaudio-player-final-output' scripts/audio-buses.sh
+          grep -Fq 'pactl move-sink-input "$output_input" "$output_target"' scripts/audio-buses.sh
           grep -Fq 'PARKING_SINK="${PARKING_SINK:-proaudio_player_parking}"' scripts/audio-buses.sh
           if grep -Eq '^LIMITER_' config/audio.env.example; then
             echo 'the physical output path must not depend on the retired userspace PCM limiter' >&2
