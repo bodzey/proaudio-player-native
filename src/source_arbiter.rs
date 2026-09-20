@@ -67,10 +67,6 @@ impl SourceArbiter {
         if identity.contains("mpd") {
             return "mpd".into();
         }
-        if identity.contains("bluetooth") || identity.contains("bluez") {
-            return "bluetooth".into();
-        }
-
         let identity = [
             get("application.process.binary"),
             get("application.name"),
@@ -365,10 +361,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bluetooth_bridge_is_classified_as_bluetooth() {
-        let mut bluetooth = stream(5);
-        bluetooth.name = "proaudio-player-bluetooth-to-music".into();
-        assert_eq!(SourceArbiter::source_key(&bluetooth), "bluetooth");
-    }
 }
