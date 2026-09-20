@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
@@ -146,6 +147,7 @@ pub struct WebController {
     events: broadcast::Sender<String>,
     event_demand: Arc<Notify>,
     audio_control_lock: Arc<Mutex<()>>,
+    audio_topology_revision: Arc<AtomicU64>,
     mpd: MpdMonitor,
     mpris: MprisMonitor,
 }
@@ -205,6 +207,7 @@ impl WebController {
             events,
             event_demand: Arc::new(Notify::new()),
             audio_control_lock: Arc::new(Mutex::new(())),
+            audio_topology_revision: Arc::new(AtomicU64::new(0)),
             mpd: MpdMonitor::new(),
             mpris: MprisMonitor::new(),
         }
@@ -840,6 +843,7 @@ impl WebController {
             "name": "ProAudio Player",
             "volume": (volume * 10.0).round() / 10.0,
             "muted": muted,
+            "audio_topology_revision": self.audio_topology_revision.load(Ordering::Relaxed),
             "priority": self.priority_state().await,
             "mpd": mpd,
             "sources": sources,
@@ -1881,6 +1885,9 @@ pub async fn serve(controller: WebController) -> Result<()> {
     let output_event_controller = controller.clone();
     tokio::spawn(async move {
         while output_changes.changed().await.is_ok() {
+            output_event_controller
+                .audio_topology_revision
+                .fetch_add(1, Ordering::Relaxed);
             if output_event_controller.events.receiver_count() == 0 {
                 continue;
             }
