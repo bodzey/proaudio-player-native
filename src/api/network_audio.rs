@@ -1,94 +1,83 @@
 use std::process::Stdio;
 use std::time::Instant;
 
-use axum::body::Body;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
 use super::WebController;
 
-const CONTENT_TYPE: &str = "application/x-proaudio-pcm";
-const SAMPLE_FORMAT: &str = "float32le";
-const SAMPLE_RATE: u32 = 48_000;
-const CHANNELS: u8 = 2;
+const SUBPROTOCOL: &str = "proaudio-pcm-f32le-48000-stereo-v1";
 const PACAT_LATENCY_MSEC: &str = "80";
 const PACAT_PROCESS_MSEC: &str = "20";
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 static NETWORK_STREAM: Semaphore = Semaphore::const_new(1);
 
-fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name)?.to_str().ok().map(str::trim)
-}
-
-fn validate_format(headers: &HeaderMap) -> Result<(), &'static str> {
-    let media_type = header_text(headers, "content-type")
-        .and_then(|value| value.split(';').next())
-        .map(str::trim);
-    if media_type != Some(CONTENT_TYPE) {
-        return Err("Content-Type має бути application/x-proaudio-pcm");
-    }
-
-    let format = header_text(headers, "x-proaudio-sample-format").unwrap_or(SAMPLE_FORMAT);
-    if format != SAMPLE_FORMAT {
-        return Err("Підтримується лише x-proaudio-sample-format=float32le");
-    }
-
-    let rate = header_text(headers, "x-proaudio-sample-rate")
-        .unwrap_or("48000")
-        .parse::<u32>()
-        .map_err(|_| "Некоректний x-proaudio-sample-rate")?;
-    if rate != SAMPLE_RATE {
-        return Err("Підтримується лише x-proaudio-sample-rate=48000");
-    }
-
-    let channels = header_text(headers, "x-proaudio-channels")
-        .unwrap_or("2")
-        .parse::<u8>()
-        .map_err(|_| "Некоректний x-proaudio-channels")?;
-    if channels != CHANNELS {
-        return Err("Підтримується лише x-proaudio-channels=2");
-    }
-
-    Ok(())
+fn accepts_subprotocol(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|protocol| protocol == SUBPROTOCOL)
+        })
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
-async fn ingest(
+async fn upgrade(
     State(controller): State<WebController>,
     headers: HeaderMap,
-    body: Body,
+    websocket: WebSocketUpgrade,
 ) -> Response {
-    if let Err(message) = validate_format(&headers) {
-        return json_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, message);
+    if !accepts_subprotocol(&headers) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!("Потрібен WebSocket subprotocol {SUBPROTOCOL}"),
+        );
     }
 
-    let Ok(_permit) = NETWORK_STREAM.try_acquire() else {
-        return json_error(
-            StatusCode::CONFLICT,
-            "Мережевий аудіопотік уже активний",
-        );
+    let permit = match NETWORK_STREAM.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "Мережевий аудіопотік уже активний",
+            );
+        }
     };
 
+    websocket
+        .protocols([SUBPROTOCOL])
+        .on_upgrade(move |socket| stream_audio(controller, socket, permit))
+}
+
+async fn stream_audio(
+    controller: WebController,
+    mut socket: WebSocket,
+    _permit: SemaphorePermit<'static>,
+) {
     let sink = controller.config.audio.music_sink.trim().to_owned();
     if sink.is_empty() {
-        return json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "MUSIC sink не налаштовано",
-        );
+        let _ = socket
+            .send(Message::Close(None))
+            .await;
+        return;
     }
 
     let device = format!("--device={sink}");
@@ -116,131 +105,93 @@ async fn ingest(
     {
         Ok(child) => child,
         Err(error) => {
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Не вдалося запустити network audio sink: {error}"),
-            );
+            warn!(%error, "Не вдалося запустити network audio sink");
+            let _ = socket.send(Message::Close(None)).await;
+            return;
         }
     };
 
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.start_kill();
-        return json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Не вдалося відкрити stdin network audio sink",
-        );
+        let _ = socket.send(Message::Close(None)).await;
+        return;
     };
 
     let started = Instant::now();
     let mut bytes_received: u64 = 0;
-    let mut stream = body.into_data_stream();
+    info!(sink, "Мережевий PCM WebSocket підключено");
 
-    info!(sink, "Мережевий PCM-потік підключено");
-
-    while let Some(frame) = stream.next().await {
-        let data = match frame {
-            Ok(data) => data,
-            Err(error) => {
-                warn!(%error, "Помилка HTTP body мережевого аудіопотоку");
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return json_error(StatusCode::BAD_REQUEST, "Потік перервано під час передачі");
+    while let Some(message) = socket.next().await {
+        match message {
+            Ok(Message::Binary(data)) => {
+                if data.is_empty() {
+                    continue;
+                }
+                if data.len() > MAX_FRAME_BYTES {
+                    warn!(bytes = data.len(), "Network audio frame перевищує ліміт");
+                    break;
+                }
+                if stdin.write_all(&data).await.is_err() {
+                    warn!("Network audio playback process перестав приймати PCM");
+                    break;
+                }
+                bytes_received = bytes_received.saturating_add(data.len() as u64);
             }
-        };
-
-        if data.len() > MAX_FRAME_BYTES {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            return json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Окремий фрагмент PCM перевищує 256 KiB",
-            );
+            Ok(Message::Close(_)) => break,
+            Ok(Message::Ping(_))
+            | Ok(Message::Pong(_))
+            | Ok(Message::Text(_)) => {}
+            Err(error) => {
+                warn!(%error, "Помилка WebSocket мережевого аудіопотоку");
+                break;
+            }
         }
-
-        if let Err(error) = stdin.write_all(&data).await {
-            warn!(%error, "Network audio playback process перестав приймати PCM");
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Аудіовихід перестав приймати мережевий потік",
-            );
-        }
-        bytes_received = bytes_received.saturating_add(data.len() as u64);
     }
 
     let _ = stdin.shutdown().await;
     drop(stdin);
 
-    let status = match timeout(Duration::from_secs(2), child.wait()).await {
-        Ok(Ok(status)) => status,
+    match timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(Ok(status)) if status.success() => {}
+        Ok(Ok(status)) => {
+            warn!(%status, "Network audio sink завершився з помилкою");
+        }
         Ok(Err(error)) => {
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Не вдалося завершити network audio sink: {error}"),
-            );
+            warn!(%error, "Не вдалося дочекатися network audio sink");
         }
         Err(_) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Network audio sink не завершився вчасно",
-            );
         }
-    };
-
-    if !status.success() {
-        return json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Network audio sink завершився з {status}"),
-        );
     }
 
-    let elapsed_ms = started.elapsed().as_millis();
-    info!(bytes_received, elapsed_ms, "Мережевий PCM-потік завершено");
-
-    Json(json!({
-        "ok": true,
-        "bytes_received": bytes_received,
-        "duration_ms": elapsed_ms,
-        "format": SAMPLE_FORMAT,
-        "sample_rate": SAMPLE_RATE,
-        "channels": CHANNELS,
-    }))
-    .into_response()
+    info!(
+        bytes_received,
+        elapsed_ms = started.elapsed().as_millis(),
+        "Мережевий PCM WebSocket завершено"
+    );
 }
 
 pub(super) fn router() -> Router<WebController> {
-    Router::new().route("/audio/network", post(ingest))
+    Router::new().route("/audio/network", get(upgrade))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn headers() -> HeaderMap {
+    #[test]
+    fn accepts_only_canonical_pcm_subprotocol() {
         let mut headers = HeaderMap::new();
-        headers.insert("content-type", CONTENT_TYPE.parse().unwrap());
-        headers.insert("x-proaudio-sample-format", SAMPLE_FORMAT.parse().unwrap());
-        headers.insert("x-proaudio-sample-rate", "48000".parse().unwrap());
-        headers.insert("x-proaudio-channels", "2".parse().unwrap());
-        headers
-    }
+        headers.insert(
+            "sec-websocket-protocol",
+            "other, proaudio-pcm-f32le-48000-stereo-v1"
+                .parse()
+                .unwrap(),
+        );
+        assert!(accepts_subprotocol(&headers));
 
-    #[test]
-    fn accepts_canonical_network_pcm_format() {
-        assert!(validate_format(&headers()).is_ok());
-    }
-
-    #[test]
-    fn rejects_wrong_rate_and_media_type() {
-        let mut wrong_rate = headers();
-        wrong_rate.insert("x-proaudio-sample-rate", "44100".parse().unwrap());
-        assert!(validate_format(&wrong_rate).is_err());
-
-        let mut wrong_type = headers();
-        wrong_type.insert("content-type", "audio/wav".parse().unwrap());
-        assert!(validate_format(&wrong_type).is_err());
+        headers.insert("sec-websocket-protocol", "other".parse().unwrap());
+        assert!(!accepts_subprotocol(&headers));
     }
 }
