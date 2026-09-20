@@ -13,9 +13,10 @@ AUDIO_CHANNELS="${AUDIO_CHANNELS:-2}"
 INTERNAL_SAMPLE_FORMAT="${INTERNAL_SAMPLE_FORMAT:-float32le}"
 LOOPBACK_LATENCY_MSEC="${LOOPBACK_LATENCY_MSEC:-100}"
 OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
-HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-unity}"
+HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-off}"
 GRAPH_UNITY_DB="0.0"
 GRAPH_UNITY_RAW="65536"
+OUTPUT_SWITCH_SETTLE_MSEC="${OUTPUT_SWITCH_SETTLE_MSEC:-150}"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
 LOCK_DIR="${XDG_RUNTIME_DIR}/proaudio-player-audio-routing.lock"
 BUILD_MODULES=()
@@ -307,16 +308,43 @@ prepare_hardware_mixer() {
     fi
 }
 
+physical_sink_software_is_unity() {
+    local physical="$1"
+    [[ "$(pactl get-sink-mute "$physical" 2>/dev/null | awk '{print $2}')" == "no" ]] || return 1
+    pactl get-sink-volume "$physical" 2>/dev/null |
+        tr '/,' '\n' |
+        awk '
+            BEGIN { valid=1 }
+            /^[[:space:]]*[0-9]+%[[:space:]]*$/ {
+                value=$1
+                found=1
+                if (value != "100%") valid=0
+            }
+            END { exit !(found && valid) }'
+}
+
 prepare_physical_sink() {
     local physical="$1"
     if [[ "$OUTPUT_VOLUME_PERCENT" != "100" ]]; then
         echo "OUTPUT_VOLUME_PERCENT має бути 100: фізичний software sink є фіксованим unity stage" >&2
         return 1
     fi
-    pactl set-sink-mute "$physical" 1
-    prepare_hardware_mixer "$physical"
-    pactl set-sink-volume "$physical" 100%
-    pactl set-sink-mute "$physical" 0
+
+    # Generic runtime never toggles the physical sink merely to prepare a route:
+    # hardware/DAC mute or mixer writes can create analogue transients even when
+    # MASTER is digitally muted. Device-specific hardware normalization is an
+    # explicit firmware opt-in through HARDWARE_MIXER_MODE=unity.
+    if [[ "$HARDWARE_MIXER_MODE" == "unity" ]]; then
+        prepare_hardware_mixer "$physical"
+    elif [[ "$HARDWARE_MIXER_MODE" != "off" ]]; then
+        echo "HARDWARE_MIXER_MODE має бути 'unity' або 'off'" >&2
+        return 1
+    fi
+
+    if ! physical_sink_software_is_unity "$physical"; then
+        pactl set-sink-volume "$physical" 100%
+        pactl set-sink-mute "$physical" 0
+    fi
 }
 
 load_loopback_into() {
@@ -398,6 +426,11 @@ validate_audio_bus_config() {
     fi
     if [[ "$INTERNAL_SAMPLE_FORMAT" != "float32le" ]]; then
         echo "INTERNAL_SAMPLE_FORMAT має бути float32le для high-precision mixed graph" >&2
+        return 1
+    fi
+    if ! [[ "$OUTPUT_SWITCH_SETTLE_MSEC" =~ ^[0-9]+$ ]] \
+        || ((10#$OUTPUT_SWITCH_SETTLE_MSEC > 2000)); then
+        echo "OUTPUT_SWITCH_SETTLE_MSEC має бути цілим числом від 0 до 2000" >&2
         return 1
     fi
 }
@@ -540,6 +573,10 @@ switch_output() {
         [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
         echo "Не вдалося зафіксувати новий маршрут; попередній маршрут залишено" >&2
         return 1
+    fi
+
+    if ((10#$OUTPUT_SWITCH_SETTLE_MSEC > 0)); then
+        sleep "$(awk -v ms="$OUTPUT_SWITCH_SETTLE_MSEC" 'BEGIN { printf "%.3f", ms / 1000 }')"
     fi
 
     if [[ "$old_output_loop" =~ ^[0-9]+$ ]] \
