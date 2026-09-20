@@ -356,6 +356,16 @@ load_loopback_into() {
         source_dont_move=true sink_dont_move=true
 }
 
+load_final_loopback_into() {
+    local destination="$1" source="$2" target="$3"
+    load_module_into "$destination" module-loopback \
+        source="$source.monitor" sink="$target" \
+        latency_msec="$LOOPBACK_LATENCY_MSEC" \
+        source_output_properties="node.passive=true resample.quality=10" \
+        sink_input_properties="media.name=proaudio-player-final-output node.passive=true resample.quality=10" \
+        source_dont_move=true
+}
+
 sink_input_for_module() {
     local module="$1"
     pactl list sink-inputs | awk -v wanted="$module" '
@@ -452,8 +462,7 @@ start_buses() {
             "proaudio-player-music-to-master" \
         || ! load_loopback_into alert_loop "$ALERT_SINK" "$MASTER_SINK" \
             "proaudio-player-alert-to-master" \
-        || ! load_loopback_into output_loop "$MASTER_SINK" "$output_target" \
-            "proaudio-player-final-output"; then
+        || ! load_final_loopback_into output_loop "$MASTER_SINK" "$output_target"; then
         echo "Не вдалося створити повний аудіограф; часткові модулі видаляються" >&2
         cleanup_build_modules
         return 1
