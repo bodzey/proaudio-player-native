@@ -1,87 +1,67 @@
 use std::process::Stdio;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::post;
 use axum::{Json, Router};
-use futures_util::StreamExt;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
 use super::WebController;
 
-const SUBPROTOCOL: &str = "proaudio-pcm-f32le-48000-stereo-v1";
+const CONTENT_TYPE: &str = "application/x-proaudio-pcm";
+const SAMPLE_FORMAT: &str = "float32le";
+const SAMPLE_RATE: u32 = 48_000;
+const CHANNELS: u8 = 2;
+const BYTES_PER_FRAME: usize = CHANNELS as usize * std::mem::size_of::<f32>();
+const MAX_CHUNK_BYTES: usize = 128 * 1024;
+const SESSION_IDLE_SECONDS: u64 = 4;
 const PACAT_LATENCY_MSEC: &str = "80";
 const PACAT_PROCESS_MSEC: &str = "20";
-const MAX_FRAME_BYTES: usize = 256 * 1024;
 
-static NETWORK_STREAM: Semaphore = Semaphore::const_new(1);
+static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static NETWORK_SESSION: LazyLock<Arc<Mutex<Option<SessionHandle>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
 
-fn accepts_subprotocol(headers: &HeaderMap) -> bool {
-    headers
-        .get("sec-websocket-protocol")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .any(|protocol| protocol == SUBPROTOCOL)
-        })
+#[derive(Clone)]
+struct SessionHandle {
+    id: u64,
+    sender: mpsc::Sender<Vec<u8>>,
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
-async fn upgrade(
-    State(controller): State<WebController>,
-    headers: HeaderMap,
-    websocket: WebSocketUpgrade,
-) -> Response {
-    if !accepts_subprotocol(&headers) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            format!("Потрібен WebSocket subprotocol {SUBPROTOCOL}"),
-        );
-    }
-
-    let permit = match NETWORK_STREAM.try_acquire() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return json_error(
-                StatusCode::CONFLICT,
-                "Мережевий аудіопотік уже активний",
-            );
-        }
-    };
-
-    websocket
-        .protocols([SUBPROTOCOL])
-        .on_upgrade(move |socket| stream_audio(controller, socket, permit))
+fn session_id(headers: &HeaderMap) -> Result<u64, &'static str> {
+    headers
+        .get("x-proaudio-session")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Відсутній X-ProAudio-Session")?
+        .parse::<u64>()
+        .map_err(|_| "Некоректний X-ProAudio-Session")
 }
 
-async fn stream_audio(
-    controller: WebController,
-    mut socket: WebSocket,
-    _permit: SemaphorePermit<'static>,
-) {
-    let sink = controller.config.audio.music_sink.trim().to_owned();
-    if sink.is_empty() {
-        let _ = socket
-            .send(Message::Close(None))
-            .await;
-        return;
-    }
+fn valid_pcm_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        == Some(CONTENT_TYPE)
+}
 
+fn spawn_pacat(sink: &str) -> std::io::Result<(Child, ChildStdin)> {
     let device = format!("--device={sink}");
-    let mut child = match Command::new("pacat")
+    let mut child = Command::new("pacat")
         .arg("--playback")
         .arg("--raw")
         .arg(device)
@@ -101,48 +81,33 @@ async fn stream_audio(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            warn!(%error, "Не вдалося запустити network audio sink");
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-    };
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("pacat stdin unavailable"))?;
+    Ok((child, stdin))
+}
 
-    let Some(mut stdin) = child.stdin.take() else {
-        let _ = child.start_kill();
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    };
-
-    let started = Instant::now();
+async fn playback_task(
+    session_id: u64,
+    mut receiver: mpsc::Receiver<Vec<u8>>,
+    mut child: Child,
+    mut stdin: ChildStdin,
+) {
     let mut bytes_received: u64 = 0;
-    info!(sink, "Мережевий PCM WebSocket підключено");
-
-    while let Some(message) = socket.next().await {
-        match message {
-            Ok(Message::Binary(data)) => {
-                if data.is_empty() {
-                    continue;
-                }
-                if data.len() > MAX_FRAME_BYTES {
-                    warn!(bytes = data.len(), "Network audio frame перевищує ліміт");
-                    break;
-                }
-                if stdin.write_all(&data).await.is_err() {
-                    warn!("Network audio playback process перестав приймати PCM");
+    loop {
+        match timeout(Duration::from_secs(SESSION_IDLE_SECONDS), receiver.recv()).await {
+            Ok(Some(data)) => {
+                if let Err(error) = stdin.write_all(&data).await {
+                    warn!(%error, "Network audio playback process перестав приймати PCM");
                     break;
                 }
                 bytes_received = bytes_received.saturating_add(data.len() as u64);
             }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_))
-            | Ok(Message::Pong(_))
-            | Ok(Message::Text(_)) => {}
-            Err(error) => {
-                warn!(%error, "Помилка WebSocket мережевого аудіопотоку");
+            Ok(None) => break,
+            Err(_) => {
+                info!(session_id, "Network audio session завершено через idle timeout");
                 break;
             }
         }
@@ -153,27 +118,146 @@ async fn stream_audio(
 
     match timeout(Duration::from_secs(2), child.wait()).await {
         Ok(Ok(status)) if status.success() => {}
-        Ok(Ok(status)) => {
-            warn!(%status, "Network audio sink завершився з помилкою");
-        }
-        Ok(Err(error)) => {
-            warn!(%error, "Не вдалося дочекатися network audio sink");
-        }
+        Ok(Ok(status)) => warn!(%status, "Network audio sink завершився з помилкою"),
+        Ok(Err(error)) => warn!(%error, "Не вдалося дочекатися network audio sink"),
         Err(_) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
         }
     }
 
-    info!(
-        bytes_received,
-        elapsed_ms = started.elapsed().as_millis(),
-        "Мережевий PCM WebSocket завершено"
-    );
+    let mut active = NETWORK_SESSION.lock().await;
+    if active.as_ref().is_some_and(|session| session.id == session_id) {
+        *active = None;
+    }
+    info!(session_id, bytes_received, "Network audio session завершено");
+}
+
+async fn start(State(controller): State<WebController>) -> Response {
+    let mut active = NETWORK_SESSION.lock().await;
+    if active.is_some() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "Мережевий аудіопотік уже активний",
+        );
+    }
+
+    let sink = controller.config.audio.music_sink.trim();
+    if sink.is_empty() {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "MUSIC sink не налаштовано");
+    }
+
+    let (child, stdin) = match spawn_pacat(sink) {
+        Ok(process) => process,
+        Err(error) => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Не вдалося запустити network audio sink: {error}"),
+            );
+        }
+    };
+
+    let session_id = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let (sender, receiver) = mpsc::channel::<Vec<u8>>(4);
+    *active = Some(SessionHandle {
+        id: session_id,
+        sender,
+    });
+    drop(active);
+
+    tokio::spawn(playback_task(session_id, receiver, child, stdin));
+    info!(session_id, sink, "Network audio session створено");
+
+    Json(json!({
+        "session_id": session_id,
+        "sample_format": SAMPLE_FORMAT,
+        "sample_rate": SAMPLE_RATE,
+        "channels": CHANNELS,
+        "recommended_chunk_millis": 100,
+        "idle_timeout_seconds": SESSION_IDLE_SECONDS,
+    }))
+    .into_response()
+}
+
+async fn frame(headers: HeaderMap, body: Body) -> Response {
+    if !valid_pcm_content_type(&headers) {
+        return json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Content-Type має бути application/x-proaudio-pcm",
+        );
+    }
+
+    let requested_session = match session_id(&headers) {
+        Ok(value) => value,
+        Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
+    };
+
+    let bytes = match to_bytes(body, MAX_CHUNK_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PCM frame перевищує 128 KiB",
+            );
+        }
+    };
+    if bytes.is_empty() || bytes.len() % BYTES_PER_FRAME != 0 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "PCM frame має містити цілі stereo float32 frames",
+        );
+    }
+
+    let sender = {
+        let active = NETWORK_SESSION.lock().await;
+        match active.as_ref() {
+            Some(session) if session.id == requested_session => session.sender.clone(),
+            _ => {
+                return json_error(
+                    StatusCode::NOT_FOUND,
+                    "Network audio session не знайдено",
+                );
+            }
+        }
+    };
+
+    match timeout(Duration::from_secs(1), sender.send(bytes.to_vec())).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(_)) => json_error(
+            StatusCode::GONE,
+            "Network audio session вже завершено",
+        ),
+        Err(_) => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Network audio sender випереджає відтворення",
+        ),
+    }
+}
+
+async fn stop(headers: HeaderMap) -> Response {
+    let requested_session = match session_id(&headers) {
+        Ok(value) => value,
+        Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
+    };
+
+    let mut active = NETWORK_SESSION.lock().await;
+    match active.as_ref() {
+        Some(session) if session.id == requested_session => {
+            *active = None;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        _ => json_error(
+            StatusCode::NOT_FOUND,
+            "Network audio session не знайдено",
+        ),
+    }
 }
 
 pub(super) fn router() -> Router<WebController> {
-    Router::new().route("/audio/network", get(upgrade))
+    Router::new()
+        .route("/audio/network/start", post(start))
+        .route("/audio/network/frame", post(frame))
+        .route("/audio/network/stop", post(stop))
 }
 
 #[cfg(test)]
@@ -181,17 +265,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_only_canonical_pcm_subprotocol() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "sec-websocket-protocol",
-            "other, proaudio-pcm-f32le-48000-stereo-v1"
-                .parse()
-                .unwrap(),
-        );
-        assert!(accepts_subprotocol(&headers));
+    fn validates_pcm_frame_shape() {
+        assert_eq!(BYTES_PER_FRAME, 8);
+        assert_eq!((48_000usize * 2 * 4) / 10, 38_400);
+        assert!(38_400 < MAX_CHUNK_BYTES);
+    }
 
-        headers.insert("sec-websocket-protocol", "other".parse().unwrap());
-        assert!(!accepts_subprotocol(&headers));
+    #[test]
+    fn accepts_only_pcm_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", CONTENT_TYPE.parse().unwrap());
+        assert!(valid_pcm_content_type(&headers));
+
+        headers.insert("content-type", "audio/wav".parse().unwrap());
+        assert!(!valid_pcm_content_type(&headers));
     }
 }
