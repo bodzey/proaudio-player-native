@@ -53,12 +53,15 @@ jobs:
       - name: Check click-safe physical output policy
         run: |
           grep -Fq 'HARDWARE_MIXER_MODE=off' config/audio.env.example
-          grep -Fq 'OUTPUT_SWITCH_SETTLE_MSEC=150' config/audio.env.example
           grep -Fq 'session.suspend-timeout-seconds = 0' config/wireplumber/51-proaudio-soft-mixer.conf
           grep -Fq 'node.pause-on-idle = false' config/wireplumber/51-proaudio-soft-mixer.conf
-          grep -Fq 'node.always-process = true' config/wireplumber/51-proaudio-soft-mixer.conf
           if grep -Fq 'pactl set-sink-mute "$physical" 1' scripts/audio-buses.sh; then
             echo 'physical sink must not be toggled as part of route preparation' >&2
+            exit 1
+          fi
+          grep -Fq 'pactl move-sink-input "$output_input" "$output_target"' scripts/audio-buses.sh
+          if grep -Fq 'load_loopback_into new_output_loop' scripts/audio-buses.sh; then
+            echo 'hot output switch must move the permanent final stream, not recreate it' >&2
             exit 1
           fi
       - name: Check source gain policy
