@@ -31,12 +31,13 @@ grep -Fq 'module-loopback|source=proaudio_player_master.monitor sink=proaudio_pl
 ! grep -Eq 'exp\(|log\(' "$repo_root/scripts/audio-buses.sh"
 
 touch "$MOCK_PACTL_STATE/physical-present"
+module_count_before="$(wc -l <"$MOCK_PACTL_STATE/modules")"
 HARDWARE_MIXER_MODE=off bash "$repo_root/scripts/audio-buses.sh" switch
 grep -Fxq 'PHYSICAL=mock_physical' "$state_file"
 grep -Fxq 'OUTPUT_TARGET=mock_physical' "$state_file"
-grep -Fxq '7' "$MOCK_PACTL_STATE/unloaded"
-grep -Fq 'module-loopback|source=proaudio_player_master.monitor sink=mock_physical' \
-    "$MOCK_PACTL_STATE/modules"
+[[ "$(wc -l <"$MOCK_PACTL_STATE/modules")" == "$module_count_before" ]]
+[[ ! -s "$MOCK_PACTL_STATE/unloaded" ]]
+grep -Fxq 'move-sink-input|107 mock_physical' "$MOCK_PACTL_STATE/calls"
 ! grep -Fxq 'set-sink-mute|mock_physical 1' "$MOCK_PACTL_STATE/calls"
 ! grep -Fxq 'set-sink-mute|mock_physical 0' "$MOCK_PACTL_STATE/calls"
 
