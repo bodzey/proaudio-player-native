@@ -16,7 +16,6 @@ OUTPUT_VOLUME_PERCENT="${OUTPUT_VOLUME_PERCENT:-100}"
 HARDWARE_MIXER_MODE="${HARDWARE_MIXER_MODE:-off}"
 GRAPH_UNITY_DB="0.0"
 GRAPH_UNITY_RAW="65536"
-OUTPUT_SWITCH_SETTLE_MSEC="${OUTPUT_SWITCH_SETTLE_MSEC:-150}"
 STATE_FILE="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/proaudio-player-bus-modules"
 LOCK_DIR="${XDG_RUNTIME_DIR}/proaudio-player-audio-routing.lock"
 BUILD_MODULES=()
@@ -428,11 +427,6 @@ validate_audio_bus_config() {
         echo "INTERNAL_SAMPLE_FORMAT має бути float32le для high-precision mixed graph" >&2
         return 1
     fi
-    if ! [[ "$OUTPUT_SWITCH_SETTLE_MSEC" =~ ^[0-9]+$ ]] \
-        || ((10#$OUTPUT_SWITCH_SETTLE_MSEC > 2000)); then
-        echo "OUTPUT_SWITCH_SETTLE_MSEC має бути цілим числом від 0 до 2000" >&2
-        return 1
-    fi
 }
 
 start_buses() {
@@ -502,14 +496,14 @@ switch_output() {
     validate_audio_bus_config
     require_pulse_server
 
-    local physical output_target old_physical old_output_target old_output_loop new_output_loop
-    local parking_bus master_bus music_bus alert_bus music_loop alert_loop master_mute
+    local physical output_target old_physical old_output_target output_loop output_input
+    local parking_bus master_bus music_bus alert_bus music_loop alert_loop
     physical="$(find_physical_sink || true)"
     output_target="${physical:-$PARKING_SINK}"
     old_physical="$(state_value PHYSICAL)"
     old_output_target="$(state_value OUTPUT_TARGET)"
     old_output_target="${old_output_target:-${old_physical:-$PARKING_SINK}}"
-    old_output_loop="$(state_value OUTPUT_LOOP_MODULE)"
+    output_loop="$(state_value OUTPUT_LOOP_MODULE)"
     parking_bus="$(state_value PARKING_BUS_MODULE)"
     master_bus="$(state_value MASTER_BUS_MODULE)"
     music_bus="$(state_value MUSIC_BUS_MODULE)"
@@ -518,7 +512,7 @@ switch_output() {
     alert_loop="$(state_value ALERT_LOOP_MODULE)"
 
     if [[ -z "$parking_bus" || -z "$master_bus" || -z "$music_bus" || -z "$alert_bus" \
-        || -z "$music_loop" || -z "$alert_loop" ]] \
+        || -z "$music_loop" || -z "$alert_loop" || ! "$output_loop" =~ ^[0-9]+$ ]] \
         || ! pactl get-sink-volume "$PARKING_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$MASTER_SINK" >/dev/null 2>&1 \
         || ! pactl get-sink-volume "$MUSIC_SINK" >/dev/null 2>&1 \
@@ -528,69 +522,44 @@ switch_output() {
         return
     fi
 
-    if [[ "$old_output_target" == "$output_target" && "$old_output_loop" =~ ^[0-9]+$ ]]; then
-        if [[ -n "$physical" ]]; then
-            prepare_physical_sink "$physical"
-        fi
-        if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
-            || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER" \
-            || ! set_loopback_gain_db "$old_output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
-            echo "Не вдалося відновити unity gain аудіографа" >&2
-            return 1
-        fi
+    if [[ -n "$physical" ]] && ! prepare_physical_sink "$physical"; then
+        echo "Не вдалося підготувати фізичний вихід '$physical'; попередній маршрут залишено" >&2
+        return 1
+    fi
+
+    if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
+        || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER" \
+        || ! set_loopback_gain_db "$output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
+        echo "Не вдалося підтвердити unity gain аудіографа; попередній маршрут залишено" >&2
+        return 1
+    fi
+
+    if [[ "$old_output_target" == "$output_target" ]]; then
         return
     fi
 
-    if [[ -n "$physical" ]]; then
-        prepare_physical_sink "$physical"
-    fi
-    if ! set_loopback_gain_db "$music_loop" "$GRAPH_UNITY_DB" "MUSIC->MASTER" \
-        || ! set_loopback_gain_db "$alert_loop" "$GRAPH_UNITY_DB" "ALERT->MASTER"; then
-        echo "Не вдалося підтвердити unity gain внутрішніх шин; попередній маршрут залишено" >&2
-        return 1
-    fi
-    master_mute="$(pactl get-sink-mute "$MASTER_SINK" 2>/dev/null | awk '{print $2}')"
-    pactl set-sink-mute "$MASTER_SINK" 1
-
-    BUILD_MODULES=()
-    if ! load_loopback_into new_output_loop "$MASTER_SINK" "$output_target" \
-        "proaudio-player-final-output"; then
-        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося підключити MASTER до '$output_target'; попередній маршрут залишено" >&2
+    output_input="$(sink_input_for_module "$output_loop" || true)"
+    if ! [[ "$output_input" =~ ^[0-9]+$ ]]; then
+        echo "Не вдалося знайти постійний MASTER->OUTPUT sink-input; перемикання не виконано" >&2
         return 1
     fi
 
-    if ! set_loopback_gain_db "$new_output_loop" "$GRAPH_UNITY_DB" "MASTER->OUTPUT"; then
-        pactl unload-module "$new_output_loop" >/dev/null 2>&1 || true
-        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося встановити unity gain для '$output_target'; попередній маршрут залишено" >&2
+    # Keep one permanent final playback stream and move it between sinks in-place.
+    # Recreating module-loopback on every UI selection needlessly destroys/creates
+    # a physical playback stream and can produce DAC/codec activation transients.
+    if ! pactl move-sink-input "$output_input" "$output_target"; then
+        echo "Не вдалося перенести MASTER->OUTPUT на '$output_target'; попередній маршрут залишено" >&2
         return 1
     fi
 
     if ! write_state "$physical" "$output_target" "$parking_bus" "$master_bus" \
-        "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$new_output_loop"; then
-        cleanup_build_modules
-        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося зафіксувати новий маршрут; попередній маршрут залишено" >&2
+        "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$output_loop"; then
+        pactl move-sink-input "$output_input" "$old_output_target" >/dev/null 2>&1 || true
+        echo "Не вдалося зафіксувати новий маршрут; playback stream повернено на '$old_output_target'" >&2
         return 1
     fi
 
-    if ((10#$OUTPUT_SWITCH_SETTLE_MSEC > 0)); then
-        sleep "$(awk -v ms="$OUTPUT_SWITCH_SETTLE_MSEC" 'BEGIN { printf "%.3f", ms / 1000 }')"
-    fi
-
-    if [[ "$old_output_loop" =~ ^[0-9]+$ ]] \
-        && ! pactl unload-module "$old_output_loop" >/dev/null 2>&1; then
-        write_state "$old_physical" "$old_output_target" "$parking_bus" "$master_bus" \
-            "$music_bus" "$alert_bus" "$music_loop" "$alert_loop" "$old_output_loop" || true
-        cleanup_build_modules
-        [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0 >/dev/null 2>&1 || true
-        echo "Не вдалося від'єднати попередній маршрут; перемикання скасовано" >&2
-        return 1
-    fi
-    BUILD_MODULES=()
-    [[ "$master_mute" == "yes" ]] || pactl set-sink-mute "$MASTER_SINK" 0
-    echo "Фінальний вихід перемкнено $old_output_target -> $output_target"
+    echo "Фінальний playback stream перенесено $old_output_target -> $output_target"
 }
 
 stop_buses() {
