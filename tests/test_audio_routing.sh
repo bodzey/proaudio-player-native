@@ -37,6 +37,8 @@ grep -Fxq 'OUTPUT_TARGET=mock_physical' "$state_file"
 grep -Fxq '7' "$MOCK_PACTL_STATE/unloaded"
 grep -Fq 'module-loopback|source=proaudio_player_master.monitor sink=mock_physical' \
     "$MOCK_PACTL_STATE/modules"
+! grep -Fxq 'set-sink-mute|mock_physical 1' "$MOCK_PACTL_STATE/calls"
+! grep -Fxq 'set-sink-mute|mock_physical 0' "$MOCK_PACTL_STATE/calls"
 
 new_case adaptive_rate
 SAMPLE_RATE_MODE=adaptive \
