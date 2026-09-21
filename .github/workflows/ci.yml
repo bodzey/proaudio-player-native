@@ -133,7 +133,9 @@ jobs:
           fi
       - name: Check network audio ingress
         run: |
-          grep -Fq '"/audio/network"' src/api/network_audio.rs
+          grep -Fq '"/audio/network/start"' src/api/network_audio.rs
+          grep -Fq '"/audio/network/frame"' src/api/network_audio.rs
+          grep -Fq '"/audio/network/stop"' src/api/network_audio.rs
           grep -Fq 'application/x-proaudio-pcm' src/api/network_audio.rs
           grep -Fq 'ProAudioNetworkInput' src/api/network_audio.rs
           grep -Fq -- '--device=' src/api/network_audio.rs
