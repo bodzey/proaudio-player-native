@@ -1940,10 +1940,6 @@ mod tests {
         }
     }
 
-    fn stream(binary: &str, application: &str, pid: &str) -> StreamState {
-        stream_at(1, binary, application, pid)
-    }
-
     #[test]
     fn summarizes_network_audio_as_one_programme_source() {
         let mpd = serde_json::json!({

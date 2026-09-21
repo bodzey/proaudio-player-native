@@ -260,9 +260,10 @@ mod tests {
 
     #[test]
     fn validates_pcm_frame_shape() {
+        let recommended_chunk_bytes = (48_000usize * 2 * 4) / 10;
         assert_eq!(BYTES_PER_FRAME, 8);
-        assert_eq!((48_000usize * 2 * 4) / 10, 38_400);
-        assert!(38_400 < MAX_CHUNK_BYTES);
+        assert_eq!(recommended_chunk_bytes, 38_400);
+        assert!(recommended_chunk_bytes < MAX_CHUNK_BYTES);
     }
 
     #[test]
