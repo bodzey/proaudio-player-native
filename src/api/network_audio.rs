@@ -2,7 +2,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
-use axum::body::{to_bytes, Body};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -34,7 +34,7 @@ static NETWORK_SESSION: LazyLock<Arc<Mutex<Option<SessionHandle>>>> =
 #[derive(Clone)]
 struct SessionHandle {
     id: u64,
-    sender: mpsc::Sender<Vec<u8>>,
+    sender: mpsc::Sender<Bytes>,
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -56,7 +56,7 @@ fn valid_pcm_content_type(headers: &HeaderMap) -> bool {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
         .map(str::trim)
-        == Some(CONTENT_TYPE)
+        .is_some_and(|value| value.eq_ignore_ascii_case(CONTENT_TYPE))
 }
 
 fn spawn_pacat(sink: &str) -> std::io::Result<(Child, ChildStdin)> {
@@ -91,7 +91,7 @@ fn spawn_pacat(sink: &str) -> std::io::Result<(Child, ChildStdin)> {
 
 async fn playback_task(
     session_id: u64,
-    mut receiver: mpsc::Receiver<Vec<u8>>,
+    mut receiver: mpsc::Receiver<Bytes>,
     mut child: Child,
     mut stdin: ChildStdin,
 ) {
@@ -158,7 +158,7 @@ async fn start(State(controller): State<WebController>) -> Response {
     };
 
     let session_id = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let (sender, receiver) = mpsc::channel::<Vec<u8>>(4);
+    let (sender, receiver) = mpsc::channel::<Bytes>(4);
     *active = Some(SessionHandle {
         id: session_id,
         sender,
@@ -221,7 +221,7 @@ async fn frame(headers: HeaderMap, body: Body) -> Response {
         }
     };
 
-    match timeout(Duration::from_secs(1), sender.send(bytes.to_vec())).await {
+    match timeout(Duration::from_secs(1), sender.send(bytes)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(_)) => json_error(
             StatusCode::GONE,
@@ -275,6 +275,12 @@ mod tests {
     fn accepts_only_pcm_content_type() {
         let mut headers = HeaderMap::new();
         headers.insert("content-type", CONTENT_TYPE.parse().unwrap());
+        assert!(valid_pcm_content_type(&headers));
+
+        headers.insert(
+            "content-type",
+            "Application/X-ProAudio-PCM; charset=binary".parse().unwrap(),
+        );
         assert!(valid_pcm_content_type(&headers));
 
         headers.insert("content-type", "audio/wav".parse().unwrap());
