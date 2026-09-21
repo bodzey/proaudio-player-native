@@ -38,11 +38,10 @@ use crate::radio_directory;
 use crate::source_arbiter::SharedSourceState;
 use crate::upnp;
 
-use super::webui;
+use super::{network_audio, webui};
 
 mod alert_media;
 mod mpris;
-mod network_audio;
 use mpris::MprisMonitor;
 
 const API_VERSION: &str = "1";

@@ -1,5 +1,6 @@
 mod backend;
 mod meters;
+mod network_audio;
 mod webui;
 
 pub use backend::serve;
