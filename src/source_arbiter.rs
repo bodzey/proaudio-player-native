@@ -362,5 +362,5 @@ mod tests {
             SourceArbiter::audible_stream_index(&[stream(7), stream(12), stream(9)], &suppressed),
             Some(9)
         );
-        }
+    }
 }
