@@ -888,7 +888,6 @@ impl WebController {
             } else {
                 self.mpris_control(service, mpris_method).await?;
             }
-
         } else if backend == "dlna-upnp" {
             dlna::client().control(action).await?;
         } else {

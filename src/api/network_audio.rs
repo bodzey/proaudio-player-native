@@ -107,7 +107,10 @@ async fn playback_task(
             }
             Ok(None) => break,
             Err(_) => {
-                info!(session_id, "Network audio session завершено через idle timeout");
+                info!(
+                    session_id,
+                    "Network audio session завершено через idle timeout"
+                );
                 break;
             }
         }
@@ -127,19 +130,22 @@ async fn playback_task(
     }
 
     let mut active = NETWORK_SESSION.lock().await;
-    if active.as_ref().is_some_and(|session| session.id == session_id) {
+    if active
+        .as_ref()
+        .is_some_and(|session| session.id == session_id)
+    {
         *active = None;
     }
-    info!(session_id, bytes_received, "Network audio session завершено");
+    info!(
+        session_id,
+        bytes_received, "Network audio session завершено"
+    );
 }
 
 async fn start(State(controller): State<WebController>) -> Response {
     let mut active = NETWORK_SESSION.lock().await;
     if active.is_some() {
-        return json_error(
-            StatusCode::CONFLICT,
-            "Мережевий аудіопотік уже активний",
-        );
+        return json_error(StatusCode::CONFLICT, "Мережевий аудіопотік уже активний");
     }
 
     let sink = controller.config.audio.music_sink.trim();
@@ -195,10 +201,7 @@ async fn frame(headers: HeaderMap, body: Body) -> Response {
     let bytes = match to_bytes(body, MAX_CHUNK_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            return json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "PCM frame перевищує 128 KiB",
-            );
+            return json_error(StatusCode::PAYLOAD_TOO_LARGE, "PCM frame перевищує 128 KiB");
         }
     };
     if bytes.is_empty() || bytes.len() % BYTES_PER_FRAME != 0 {
@@ -213,20 +216,14 @@ async fn frame(headers: HeaderMap, body: Body) -> Response {
         match active.as_ref() {
             Some(session) if session.id == requested_session => session.sender.clone(),
             _ => {
-                return json_error(
-                    StatusCode::NOT_FOUND,
-                    "Network audio session не знайдено",
-                );
+                return json_error(StatusCode::NOT_FOUND, "Network audio session не знайдено");
             }
         }
     };
 
     match timeout(Duration::from_secs(1), sender.send(bytes)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Err(_)) => json_error(
-            StatusCode::GONE,
-            "Network audio session вже завершено",
-        ),
+        Ok(Err(_)) => json_error(StatusCode::GONE, "Network audio session вже завершено"),
         Err(_) => json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Network audio sender випереджає відтворення",
@@ -246,10 +243,7 @@ async fn stop(headers: HeaderMap) -> Response {
             *active = None;
             StatusCode::NO_CONTENT.into_response()
         }
-        _ => json_error(
-            StatusCode::NOT_FOUND,
-            "Network audio session не знайдено",
-        ),
+        _ => json_error(StatusCode::NOT_FOUND, "Network audio session не знайдено"),
     }
 }
 
@@ -279,7 +273,9 @@ mod tests {
 
         headers.insert(
             "content-type",
-            "Application/X-ProAudio-PCM; charset=binary".parse().unwrap(),
+            "Application/X-ProAudio-PCM; charset=binary"
+                .parse()
+                .unwrap(),
         );
         assert!(valid_pcm_content_type(&headers));
 
