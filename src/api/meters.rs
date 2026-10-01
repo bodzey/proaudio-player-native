@@ -1,14 +1,11 @@
-use std::convert::Infallible;
-use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use axum::extract::State;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -21,6 +18,7 @@ use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::debug;
 
 use super::backend::WebController;
+use super::event_stream::EventStream;
 
 const METER_INTERVAL: Duration = Duration::from_millis(20);
 const METER_WINDOW_MILLIS: u64 = 20;
@@ -30,21 +28,6 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_DB: f64 = -60.0;
 const DIGITAL_FULL_SCALE_AMPLITUDE: f64 = 1.0;
 const BYTES_PER_STEREO_FRAME: usize = 8;
-
-struct EventStream {
-    receiver: mpsc::Receiver<std::result::Result<Event, Infallible>>,
-}
-
-impl futures_core::Stream for EventStream {
-    type Item = std::result::Result<Event, Infallible>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        context: &mut TaskContext<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        self.receiver.poll_recv(context)
-    }
-}
 
 struct MeterHub {
     sender: broadcast::Sender<String>,
@@ -420,30 +403,10 @@ fn ensure_started(controller: WebController) {
 }
 
 async fn meter_events(State(controller): State<WebController>) -> impl IntoResponse {
-    let mut receiver = hub().sender.subscribe();
+    let stream = EventStream::subscribe(hub().sender.subscribe(), "meter", 8);
     hub().demand.notify_one();
     ensure_started(controller);
-    let (sender, stream) = mpsc::channel(8);
-
-    tokio::spawn(async move {
-        loop {
-            match receiver.recv().await {
-                Ok(payload) => {
-                    if sender
-                        .send(Ok(Event::default().event("meter").data(payload)))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-
-    Sse::new(EventStream { receiver: stream }).keep_alive(
+    Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(5))
             .text("meter-keepalive"),

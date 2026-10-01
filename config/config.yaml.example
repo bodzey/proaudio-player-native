@@ -37,6 +37,11 @@ api:
   host: "0.0.0.0"
   port: 8080
   max_library_items: 5000
+  # Set a private token file to protect both API versions and the browser UI.
+  # Required when building with --features appliance.
+  auth_token_file: null
+  # Enabling this exposes UPnP transport/volume controls without API credentials.
+  allow_unauthenticated_upnp: false
 
 state_file: "/var/lib/proaudio-player-alert/state.json"
 log_level: "INFO"

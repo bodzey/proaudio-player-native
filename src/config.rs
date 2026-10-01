@@ -305,6 +305,8 @@ pub struct ApiConfig {
     pub port: u16,
     #[serde(default = "default_library_items")]
     pub max_library_items: usize,
+    pub auth_token_file: Option<PathBuf>,
+    pub allow_unauthenticated_upnp: bool,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -313,6 +315,8 @@ impl Default for ApiConfig {
             host: default_host(),
             port: default_port(),
             max_library_items: default_library_items(),
+            auth_token_file: None,
+            allow_unauthenticated_upnp: false,
         }
     }
 }
@@ -648,6 +652,13 @@ pub fn validate_config(c: &AppConfig) -> Result<()> {
     }
     if c.api.host.trim().is_empty() || c.api.port == 0 {
         bail!("api.host не може бути порожнім, а api.port має бути 1..65535");
+    }
+    if c.api
+        .auth_token_file
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        bail!("api.auth_token_file має бути абсолютним шляхом");
     }
     Ok(())
 }

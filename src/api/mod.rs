@@ -1,4 +1,6 @@
+mod access;
 mod backend;
+mod event_stream;
 mod meters;
 mod network_audio;
 mod webui;

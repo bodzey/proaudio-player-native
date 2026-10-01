@@ -209,3 +209,5 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build optimized release binary
         run: cargo build --release --locked
+      - name: Verify appliance provisioning and security policy
+        run: bash tests/test_appliance.sh

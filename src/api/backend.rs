@@ -1,17 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::middleware;
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -19,7 +17,8 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc, Mutex, Notify};
+use tokio::sync::{broadcast, Mutex, Notify};
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tracing::{debug, info};
 use url::Url;
@@ -38,7 +37,9 @@ use crate::radio_directory;
 use crate::source_arbiter::SharedSourceState;
 use crate::upnp;
 
-use super::{network_audio, webui};
+use super::access::ApiAccess;
+use super::event_stream::EventStream;
+use super::{access, network_audio, webui};
 
 mod alert_media;
 mod mpris;
@@ -73,21 +74,6 @@ static ALSA_DB_MINMAX_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult = std::result::Result<Json<Value>, ApiError>;
-
-struct EventStream {
-    receiver: mpsc::Receiver<std::result::Result<Event, Infallible>>,
-}
-
-impl futures_core::Stream for EventStream {
-    type Item = std::result::Result<Event, Infallible>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        context: &mut TaskContext<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        self.receiver.poll_recv(context)
-    }
-}
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> ApiError {
     (status, Json(json!({ "error": message.into() })))
@@ -150,6 +136,7 @@ pub struct WebController {
     audio_topology_revision: Arc<AtomicU64>,
     mpd: MpdMonitor,
     mpris: MprisMonitor,
+    access: ApiAccess,
 }
 
 impl WebController {
@@ -158,9 +145,10 @@ impl WebController {
         audio: AudioEngine,
         state: SharedRuntimeState,
         source_state: SharedSourceState,
-    ) -> Self {
+    ) -> Result<Self> {
         let (events, _) = broadcast::channel(8);
-        Self {
+        let access = ApiAccess::load(&config.api)?;
+        Ok(Self {
             audio,
             config,
             state,
@@ -171,7 +159,8 @@ impl WebController {
             audio_topology_revision: Arc::new(AtomicU64::new(0)),
             mpd: MpdMonitor::new(),
             mpris: MprisMonitor::new(),
-        }
+            access,
+        })
     }
 
     pub async fn priority_state(&self) -> Value {
@@ -1091,9 +1080,13 @@ async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "api_version": API_VERSION }))
 }
 
-async fn capabilities() -> Json<Value> {
+async fn capabilities(State(controller): State<WebController>) -> Json<Value> {
     Json(json!({
         "api_version": API_VERSION,
+        "authentication": {
+            "required": controller.access.enabled(),
+            "schemes": ["bearer", "basic"],
+        },
         "events": "sse",
         "features": [
             "status", "player_control", "audio_mixer", "audio_outputs", "audio_diagnostics",
@@ -1104,27 +1097,9 @@ async fn capabilities() -> Json<Value> {
 }
 
 async fn events(State(controller): State<WebController>) -> impl IntoResponse {
-    let mut receiver = controller.events.subscribe();
+    let stream = EventStream::subscribe(controller.events.subscribe(), "status", 4);
     controller.event_demand.notify_one();
-    let (sender, stream) = mpsc::channel(4);
-    tokio::spawn(async move {
-        loop {
-            match receiver.recv().await {
-                Ok(payload) => {
-                    if sender
-                        .send(Ok(Event::default().event("status").data(payload)))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-    Sse::new(EventStream { receiver: stream }).keep_alive(
+    Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
@@ -1801,11 +1776,20 @@ fn api_routes() -> Router<WebController> {
 
 pub fn router(controller: WebController) -> Router {
     let routes = api_routes();
+    let public_upnp = upnp::public_enabled()
+        && (!controller.access.enabled() || controller.config.api.allow_unauthenticated_upnp);
+    let upnp_routes = if public_upnp {
+        upnp::router()
+    } else {
+        Router::new()
+    };
+    let access = controller.access.clone();
     Router::new()
         .nest("/api", routes.clone())
         .nest("/api/v1", routes)
-        .merge(upnp::router())
+        .merge(upnp_routes)
         .merge(webui::router())
+        .layer(middleware::from_fn_with_state(access, access::guard))
         .with_state(controller)
 }
 
@@ -1818,10 +1802,12 @@ pub async fn serve(controller: WebController) -> Result<()> {
     let listener = TcpListener::bind(&address).await?;
     info!(%address, api_version = API_VERSION, "Native control API started");
 
+    let mut tasks = JoinSet::new();
+
     // One shared status producer serves every browser. This avoids each client
     // duplicating its own status/mpc/busctl polling workload.
     let event_controller = controller.clone();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         loop {
             if event_controller.events.receiver_count() == 0 {
                 let demanded = event_controller.event_demand.notified();
@@ -1842,7 +1828,7 @@ pub async fn serve(controller: WebController) -> Result<()> {
     // the one-second producer remains as a low-rate metadata/status heartbeat.
     let mut output_changes = controller.audio.subscribe_output_changes();
     let output_event_controller = controller.clone();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         while output_changes.changed().await.is_ok() {
             output_event_controller
                 .audio_topology_revision
@@ -1856,8 +1842,10 @@ pub async fn serve(controller: WebController) -> Result<()> {
         }
     });
 
-    if upnp::public_enabled() {
-        tokio::spawn(async move {
+    if upnp::public_enabled()
+        && (!controller.access.enabled() || controller.config.api.allow_unauthenticated_upnp)
+    {
+        tasks.spawn(async move {
             if let Err(err) = upnp::run_ssdp(port).await {
                 debug!("UPnP/DLNA SSDP discovery unavailable: {err:#}");
             }

@@ -44,8 +44,7 @@ impl AlertController {
     }
 
     async fn persist(&self) -> Result<()> {
-        let snapshot = self.state.lock().await.clone();
-        self.store.save(&snapshot)
+        self.store.save_current(self.state.clone()).await
     }
 
     pub async fn recover(&mut self) -> Result<()> {
@@ -249,13 +248,14 @@ impl AlertController {
             } else {
                 warn!("Завершення щоденної хвилини мовчання");
             }
-            let snapshot_to_save = {
+            {
                 let mut s = state.lock().await;
                 s.minute_silence_active = false;
                 s.minute_silence_snapshot = None;
-                s.clone()
-            };
-            let _ = store.save(&snapshot_to_save);
+            }
+            if let Err(error) = store.save_current(state.clone()).await {
+                error!(%error, "Не вдалося зберегти стан після хвилини мовчання");
+            }
         }));
         Ok(true)
     }
@@ -541,6 +541,14 @@ impl AlertController {
                 error!("minute silence scheduler: {err:#}");
             }
             sleep(Duration::from_millis(250)).await;
+        }
+    }
+}
+
+impl Drop for AlertController {
+    fn drop(&mut self) {
+        if let Some(task) = self.minute_task.take() {
+            task.abort();
         }
     }
 }

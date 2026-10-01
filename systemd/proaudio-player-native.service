@@ -17,6 +17,13 @@ ExecStart=/usr/bin/proaudio-player-native --config /etc/proaudio-player-alert/co
 Restart=always
 RestartSec=2
 NoNewPrivileges=yes
+UMask=0077
+LimitCORE=0
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target

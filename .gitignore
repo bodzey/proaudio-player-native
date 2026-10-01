@@ -7,6 +7,10 @@
 !.env.example
 
 *.log
+*.pk8
+*.private.pem
+device-license.json
+device-request.json
 
 .vscode/
 .idea/

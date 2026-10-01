@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -59,11 +59,15 @@ impl Default for RuntimeState {
 #[derive(Clone)]
 pub struct StateStore {
     path: PathBuf,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl StateStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            write_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn load(&self) -> RuntimeState {
@@ -94,6 +98,21 @@ impl StateStore {
 
     pub fn save(&self, state: &RuntimeState) -> Result<()> {
         atomic_json_write(&self.path, state)
+    }
+
+    pub async fn save_current(&self, state: Arc<tokio::sync::Mutex<RuntimeState>>) -> Result<()> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            // Acquire the snapshot after serialization, so cancelled or concurrent
+            // announcement tasks cannot write an older mode over a newer one.
+            let _writer = store
+                .write_lock
+                .lock()
+                .map_err(|_| anyhow!("runtime state writer lock poisoned"))?;
+            let snapshot = state.blocking_lock().clone();
+            store.save(&snapshot)
+        })
+        .await?
     }
 }
 
@@ -261,5 +280,34 @@ mod tests {
         assert_eq!(state.music_percent, None);
         assert_eq!(state.master_percent, None);
         assert_eq!(state.alert_percent, Some(25.0));
+    }
+
+    #[tokio::test]
+    async fn queued_runtime_write_persists_the_current_mode_after_serialization() {
+        let path = std::env::temp_dir().join(format!(
+            "proaudio-runtime-write-{}.json",
+            std::process::id()
+        ));
+        let store = StateStore::new(&path);
+        let state = Arc::new(tokio::sync::Mutex::new(RuntimeState::default()));
+        let write_lock = store.write_lock.clone();
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let writer = tokio::task::spawn_blocking(move || {
+            let _guard = write_lock.lock().unwrap();
+            locked.send(()).unwrap();
+            held.recv().unwrap();
+        });
+        ready.await.unwrap();
+        let pending_store = store.clone();
+        let pending_state = state.clone();
+        let pending = tokio::spawn(async move { pending_store.save_current(pending_state).await });
+        tokio::task::yield_now().await;
+        state.lock().await.mode = "alert".into();
+        release.send(()).unwrap();
+        writer.await.unwrap();
+        pending.await.unwrap().unwrap();
+        assert_eq!(store.load().mode, "alert");
+        fs::remove_file(path).unwrap();
     }
 }

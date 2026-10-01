@@ -8,6 +8,8 @@ mod audio_backend;
 mod command;
 mod config;
 mod dlna;
+#[cfg(any(feature = "appliance", test))]
+mod entitlement;
 mod media_time;
 mod mpd;
 mod output_gain;
@@ -59,6 +61,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Показати відбиток пристрою для отримання підписаного дозволу на запуск.
+    #[cfg(feature = "appliance")]
+    LicenseRequest,
     /// Запустити постійний native daemon.
     Run,
     /// Виконати одну перевірку API повітряної тривоги.
@@ -192,7 +197,7 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     let source_state = Arc::new(RwLock::new(None));
     let arbiter = SourceArbiter::new(config.clone(), audio.clone(), source_state.clone());
     let mixer_audio = audio.clone();
-    let api_controller = ApiController::new(config.clone(), audio, state, source_state);
+    let api_controller = ApiController::new(config.clone(), audio, state, source_state)?;
 
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
     tasks.spawn(keep_user_mixer_restored(mixer_audio));
@@ -282,6 +287,17 @@ async fn test_silence(config: Arc<AppConfig>) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    #[cfg(feature = "appliance")]
+    {
+        if matches!(&cli.command, Command::LicenseRequest) {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&entitlement::request()?)?
+            );
+            return Ok(());
+        }
+        entitlement::authorize()?;
+    }
     let mut config = load_config(&cli.config)?;
     processing_domain::apply(&mut config)?;
     validate_config(&config)?;
@@ -289,6 +305,8 @@ async fn main() -> Result<()> {
     init_logging(&config);
 
     match cli.command {
+        #[cfg(feature = "appliance")]
+        Command::LicenseRequest => unreachable!(),
         Command::Run => run_daemon(config).await,
         Command::Once => run_once(config).await,
         Command::Status => {
