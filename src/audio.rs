@@ -134,6 +134,10 @@ impl AudioEngine {
         self.mixer_state.start_writer()
     }
 
+    pub async fn flush_mixer_state(&self) -> Result<()> {
+        self.mixer_state.flush().await
+    }
+
     pub async fn restore_user_mixer(&self) -> Result<()> {
         let _policy_guard = self.mix_policy_lock.lock().await;
         let cfg = self.config()?;

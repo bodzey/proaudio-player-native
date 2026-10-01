@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -150,6 +150,54 @@ impl SourceArbiter {
             .max()
     }
 
+    async fn apply_mix_policy(
+        &self,
+        grouped: &HashMap<String, Vec<StreamState>>,
+        audible: Option<u32>,
+    ) -> Result<()> {
+        let mut mute_error = None;
+        let mut winner = None;
+        // Silence every losing/duplicate stream before enabling the winner.
+        // HashMap iteration order must never decide whether sources overlap.
+        for (key, items) in grouped {
+            for item in items {
+                if Some(item.index) == audible {
+                    winner = Some(item);
+                } else if !item.muted {
+                    if let Err(err) = self.audio.set_sink_input_mute(item.index, true).await {
+                        warn!(stream = item.index, source = key, error = %err, "Не вдалося приглушити неактивний потік");
+                        mute_error.get_or_insert(err);
+                    }
+                }
+            }
+        }
+
+        if let Some(err) = mute_error {
+            // A new receiver may already be audible. Keep it muted while a
+            // failed losing-stream operation is retried on the next event.
+            if let Some(item) = winner {
+                self.audio.set_sink_input_mute(item.index, true).await?;
+            }
+            return Err(err)
+                .context("перемикання джерела відкладено: неактивний потік не приглушено");
+        }
+
+        if let Some(item) = winner {
+            // Receiver gain is unity; user volume and ducking live on MUSIC.
+            // Normalize gain before unmuting so reconnects cannot overshoot.
+            if item.has_volume && item.volume_writable && !item.volume_is_unity() {
+                if let Err(err) = self.audio.set_sink_input_percent(item.index, 100.0).await {
+                    self.audio.set_sink_input_mute(item.index, true).await?;
+                    return Err(err).context("не вдалося встановити unity gain активного потоку");
+                }
+            }
+            if item.muted {
+                self.audio.set_sink_input_mute(item.index, false).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn stop_source(&self, key: &str) -> Result<()> {
         if key == "mpd" {
             let out = command::run("mpc", &["stop"], false, 8).await?;
@@ -226,58 +274,18 @@ impl SourceArbiter {
         self.suppressed_streams
             .retain(|index| present_streams.contains(index));
 
-        let previous = self.winner.clone();
-        self.winner = self.choose_winner(&grouped);
-        let changed = self.winner != previous;
-        if changed {
-            *self.shared_winner.write().await = self.winner.clone();
-            info!(winner = ?self.winner, "Активне джерело змінено");
-        }
-
-        let audible_stream = self
-            .winner
+        let winner = self.choose_winner(&grouped);
+        let audible_stream = winner
             .as_ref()
             .and_then(|winner| grouped.get(winner))
             .and_then(|streams| Self::audible_stream_index(streams, &self.suppressed_streams));
+        self.apply_mix_policy(&grouped, audible_stream).await?;
 
-        for (key, items) in &grouped {
-            let is_winner = Some(key) == self.winner.as_ref();
-            for item in items {
-                // A receiver normally owns one stereo sink-input, but reconnects
-                // can briefly leave duplicates behind. Exactly one programme
-                // stream is allowed through the MUSIC bus so duplicate streams
-                // cannot sum above unity.
-                let is_audible = is_winner && Some(item.index) == audible_stream;
-                let should_mute = !is_audible;
-                if item.muted != should_mute {
-                    if let Err(err) = self
-                        .audio
-                        .set_sink_input_mute(item.index, should_mute)
-                        .await
-                    {
-                        warn!(
-                            stream = item.index,
-                            source = key,
-                            error = %err,
-                            "Не вдалося змінити mute потоку"
-                        );
-                    }
-                }
-
-                // Source receivers are transports, never user gain stages. Keep
-                // the winning stream at unity. MUSIC bus owns user volume and ducking.
-                if is_audible && item.has_volume && item.volume_writable && !item.volume_is_unity()
-                {
-                    if let Err(err) = self.audio.set_sink_input_percent(item.index, 100.0).await {
-                        warn!(
-                            stream = item.index,
-                            source = key,
-                            error = %err,
-                            "Не вдалося встановити unity gain"
-                        );
-                    }
-                }
-            }
+        let changed = winner != self.winner;
+        self.winner = winner;
+        if changed {
+            *self.shared_winner.write().await = self.winner.clone();
+            info!(winner = ?self.winner, "Активне джерело змінено");
         }
 
         if changed && self.winner.is_some() {
@@ -328,39 +336,4 @@ impl SourceArbiter {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn stream(index: u32) -> StreamState {
-        StreamState {
-            index,
-            sink: 1,
-            name: String::new(),
-            properties: HashMap::new(),
-            volumes_percent: vec![100.0, 100.0],
-            muted: false,
-            corked: false,
-            has_volume: true,
-            volume_writable: true,
-        }
-    }
-
-    #[test]
-    fn newest_stream_is_the_only_audible_stream_for_a_source() {
-        let suppressed = HashSet::new();
-        assert_eq!(
-            SourceArbiter::audible_stream_index(&[stream(7), stream(12), stream(9)], &suppressed),
-            Some(12)
-        );
-        assert_eq!(SourceArbiter::audible_stream_index(&[], &suppressed), None);
-    }
-
-    #[test]
-    fn suppressed_stream_is_not_selected_again() {
-        let suppressed = HashSet::from([12]);
-        assert_eq!(
-            SourceArbiter::audible_stream_index(&[stream(7), stream(12), stream(9)], &suppressed),
-            Some(9)
-        );
-    }
-}
+mod tests;

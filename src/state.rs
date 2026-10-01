@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, sleep_until, Instant};
 use tracing::{error, warn};
 
 use crate::atomic_file;
@@ -168,17 +168,65 @@ impl MixerStateStore {
 pub struct MixerStateRuntime {
     store: MixerStateStore,
     state: Arc<Mutex<MixerState>>,
+    persisted: Arc<Mutex<MixerState>>,
     changes: watch::Sender<u64>,
+}
+
+const MIXER_QUIET_PERIOD: Duration = Duration::from_millis(750);
+const MIXER_MAX_WRITE_DELAY: Duration = Duration::from_secs(2);
+const MIXER_WRITE_RETRY: Duration = Duration::from_secs(1);
+
+async fn coalesce_mixer_changes(changes: &mut watch::Receiver<u64>) {
+    let deadline = Instant::now() + MIXER_MAX_WRITE_DELAY;
+    let mut quiet = Instant::now() + MIXER_QUIET_PERIOD;
+    loop {
+        tokio::select! {
+            biased;
+            _ = sleep_until(quiet.min(deadline)) => return,
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                quiet = Instant::now() + MIXER_QUIET_PERIOD;
+            }
+        }
+    }
+}
+
+async fn save_current_mixer(
+    store: MixerStateStore,
+    state: Arc<Mutex<MixerState>>,
+    persisted: Arc<Mutex<MixerState>>,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        // Serialize background writes and shutdown flushes, then snapshot the
+        // current settings so an older queued write cannot undo a newer one.
+        let mut saved = persisted
+            .lock()
+            .map_err(|_| anyhow!("mixer state writer lock poisoned"))?;
+        let current = state
+            .lock()
+            .map_err(|_| anyhow!("mixer state lock poisoned"))?
+            .clone();
+        if current != *saved {
+            store.save(&current)?;
+            *saved = current;
+        }
+        Ok(())
+    })
+    .await?
 }
 
 impl MixerStateRuntime {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let store = MixerStateStore::new(path);
-        let state = Arc::new(Mutex::new(store.load()));
+        let initial = store.load();
+        let state = Arc::new(Mutex::new(initial.clone()));
         let (changes, _) = watch::channel(0_u64);
         Self {
             store,
             state,
+            persisted: Arc::new(Mutex::new(initial)),
             changes,
         }
     }
@@ -228,31 +276,45 @@ impl MixerStateRuntime {
         self.update(|state| state.alert_muted = Some(value));
     }
 
+    pub async fn flush(&self) -> Result<()> {
+        save_current_mixer(
+            self.store.clone(),
+            self.state.clone(),
+            self.persisted.clone(),
+        )
+        .await
+    }
+
     pub fn start_writer(&self) -> JoinHandle<()> {
         let state = self.state.clone();
         let store = self.store.clone();
+        let persisted = self.persisted.clone();
         let mut changes = self.changes.subscribe();
+        changes.mark_changed();
         tokio::spawn(async move {
             loop {
                 if changes.changed().await.is_err() {
                     return;
                 }
 
-                // Browser faders can emit ~30 updates/second. Coalesce them to one
-                // durable write after the control settles so flash/eMMC is not
-                // hammered by UI traffic.
-                sleep(Duration::from_millis(750)).await;
-                while changes.has_changed().unwrap_or(false) {
-                    let _ = changes.borrow_and_update();
-                    sleep(Duration::from_millis(100)).await;
-                }
+                // Coalesce fader traffic, but do not postpone persistence
+                // indefinitely while a client keeps adjusting the controls.
+                coalesce_mixer_changes(&mut changes).await;
 
-                let snapshot = state.lock().map(|value| value.clone()).unwrap_or_default();
-                let writer = store.clone();
-                match tokio::task::spawn_blocking(move || writer.save(&snapshot)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => error!("Не вдалося зберегти mixer state: {err:#}"),
-                    Err(err) => error!("Mixer state writer завершився з помилкою: {err}"),
+                loop {
+                    match save_current_mixer(store.clone(), state.clone(), persisted.clone()).await
+                    {
+                        Ok(()) => break,
+                        Err(err) => {
+                            error!("Не вдалося зберегти mixer state: {err:#}; повторна спроба");
+                            if changes.has_changed().is_err() {
+                                return;
+                            }
+                            // An unavailable/full filesystem must recover without
+                            // requiring another UI update to wake this writer.
+                            sleep(MIXER_WRITE_RETRY).await;
+                        }
+                    }
                 }
             }
         })
@@ -263,6 +325,9 @@ fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let payload = serde_json::to_vec_pretty(value)?;
     atomic_file::write(path, &payload, 0o600)
 }
+
+#[cfg(test)]
+mod mixer_tests;
 
 #[cfg(test)]
 mod tests {

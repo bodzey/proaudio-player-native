@@ -28,9 +28,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinSet;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -189,15 +190,18 @@ async fn normalize_mpd_startup() {
 
 async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     let (store, state, audio, provider) = runtime(config.clone())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
     normalize_mpd_startup().await;
 
-    let _mixer_state_writer = audio.start_mixer_state_writer();
-
-    let alert_controller = AlertController::new(provider, audio.clone(), store, state.clone());
+    let alert_controller =
+        AlertController::new(provider, audio.clone(), store.clone(), state.clone());
     let source_state = Arc::new(RwLock::new(None));
     let arbiter = SourceArbiter::new(config.clone(), audio.clone(), source_state.clone());
     let mixer_audio = audio.clone();
-    let api_controller = ApiController::new(config.clone(), audio, state, source_state)?;
+    let api_controller =
+        ApiController::new(config.clone(), audio.clone(), state.clone(), source_state)?;
+    let mixer_state_writer = audio.start_mixer_state_writer();
 
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
     tasks.spawn(keep_user_mixer_restored(mixer_audio));
@@ -217,16 +221,39 @@ async fn run_daemon(config: Arc<AppConfig>) -> Result<()> {
     }
 
     info!("ProAudio Player native control plane started");
-    let first = tasks
-        .join_next()
-        .await
-        .ok_or_else(|| anyhow!("native daemon не запустив жодного runtime task"))?;
+    let result = tokio::select! {
+        _ = terminate.recv() => {
+            info!("Отримано SIGTERM; завершення native daemon");
+            Ok(())
+        }
+        _ = interrupt.recv() => {
+            info!("Отримано SIGINT; завершення native daemon");
+            Ok(())
+        }
+        first = tasks.join_next() => match first {
+            Some(Ok(Ok(()))) => Err(anyhow!("критичний runtime task неочікувано завершився")),
+            Some(Ok(Err(err))) => Err(err),
+            Some(Err(err)) => Err(anyhow!("критичний runtime task завершився: {err}")),
+            None => Err(anyhow!("native daemon не запустив жодного runtime task")),
+        },
+    };
     tasks.abort_all();
-    match first {
-        Ok(Ok(())) => Err(anyhow!("критичний runtime task неочікувано завершився")),
-        Ok(Err(err)) => Err(err),
-        Err(err) => Err(anyhow!("критичний runtime task завершився: {err}")),
+    while tasks.join_next().await.is_some() {}
+    mixer_state_writer.abort();
+    let _ = mixer_state_writer.await;
+
+    let flushed = timeout(Duration::from_secs(5), async {
+        tokio::try_join!(audio.flush_mixer_state(), store.save_current(state))?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow!("перевищено час збереження стану під час завершення"))
+    .and_then(|result| result);
+    if let Err(err) = &flushed {
+        error!(error = %err, "Не вдалося зберегти стан під час завершення native daemon");
     }
+    result?;
+    flushed
 }
 
 async fn run_once(config: Arc<AppConfig>) -> Result<()> {
