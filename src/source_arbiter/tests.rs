@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use anyhow::bail;
@@ -32,11 +33,16 @@ struct BackendState {
     operations: Vec<Operation>,
     fail_mute: Option<u32>,
     fail_gain: bool,
+    fail_list: bool,
+    reconnect_on_list: bool,
+    reconnect_on_mute: bool,
+    reconnect_on_sink: bool,
 }
 
 struct TestBackend {
     state: Mutex<BackendState>,
     changes: watch::Sender<u64>,
+    epoch: AtomicU64,
 }
 
 impl TestBackend {
@@ -47,6 +53,7 @@ impl TestBackend {
                 ..BackendState::default()
             }),
             changes: watch::channel(0).0,
+            epoch: AtomicU64::new(0),
         }
     }
 }
@@ -56,8 +63,17 @@ impl AudioBackend for TestBackend {
         "test"
     }
 
+    fn connection_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
     fn sink_state<'a>(&'a self, name: &'a str) -> BackendFuture<'a, SinkState> {
         Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            if state.reconnect_on_sink {
+                state.reconnect_on_sink = false;
+                self.epoch.fetch_add(1, Ordering::SeqCst);
+            }
             Ok(SinkState {
                 name: name.into(),
                 index: 1,
@@ -69,7 +85,17 @@ impl AudioBackend for TestBackend {
     }
 
     fn list_sink_inputs(&self) -> BackendFuture<'_, Vec<StreamState>> {
-        Box::pin(async move { Ok(self.state.lock().unwrap().streams.clone()) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            if state.fail_list {
+                bail!("stream query failed");
+            }
+            if state.reconnect_on_list {
+                state.reconnect_on_list = false;
+                self.epoch.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(state.streams.clone())
+        })
     }
 
     fn set_sink_input_percent(&self, index: u32, percent: f64) -> BackendFuture<'_, StreamState> {
@@ -97,7 +123,12 @@ impl AudioBackend for TestBackend {
             }
             let stream = state.streams.iter_mut().find(|s| s.index == index).unwrap();
             stream.muted = muted;
-            Ok(stream.clone())
+            let updated = stream.clone();
+            if state.reconnect_on_mute {
+                state.reconnect_on_mute = false;
+                self.epoch.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(updated)
         })
     }
 
@@ -162,7 +193,7 @@ async fn losers_and_duplicates_are_muted_before_winner_gain_and_unmute() {
     ]);
     let backend = Arc::new(TestBackend::new(vec![stream(1), stream(4), winner]));
     arbiter(backend.clone())
-        .apply_mix_policy(&grouped, Some(5))
+        .apply_mix_policy(&grouped, Some(5), 0)
         .await
         .unwrap();
     let state = backend.state.lock().unwrap();
@@ -220,4 +251,159 @@ async fn failed_gain_normalization_mutes_an_already_audible_winner() {
     );
     assert!(state.streams.iter().all(|s| s.muted));
     assert!(arbiter.winner.is_none());
+}
+
+#[tokio::test]
+async fn reconnect_releases_a_reused_suppressed_stream_index() {
+    let backend = Arc::new(TestBackend::new(vec![stream(1), stream(2)]));
+    let mut arbiter = arbiter(backend.clone());
+    arbiter.reconcile().await.unwrap();
+    assert!(arbiter.suppressed_streams.contains(&1));
+
+    // A fresh server reuses index 1 for a new, initially muted receiver.
+    let mut fresh = stream(1);
+    fresh.muted = true;
+    backend.state.lock().unwrap().streams = vec![fresh];
+    backend.epoch.store(1, Ordering::SeqCst);
+    arbiter.reconcile().await.unwrap();
+
+    assert_eq!(
+        arbiter.shared_winner.read().await.as_deref(),
+        Some("other:1")
+    );
+    assert!(!backend.state.lock().unwrap().streams[0].muted);
+    assert!(arbiter.suppressed_streams.is_empty());
+}
+
+#[tokio::test]
+async fn reconnect_treats_all_receivers_as_new_even_if_indexes_are_reused() {
+    let mut previous = stream(2);
+    previous
+        .properties
+        .insert("application.name".into(), "client-a".into());
+    let backend = Arc::new(TestBackend::new(vec![previous]));
+    let mut arbiter = arbiter(backend.clone());
+    arbiter.reconcile().await.unwrap();
+
+    let mut first = stream(1);
+    first
+        .properties
+        .insert("application.name".into(), "client-a".into());
+    let mut second = stream(2);
+    second
+        .properties
+        .insert("application.name".into(), "client-b".into());
+    backend.state.lock().unwrap().streams = vec![first, second];
+    backend.epoch.store(1, Ordering::SeqCst);
+    arbiter.reconcile().await.unwrap();
+
+    assert_eq!(
+        arbiter.shared_winner.read().await.as_deref(),
+        Some("other:client-b")
+    );
+    let state = backend.state.lock().unwrap();
+    assert!(state.streams[0].muted);
+    assert!(!state.streams[1].muted);
+}
+
+#[tokio::test]
+async fn reconnect_during_discovery_does_not_apply_a_mixed_snapshot() {
+    let backend = Arc::new(TestBackend::new(vec![stream(1), stream(2)]));
+    backend.state.lock().unwrap().reconnect_on_list = true;
+    let mut arbiter = arbiter(backend.clone());
+    assert!(arbiter.reconcile().await.is_err());
+    assert!(backend.state.lock().unwrap().operations.is_empty());
+    assert!(arbiter.shared_winner.read().await.is_none());
+
+    arbiter.reconcile().await.unwrap();
+    assert_eq!(
+        arbiter.shared_winner.read().await.as_deref(),
+        Some("other:2")
+    );
+}
+
+#[tokio::test]
+async fn temporary_query_failure_does_not_revive_a_suppressed_receiver() {
+    let backend = Arc::new(TestBackend::new(vec![stream(1), stream(2)]));
+    let mut arbiter = arbiter(backend.clone());
+    arbiter.reconcile().await.unwrap();
+    backend.state.lock().unwrap().fail_list = true;
+    assert!(arbiter.reconcile().await.is_err());
+    {
+        let mut state = backend.state.lock().unwrap();
+        state.fail_list = false;
+        state.streams.retain(|stream| stream.index == 1);
+    }
+    arbiter.reconcile().await.unwrap();
+    assert!(arbiter.shared_winner.read().await.is_none());
+    assert!(backend.state.lock().unwrap().streams[0].muted);
+}
+
+#[tokio::test]
+async fn reconnect_during_mute_does_not_unmute_a_winner_from_the_old_snapshot() {
+    let mut winner = stream(2);
+    winner.muted = true;
+    let backend = Arc::new(TestBackend::new(vec![stream(1), winner]));
+    backend.state.lock().unwrap().reconnect_on_mute = true;
+    let mut arbiter = arbiter(backend.clone());
+
+    assert!(arbiter.reconcile().await.is_err());
+    assert_eq!(*arbiter.shared_winner.read().await, None);
+    assert!(backend.state.lock().unwrap().streams[1].muted);
+    assert_eq!(
+        backend.state.lock().unwrap().operations,
+        vec![Operation::Mute(1, true)]
+    );
+
+    arbiter.reconcile().await.unwrap();
+    assert_eq!(arbiter.winner.as_deref(), Some("other:2"));
+    assert!(!backend.state.lock().unwrap().streams[1].muted);
+}
+
+#[tokio::test]
+async fn mixer_recovery_detects_a_reconnect_even_when_all_sink_indexes_are_reused() {
+    let backend = Arc::new(TestBackend::new(Vec::new()));
+    let audio = arbiter(backend.clone()).audio;
+    let initial = crate::logical_mixer_topology(&audio).await.unwrap();
+    backend.epoch.fetch_add(1, Ordering::SeqCst);
+    let reconnected = crate::logical_mixer_topology(&audio).await.unwrap();
+
+    assert_eq!(initial, (0, 1, 1, 1));
+    assert_eq!(reconnected, (1, 1, 1, 1));
+}
+
+#[tokio::test]
+async fn mixer_recovery_rejects_a_snapshot_spanning_two_connections() {
+    let backend = Arc::new(TestBackend::new(Vec::new()));
+    let audio = arbiter(backend.clone()).audio;
+    backend.state.lock().unwrap().reconnect_on_sink = true;
+
+    assert!(crate::logical_mixer_topology(&audio).await.is_err());
+    assert_eq!(
+        crate::logical_mixer_topology(&audio).await.unwrap(),
+        (1, 1, 1, 1)
+    );
+}
+
+#[tokio::test]
+async fn reconnect_while_source_status_is_locked_does_not_publish_the_old_selection() {
+    let backend = Arc::new(TestBackend::new(vec![stream(1), stream(2)]));
+    let mut arbiter = arbiter(backend.clone());
+    let shared = arbiter.shared_winner.clone();
+    let held_status = shared.read().await;
+    let task = tokio::spawn(async move {
+        let result = arbiter.reconcile().await;
+        (arbiter, result)
+    });
+    tokio::task::yield_now().await;
+    assert!(backend.state.lock().unwrap().streams[0].muted);
+    backend.epoch.fetch_add(1, Ordering::SeqCst);
+    drop(held_status);
+
+    let (mut arbiter, result) = task.await.unwrap();
+    assert!(result.is_err());
+    assert_eq!(*shared.read().await, None);
+    assert_eq!(arbiter.winner, None);
+    arbiter.reconcile().await.unwrap();
+    assert_eq!(*shared.read().await, Some("other:2".into()));
 }

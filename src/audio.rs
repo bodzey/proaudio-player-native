@@ -196,16 +196,28 @@ impl AudioEngine {
         self.backend.list_sink_inputs().await
     }
 
-    pub async fn set_sink_input_percent(&self, index: u32, percent: f64) -> Result<()> {
+    pub fn connection_epoch(&self) -> u64 {
+        self.backend.connection_epoch()
+    }
+
+    pub fn ensure_connection_epoch(&self, expected: u64) -> Result<()> {
+        self.backend.ensure_connection_epoch(expected)
+    }
+
+    pub async fn set_sink_input_percent(&self, index: u32, percent: f64, epoch: u64) -> Result<()> {
         if !(0.0..=100.0).contains(&percent) {
             bail!("гучність має бути 0..100");
         }
-        self.backend.set_sink_input_percent(index, percent).await?;
+        self.backend
+            .set_sink_input_percent_at_epoch(index, percent, epoch)
+            .await?;
         Ok(())
     }
 
-    pub async fn set_sink_input_mute(&self, index: u32, muted: bool) -> Result<()> {
-        self.backend.set_sink_input_mute(index, muted).await?;
+    pub async fn set_sink_input_mute(&self, index: u32, muted: bool, epoch: u64) -> Result<()> {
+        self.backend
+            .set_sink_input_mute_at_epoch(index, muted, epoch)
+            .await?;
         Ok(())
     }
 

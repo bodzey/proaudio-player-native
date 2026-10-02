@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,9 +22,11 @@ use crate::audio_backend::{AudioBackend, BackendFuture, SinkDescriptor, SinkStat
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const IDLE_INTERVAL: Duration = Duration::from_millis(50);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
 const REQUEST_QUEUE_CAPACITY: usize = 64;
+const REQUEST_TIMEOUT_MESSAGE: &str = "PulseAudio control request timed out";
 
 const STREAM_PROPERTIES: &[&str] = &[
     "application.name",
@@ -79,12 +82,55 @@ enum Request {
     },
 }
 
+impl Request {
+    fn is_cancelled(&self) -> bool {
+        match self {
+            Self::GetSink { reply, .. }
+            | Self::SetSinkPercent { reply, .. }
+            | Self::SetSinkDb { reply, .. }
+            | Self::SetSinkMute { reply, .. } => reply.is_closed(),
+            Self::ListSinks { reply } => reply.is_closed(),
+            Self::ListSinkInputs { reply } => reply.is_closed(),
+            Self::SetSinkInputPercent { reply, .. } | Self::SetSinkInputMute { reply, .. } => {
+                reply.is_closed()
+            }
+        }
+    }
+}
+
+struct PendingRequest {
+    epoch: u64,
+    deadline: Instant,
+    request: Request,
+}
+
+impl PendingRequest {
+    fn into_current(self, epoch: u64) -> Option<Request> {
+        if self.request.is_cancelled() {
+            return None;
+        }
+        if Instant::now() >= self.deadline {
+            reject_request(self.request, REQUEST_TIMEOUT_MESSAGE);
+            return None;
+        }
+        if self.epoch != epoch {
+            reject_request(
+                self.request,
+                "PulseAudio connection changed; retry operation",
+            );
+            return None;
+        }
+        Some(self.request)
+    }
+}
+
 #[derive(Clone)]
 pub struct PulseControl {
-    sender: mpsc::SyncSender<Request>,
+    sender: mpsc::SyncSender<PendingRequest>,
     cache: Arc<RwLock<HashMap<String, SinkState>>>,
     changes: watch::Sender<u64>,
     topology_changes: watch::Sender<u64>,
+    epoch: Arc<AtomicU64>,
 }
 
 impl PulseControl {
@@ -96,6 +142,8 @@ impl PulseControl {
         let worker_changes = changes.clone();
         let (topology_changes, _) = watch::channel(0_u64);
         let worker_topology_changes = topology_changes.clone();
+        let epoch = Arc::new(AtomicU64::new(0));
+        let worker_epoch = epoch.clone();
 
         thread::Builder::new()
             .name("proaudio-pulse-control".into())
@@ -105,6 +153,7 @@ impl PulseControl {
                     worker_cache,
                     worker_changes,
                     worker_topology_changes,
+                    worker_epoch,
                 )
             })
             .context("failed to spawn persistent PulseAudio control thread")?;
@@ -114,6 +163,7 @@ impl PulseControl {
             cache,
             changes,
             topology_changes,
+            epoch,
         })
     }
 
@@ -121,17 +171,32 @@ impl PulseControl {
         &self,
         request: impl FnOnce(oneshot::Sender<Result<T>>) -> Request,
     ) -> Result<T> {
+        self.request_at_epoch(self.connection_epoch(), request)
+            .await
+    }
+
+    async fn request_at_epoch<T>(
+        &self,
+        epoch: u64,
+        request: impl FnOnce(oneshot::Sender<Result<T>>) -> Request,
+    ) -> Result<T> {
+        self.ensure_connection_epoch(epoch)?;
         let (reply, receiver) = oneshot::channel();
         self.sender
-            .try_send(request(reply))
+            .try_send(PendingRequest {
+                epoch,
+                deadline: Instant::now() + REQUEST_TIMEOUT,
+                request: request(reply),
+            })
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => anyhow!("PulseAudio control queue is full"),
                 mpsc::TrySendError::Disconnected(_) => {
                     anyhow!("PulseAudio control worker stopped")
                 }
             })?;
-        receiver
+        tokio::time::timeout(REQUEST_TIMEOUT, receiver)
             .await
+            .map_err(|_| anyhow!(REQUEST_TIMEOUT_MESSAGE))?
             .map_err(|_| anyhow!("PulseAudio control worker dropped reply"))?
     }
 
@@ -201,6 +266,10 @@ impl AudioBackend for PulseControl {
         "pulse"
     }
 
+    fn connection_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
     fn sink_state<'a>(&'a self, name: &'a str) -> BackendFuture<'a, SinkState> {
         Box::pin(PulseControl::sink_state(self, name))
     }
@@ -235,6 +304,44 @@ impl AudioBackend for PulseControl {
 
     fn set_sink_input_mute(&self, index: u32, muted: bool) -> BackendFuture<'_, StreamState> {
         Box::pin(PulseControl::set_sink_input_mute(self, index, muted))
+    }
+
+    fn set_sink_input_percent_at_epoch(
+        &self,
+        index: u32,
+        percent: f64,
+        epoch: u64,
+    ) -> BackendFuture<'_, StreamState> {
+        Box::pin(async move {
+            let state = self
+                .request_at_epoch(epoch, |reply| Request::SetSinkInputPercent {
+                    index,
+                    percent,
+                    reply,
+                })
+                .await?;
+            self.ensure_connection_epoch(epoch)?;
+            Ok(state)
+        })
+    }
+
+    fn set_sink_input_mute_at_epoch(
+        &self,
+        index: u32,
+        muted: bool,
+        epoch: u64,
+    ) -> BackendFuture<'_, StreamState> {
+        Box::pin(async move {
+            let state = self
+                .request_at_epoch(epoch, |reply| Request::SetSinkInputMute {
+                    index,
+                    muted,
+                    reply,
+                })
+                .await?;
+            self.ensure_connection_epoch(epoch)?;
+            Ok(state)
+        })
     }
 
     fn subscribe_changes(&self) -> watch::Receiver<u64> {
@@ -927,10 +1034,11 @@ fn clear_cache(cache: &RwLock<HashMap<String, SinkState>>) {
 }
 
 fn worker_loop(
-    receiver: mpsc::Receiver<Request>,
+    receiver: mpsc::Receiver<PendingRequest>,
     cache: Arc<RwLock<HashMap<String, SinkState>>>,
     changes: watch::Sender<u64>,
     topology_changes: watch::Sender<u64>,
+    epoch: Arc<AtomicU64>,
 ) {
     let mut connection = None;
     let mut next_reconnect = Instant::now();
@@ -940,6 +1048,7 @@ fn worker_loop(
             match PulseConnection::connect(cache.clone(), changes.clone(), topology_changes.clone())
             {
                 Ok(new_connection) => {
+                    epoch.fetch_add(1, Ordering::AcqRel);
                     connection = Some(new_connection);
                     changes.send_modify(|generation| *generation = generation.wrapping_add(1));
                     topology_changes
@@ -970,7 +1079,10 @@ fn worker_loop(
         };
 
         match receiver.recv_timeout(wait) {
-            Ok(request) => {
+            Ok(pending) => {
+                let Some(request) = pending.into_current(epoch.load(Ordering::Acquire)) else {
+                    continue;
+                };
                 if let Some(active) = connection.as_mut() {
                     active.handle(request);
                     if !active.healthy() {
@@ -990,3 +1102,6 @@ fn worker_loop(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

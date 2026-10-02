@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use tokio::sync::watch;
 
 pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
@@ -72,6 +72,16 @@ impl StreamState {
 
 pub trait AudioBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    /// Changes whenever reconnecting invalidates cached sink and stream indices.
+    fn connection_epoch(&self) -> u64 {
+        0
+    }
+    fn ensure_connection_epoch(&self, expected: u64) -> Result<()> {
+        if self.connection_epoch() != expected {
+            bail!("audio backend connection changed; retry operation");
+        }
+        Ok(())
+    }
     fn sink_state<'a>(&'a self, name: &'a str) -> BackendFuture<'a, SinkState>;
     fn list_sinks(&self) -> BackendFuture<'_, Vec<SinkDescriptor>>;
     fn list_sink_inputs(&self) -> BackendFuture<'_, Vec<StreamState>>;
@@ -84,6 +94,32 @@ pub trait AudioBackend: Send + Sync {
     fn set_sink_mute<'a>(&'a self, name: &'a str, muted: bool) -> BackendFuture<'a, SinkState>;
     fn set_sink_input_percent(&self, index: u32, percent: f64) -> BackendFuture<'_, StreamState>;
     fn set_sink_input_mute(&self, index: u32, muted: bool) -> BackendFuture<'_, StreamState>;
+    fn set_sink_input_percent_at_epoch(
+        &self,
+        index: u32,
+        percent: f64,
+        epoch: u64,
+    ) -> BackendFuture<'_, StreamState> {
+        Box::pin(async move {
+            self.ensure_connection_epoch(epoch)?;
+            let state = self.set_sink_input_percent(index, percent).await?;
+            self.ensure_connection_epoch(epoch)?;
+            Ok(state)
+        })
+    }
+    fn set_sink_input_mute_at_epoch(
+        &self,
+        index: u32,
+        muted: bool,
+        epoch: u64,
+    ) -> BackendFuture<'_, StreamState> {
+        Box::pin(async move {
+            self.ensure_connection_epoch(epoch)?;
+            let state = self.set_sink_input_mute(index, muted).await?;
+            self.ensure_connection_epoch(epoch)?;
+            Ok(state)
+        })
+    }
     fn subscribe_changes(&self) -> watch::Receiver<u64>;
     fn subscribe_topology_changes(&self) -> watch::Receiver<u64> {
         self.subscribe_changes()

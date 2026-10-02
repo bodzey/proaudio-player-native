@@ -23,6 +23,7 @@ pub struct SourceArbiter {
     suppressed_streams: HashSet<u32>,
     winner: Option<String>,
     shared_winner: SharedSourceState,
+    connection_epoch: u64,
 }
 
 impl SourceArbiter {
@@ -33,6 +34,7 @@ impl SourceArbiter {
     ) -> Self {
         Self {
             config,
+            connection_epoch: audio.connection_epoch(),
             audio,
             active_streams: HashSet::new(),
             suppressed_streams: HashSet::new(),
@@ -154,6 +156,7 @@ impl SourceArbiter {
         &self,
         grouped: &HashMap<String, Vec<StreamState>>,
         audible: Option<u32>,
+        epoch: u64,
     ) -> Result<()> {
         let mut mute_error = None;
         let mut winner = None;
@@ -164,7 +167,11 @@ impl SourceArbiter {
                 if Some(item.index) == audible {
                     winner = Some(item);
                 } else if !item.muted {
-                    if let Err(err) = self.audio.set_sink_input_mute(item.index, true).await {
+                    if let Err(err) = self
+                        .audio
+                        .set_sink_input_mute(item.index, true, epoch)
+                        .await
+                    {
                         warn!(stream = item.index, source = key, error = %err, "Не вдалося приглушити неактивний потік");
                         mute_error.get_or_insert(err);
                     }
@@ -176,7 +183,9 @@ impl SourceArbiter {
             // A new receiver may already be audible. Keep it muted while a
             // failed losing-stream operation is retried on the next event.
             if let Some(item) = winner {
-                self.audio.set_sink_input_mute(item.index, true).await?;
+                self.audio
+                    .set_sink_input_mute(item.index, true, epoch)
+                    .await?;
             }
             return Err(err)
                 .context("перемикання джерела відкладено: неактивний потік не приглушено");
@@ -186,13 +195,21 @@ impl SourceArbiter {
             // Receiver gain is unity; user volume and ducking live on MUSIC.
             // Normalize gain before unmuting so reconnects cannot overshoot.
             if item.has_volume && item.volume_writable && !item.volume_is_unity() {
-                if let Err(err) = self.audio.set_sink_input_percent(item.index, 100.0).await {
-                    self.audio.set_sink_input_mute(item.index, true).await?;
+                if let Err(err) = self
+                    .audio
+                    .set_sink_input_percent(item.index, 100.0, epoch)
+                    .await
+                {
+                    self.audio
+                        .set_sink_input_mute(item.index, true, epoch)
+                        .await?;
                     return Err(err).context("не вдалося встановити unity gain активного потоку");
                 }
             }
             if item.muted {
-                self.audio.set_sink_input_mute(item.index, false).await?;
+                self.audio
+                    .set_sink_input_mute(item.index, false, epoch)
+                    .await?;
             }
         }
         Ok(())
@@ -254,7 +271,17 @@ impl SourceArbiter {
     }
 
     pub async fn reconcile(&mut self) -> Result<()> {
+        let epoch = self.audio.connection_epoch();
+        if epoch != self.connection_epoch {
+            // Sink-input indices identify streams only within one connection.
+            self.active_streams.clear();
+            self.suppressed_streams.clear();
+            self.winner = None;
+            *self.shared_winner.write().await = None;
+            self.connection_epoch = epoch;
+        }
         let streams = self.streams().await?;
+        self.audio.ensure_connection_epoch(epoch)?;
         let mut grouped: HashMap<String, Vec<StreamState>> = HashMap::new();
         for stream in streams {
             if stream.corked {
@@ -279,17 +306,22 @@ impl SourceArbiter {
             .as_ref()
             .and_then(|winner| grouped.get(winner))
             .and_then(|streams| Self::audible_stream_index(streams, &self.suppressed_streams));
-        self.apply_mix_policy(&grouped, audible_stream).await?;
+        self.apply_mix_policy(&grouped, audible_stream, epoch)
+            .await?;
+        self.audio.ensure_connection_epoch(epoch)?;
 
         let changed = winner != self.winner;
-        self.winner = winner;
         if changed {
-            *self.shared_winner.write().await = self.winner.clone();
+            let mut shared_winner = self.shared_winner.write().await;
+            self.audio.ensure_connection_epoch(epoch)?;
+            self.winner = winner;
+            *shared_winner = self.winner.clone();
             info!(winner = ?self.winner, "Активне джерело змінено");
         }
 
         if changed && self.winner.is_some() {
             for (key, items) in &grouped {
+                self.audio.ensure_connection_epoch(epoch)?;
                 if Some(key) != self.winner.as_ref() {
                     self.suppressed_streams
                         .extend(items.iter().map(|stream| stream.index));
@@ -304,6 +336,7 @@ impl SourceArbiter {
             }
         }
 
+        self.audio.ensure_connection_epoch(epoch)?;
         self.active_streams = present_streams;
         Ok(())
     }

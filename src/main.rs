@@ -32,7 +32,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use alerts::{AlertController, SharedRuntimeState};
@@ -105,14 +105,16 @@ fn runtime(
     Ok((store, state, audio, provider))
 }
 
-async fn logical_mixer_topology(audio: &AudioEngine) -> Result<(u32, u32, u32)> {
+async fn logical_mixer_topology(audio: &AudioEngine) -> Result<(u64, u32, u32, u32)> {
+    let epoch = audio.connection_epoch();
     let cfg = audio.config()?;
     let music = audio.sink_state(&cfg.music_sink).await?;
     let alert = audio.sink_state(&cfg.alert_sink).await?;
     let master = audio
         .master_state(output_router::DEFAULT_MASTER_SINK)
         .await?;
-    Ok((music.index, alert.index, master.index))
+    audio.ensure_connection_epoch(epoch)?;
+    Ok((epoch, music.index, alert.index, master.index))
 }
 
 async fn keep_user_mixer_restored(audio: AudioEngine) -> Result<()> {
@@ -124,10 +126,14 @@ async fn keep_user_mixer_restored(audio: AudioEngine) -> Result<()> {
         match logical_mixer_topology(&audio).await {
             Ok(topology) if restored_topology != Some(topology) => {
                 match audio.restore_user_mixer().await {
-                    Ok(()) => {
+                    Ok(()) if audio.connection_epoch() == topology.0 => {
                         restored_topology = Some(topology);
                         graph_unavailable = false;
                         info!(?topology, "User mixer restored for logical audio graph");
+                    }
+                    Ok(()) => {
+                        restored_topology = None;
+                        debug!("Audio connection changed during mixer restore; retrying");
                     }
                     Err(err) => {
                         restored_topology = None;
